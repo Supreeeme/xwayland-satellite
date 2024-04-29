@@ -1,0 +1,10 @@
+[workspace]
+
+members = [
+	"satellite",
+	"testwl" ,
+	"wl_drm"
+]
+
+resolver = "2"
+
