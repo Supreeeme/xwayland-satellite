@@ -345,9 +345,11 @@ impl ObjectMapExt for ObjectMap {
         let objects = keys.each_ref().map(|key| self[*key].0.take().unwrap());
         let key = self.insert(WrappedObject(None));
         let obj = insert_fn(objects.each_ref(), key);
-        debug_assert!(self[key].0.replace(obj).is_none());
+        let ret = self[key].0.replace(obj);
+        debug_assert!(ret.is_none());
         for (object, key) in objects.into_iter().zip(keys.into_iter()) {
-            debug_assert!(self[key].0.replace(object).is_none());
+            let ret = self[key].0.replace(object);
+            debug_assert!(ret.is_none());
         }
     }
 }
@@ -612,7 +614,8 @@ impl<C: XConnection> ServerState<C> {
             let object = &mut self.objects[key];
             let mut object = object.0.take().unwrap();
             object.handle_event(event, self);
-            debug_assert!(self.objects[key].0.replace(object).is_none());
+            let ret = self.objects[key].0.replace(object);
+            debug_assert!(ret.is_none());
         }
 
         {
