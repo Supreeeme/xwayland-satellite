@@ -295,7 +295,8 @@ pub(crate) enum Object {
     RelativePointer(RelativePointer),
     DmabufFeedback(DmabufFeedback),
     Drm(Drm),
-    XdgOutput(XdgOutput)
+    XdgOutput(XdgOutput),
+    Touch(Touch)
 }
 
 }

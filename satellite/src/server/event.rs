@@ -17,7 +17,7 @@ use wayland_protocols::{
 };
 use wayland_server::protocol::{
     wl_buffer::WlBuffer, wl_keyboard::WlKeyboard, wl_output::WlOutput, wl_pointer::WlPointer,
-    wl_seat::WlSeat,
+    wl_seat::WlSeat, wl_touch::WlTouch,
 };
 
 /// Lord forgive me, I am a sinner, who's probably gonna sin again
@@ -508,6 +508,47 @@ impl HandleEvent for Keyboard {
                 RepeatInfo {
                     rate,
                     delay
+                }
+            ]
+        }
+    }
+}
+
+pub type Touch = GenericObject<WlTouch, client::wl_touch::WlTouch>;
+impl HandleEvent for Touch {
+    type Event = client::wl_touch::Event;
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, state: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: client::wl_touch::Event => [
+                Down {
+                    serial,
+                    time,
+                    |surface| state.get_server_surface_from_client(surface),
+                    id,
+                    x,
+                    y
+                },
+                Up {
+                    serial,
+                    time,
+                    id
+                },
+                Motion {
+                    time,
+                    id,
+                    x,
+                    y
+                },
+                Frame,
+                Cancel,
+                Shape {
+                    id,
+                    major,
+                    minor
+                },
+                Orientation {
+                    id,
+                    orientation
                 }
             ]
         }

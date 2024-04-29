@@ -27,7 +27,7 @@ use wayland_server::{
     protocol::{
         wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
         wl_keyboard::WlKeyboard, wl_output::WlOutput, wl_pointer::WlPointer, wl_seat::WlSeat,
-        wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface,
+        wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface, wl_touch::WlTouch,
     },
     Dispatch, DisplayHandle, GlobalDispatch, Resource,
 };
@@ -313,6 +313,27 @@ impl<C: XConnection> Dispatch<WlKeyboard, ObjectKey> for ServerState<C> {
     }
 }
 
+impl<C: XConnection> Dispatch<WlTouch, ObjectKey> for ServerState<C> {
+    fn request(
+        state: &mut Self,
+        _: &wayland_server::Client,
+        _: &WlTouch,
+        request: <WlTouch as Resource>::Request,
+        key: &ObjectKey,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            Request::<WlTouch>::Release => {
+                let Touch { client, .. }: &_ = state.objects[*key].as_ref();
+                client.release();
+                state.objects.remove(*key);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 impl<C: XConnection> Dispatch<WlSeat, ObjectKey> for ServerState<C> {
     fn request(
         state: &mut Self,
@@ -343,6 +364,16 @@ impl<C: XConnection> Dispatch<WlSeat, ObjectKey> for ServerState<C> {
                         let client = client.get_keyboard(&state.qh, key);
                         let server = data_init.init(id, key);
                         Keyboard { client, server }.into()
+                    });
+            }
+            Request::<WlSeat>::GetTouch { id } => {
+                state
+                    .objects
+                    .insert_from_other_objects([*key], |[seat_obj], key| {
+                        let Seat { client, .. }: &Seat = seat_obj.try_into().unwrap();
+                        let client = client.get_touch(&state.qh, key);
+                        let server = data_init.init(id, key);
+                        Touch { client, server }.into()
                     });
             }
             other => warn!("unhandled seat request: {other:?}"),
