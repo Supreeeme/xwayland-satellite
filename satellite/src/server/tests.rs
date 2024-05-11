@@ -1,5 +1,5 @@
 use super::{ServerState, WindowDims};
-use crate::xstate::SetState;
+use crate::xstate::{SetState, WmName};
 use paste::paste;
 use rustix::event::{poll, PollFd, PollFlags};
 use std::collections::HashMap;
@@ -354,7 +354,7 @@ impl TestFixture {
                 width: 50,
                 height: 50,
             },
-            fullscreen: false
+            fullscreen: false,
         };
 
         let dims = data.dims;
@@ -393,7 +393,7 @@ impl TestFixture {
                 width: 50,
                 height: 50,
             },
-            fullscreen: false
+            fullscreen: false,
         };
 
         let dims = data.dims;
@@ -468,7 +468,7 @@ impl TestFixture {
                 width: 50,
                 height: 50,
             },
-            fullscreen: false
+            fullscreen: false,
         };
         let dims = data.dims;
         self.register_window(window, data);
@@ -861,6 +861,87 @@ fn fullscreen() {
         .contains(&xdg_toplevel::State::Fullscreen));
 }
 
+#[test]
+fn window_title_and_class() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let win = unsafe { Window::new(1) };
+    let (_, id) = f.create_toplevel(&comp, win);
+
+    f.exwayland
+        .set_win_title(win, WmName::WmName("window".into()));
+    f.exwayland.set_win_class(win, "class".into());
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    assert_eq!(data.toplevel().title, Some("window".into()));
+    assert_eq!(data.toplevel().app_id, Some("class".into()));
+
+    f.exwayland
+        .set_win_title(win, WmName::NetWmName("superwindow".into()));
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    assert_eq!(data.toplevel().title, Some("superwindow".into()));
+
+    f.exwayland
+        .set_win_title(win, WmName::WmName("shwindow".into()));
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    assert_eq!(data.toplevel().title, Some("superwindow".into()));
+}
+
+#[test]
+fn window_group_properties() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let prop_win = unsafe { Window::new(1) };
+    f.exwayland.new_window(
+        prop_win,
+        false,
+        super::WindowDims {
+            width: 1,
+            height: 1,
+            ..Default::default()
+        },
+        None,
+    );
+    f.exwayland
+        .set_win_title(prop_win, WmName::WmName("window".into()));
+    f.exwayland.set_win_class(prop_win, "class".into());
+
+    let win = unsafe { Window::new(2) };
+    let data = WindowData {
+        mapped: true,
+        dims: WindowDims {
+            width: 50,
+            height: 50,
+            ..Default::default()
+        },
+        fullscreen: false,
+    };
+
+    let (_, surface) = comp.create_surface();
+    let dims = data.dims;
+    f.register_window(win, data);
+    f.exwayland.new_window(win, false, dims, None);
+    f.exwayland.set_win_hints(
+        win,
+        super::WmHints {
+            window_group: Some(prop_win),
+            ..Default::default()
+        },
+    );
+    f.exwayland.map_window(win);
+    f.exwayland
+        .associate_window(win, surface.id().protocol_id());
+    f.run();
+
+    let id = f.testwl.last_created_surface_id().unwrap();
+    let data = f.testwl.get_surface_data(id).unwrap();
+
+    assert_eq!(data.toplevel().title, Some("window".into()));
+    assert_eq!(data.toplevel().app_id, Some("class".into()));
+}
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}

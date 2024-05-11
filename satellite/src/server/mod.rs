@@ -7,7 +7,7 @@ mod tests;
 use self::event::*;
 use super::FromServerState;
 use crate::clientside::*;
-use crate::xstate::{Atoms, WindowDims, WmNormalHints};
+use crate::xstate::{Atoms, WindowDims, WmHints, WmName, WmNormalHints};
 use crate::XConnection;
 use log::{debug, warn};
 use rustix::event::{poll, PollFd, PollFlags};
@@ -76,8 +76,11 @@ struct WindowData {
     surface_id: u32,
     popup_for: Option<x::Window>,
     dims: WindowDims,
-    hints: Option<WmNormalHints>,
+    size_hints: Option<WmNormalHints>,
     override_redirect: bool,
+    title: Option<WmName>,
+    class: Option<String>,
+    group: Option<x::Window>,
 }
 
 impl WindowData {
@@ -94,8 +97,11 @@ impl WindowData {
             popup_for: parent,
             surface_id: 0,
             dims,
-            hints: None,
+            size_hints: None,
             override_redirect,
+            title: None,
+            class: None,
+            group: None
         }
     }
 }
@@ -482,10 +488,54 @@ impl<C: XConnection> ServerState<C> {
         );
     }
 
-    pub fn set_win_hints(&mut self, window: x::Window, hints: WmNormalHints) {
+    pub fn set_win_title(&mut self, window: x::Window, name: WmName) {
         let win = self.windows.get_mut(&window).unwrap();
 
-        if win.hints.is_none() || *win.hints.as_ref().unwrap() != hints {
+        let new_title = match &mut win.title {
+            Some(w) => {
+                if matches!(w, WmName::NetWmName(_)) && matches!(name, WmName::WmName(_)) {
+                    debug!("skipping setting window name to {name:?} because a _NET_WM_NAME title is already set");
+                    None
+                } else {
+                    *w = name;
+                    Some(w)
+                }
+            }
+            None => Some(win.title.insert(name)),
+        };
+
+        let Some(title) = new_title else {
+            return;
+        };
+        if let Some(key) = win.surface_key {
+            let surface: &SurfaceData = self.objects[key].as_ref();
+            if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
+                data.toplevel.set_title(title.name().to_string());
+            }
+        }
+    }
+
+    pub fn set_win_class(&mut self, window: x::Window, class: String) {
+        let win = self.windows.get_mut(&window).unwrap();
+
+        let class = win.class.insert(class);
+        if let Some(key) = win.surface_key {
+            let surface: &SurfaceData = self.objects[key].as_ref();
+            if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
+                data.toplevel.set_app_id(class.to_string());
+            }
+        }
+    }
+
+    pub fn set_win_hints(&mut self, window: x::Window, hints: WmHints) {
+        let win = self.windows.get_mut(&window).unwrap();
+        win.group = hints.window_group;
+    }
+
+    pub fn set_size_hints(&mut self, window: x::Window, hints: WmNormalHints) {
+        let win = self.windows.get_mut(&window).unwrap();
+
+        if win.size_hints.is_none() || *win.size_hints.as_ref().unwrap() != hints {
             debug!("setting {window:?} hints {hints:?}");
             if let Some(surface) = win.surface_key {
                 let surface: &SurfaceData = self.objects[surface].as_ref();
@@ -498,7 +548,7 @@ impl<C: XConnection> ServerState<C> {
                     }
                 }
             }
-            win.hints = Some(hints);
+            win.size_hints = Some(hints);
         }
     }
 
@@ -720,14 +770,31 @@ impl<C: XConnection> ServerState<C> {
         xdg: XdgSurface,
     ) -> ToplevelData {
         debug!("creating toplevel for {:?}", window.window);
+
         let toplevel = xdg.get_toplevel(&self.qh, surface_key);
-        if let Some(hints) = &window.hints {
+        if let Some(hints) = &window.size_hints {
             if let Some(min) = &hints.min_size {
                 toplevel.set_min_size(min.width, min.height);
             }
             if let Some(max) = &hints.max_size {
                 toplevel.set_max_size(max.width, max.height);
             }
+        }
+
+        let group = window.group.and_then(|win| self.windows.get(&win));
+        if let Some(class) = window
+            .class
+            .as_ref()
+            .or(group.and_then(|g| g.class.as_ref()))
+        {
+            toplevel.set_app_id(class.to_string());
+        }
+        if let Some(title) = window
+            .title
+            .as_ref()
+            .or(group.and_then(|g| g.title.as_ref()))
+        {
+            toplevel.set_title(title.name().to_string());
         }
 
         ToplevelData {

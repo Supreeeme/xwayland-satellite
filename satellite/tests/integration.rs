@@ -30,6 +30,8 @@ xcb::atoms_struct! {
     struct Atoms {
         wm_protocols => b"WM_PROTOCOLS",
         wm_delete_window => b"WM_DELETE_WINDOW",
+        wm_class => b"WM_CLASS",
+        wm_name => b"WM_NAME",
     }
 }
 
@@ -108,7 +110,7 @@ impl Fixture {
         }
     }
 
-    fn create_window(
+    fn create_and_map_window(
         &mut self,
         connection: &xcb::Connection,
         override_redirect: bool,
@@ -155,7 +157,7 @@ impl Fixture {
         width: u16,
         height: u16,
     ) -> (x::Window, testwl::SurfaceId) {
-        let (window, surface) = self.create_window(connection, false, 0, 0, width, height);
+        let (window, surface) = self.create_and_map_window(connection, false, 0, 0, width, height);
         let data = self
             .testwl
             .get_surface_data(surface)
@@ -258,6 +260,39 @@ fn toplevel_flow() {
     let mut f = Fixture::new();
     let mut connection = Connection::new();
     let (window, surface) = f.create_toplevel(&connection.inner, 200, 200);
+
+    connection
+        .inner
+        .send_and_check_request(&x::ChangeProperty {
+            mode: x::PropMode::Replace,
+            window,
+            r#type: x::ATOM_STRING,
+            property: connection.atoms.wm_name,
+            data: c"window".to_bytes(),
+        })
+        .unwrap();
+
+    connection
+        .inner
+        .send_and_check_request(&x::ChangeProperty {
+            mode: x::PropMode::Replace,
+            window,
+            r#type: x::ATOM_STRING,
+            property: connection.atoms.wm_class,
+            data: &[
+                c"instance".to_bytes_with_nul(),
+                c"class".to_bytes_with_nul(),
+            ]
+            .concat(),
+        })
+        .unwrap();
+
+    f.wait_and_dispatch();
+
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert_eq!(data.toplevel().title, Some("window".into()));
+    assert_eq!(data.toplevel().app_id, Some("class".into()));
+
     f.close_toplevel(&mut connection, window, surface);
 
     // Simulate killing client

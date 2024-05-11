@@ -91,6 +91,8 @@ pub struct Toplevel {
     pub max_size: Option<Vec2>,
     pub states: Vec<xdg_toplevel::State>,
     pub closed: bool,
+    pub title: Option<String>,
+    pub app_id: Option<String>
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -486,6 +488,21 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                 state.configure_toplevel(*surface_id, 100, 100, states);
             }
             xdg_toplevel::Request::Destroy => {}
+            xdg_toplevel::Request::SetTitle { title } => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
+                    unreachable!();
+                };
+                toplevel.title = title.into();
+            }
+            xdg_toplevel::Request::SetAppId { app_id } => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
+                    unreachable!();
+                };
+                toplevel.app_id = app_id.into();
+
+            }
             other => todo!("unhandled request {other:?}"),
         }
     }
@@ -513,6 +530,8 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                     max_size: None,
                     states: Vec::new(),
                     closed: false,
+                    title: None,
+                    app_id: None
                 };
                 let data = state.surfaces.get_mut(surface_id).unwrap();
                 data.role = Some(SurfaceRole::Toplevel(t));

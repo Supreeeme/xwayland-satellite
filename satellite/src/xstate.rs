@@ -1,5 +1,6 @@
 use bitflags::bitflags;
 use log::{debug, trace, warn};
+use std::ffi::CString;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::sync::Arc;
 use xcb::{x, Xid, XidNew};
@@ -9,7 +10,21 @@ pub struct XState {
     pub connection: Arc<xcb::Connection>,
     root: x::Window,
     pub atoms: Atoms,
-    window_types: WindowTypes,
+}
+
+#[derive(Debug)]
+pub enum WmName {
+    WmName(String),
+    NetWmName(String),
+}
+
+impl WmName {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::WmName(n) => n,
+            Self::NetWmName(n) => n,
+        }
+    }
 }
 
 impl XState {
@@ -32,7 +47,6 @@ impl XState {
 
         let atoms = Atoms::intern_all(&connection).unwrap();
         trace!("atoms: {atoms:#?}");
-        let window_types = WindowTypes::new(&connection);
 
         // This makes Xwayland spit out damage tracking
         connection
@@ -56,7 +70,6 @@ impl XState {
             connection,
             root,
             atoms,
-            window_types,
         };
         r.create_ewmh_window();
         r
@@ -97,7 +110,7 @@ impl XState {
         self.set_root_property(
             self.atoms.supported,
             x::ATOM_ATOM,
-            &[self.atoms.active_win, self.atoms.client_list],
+            &[self.atoms.active_win],
         );
 
         self.connection
@@ -114,7 +127,7 @@ impl XState {
             .send_and_check_request(&x::ChangeProperty {
                 mode: x::PropMode::Replace,
                 window,
-                property: self.atoms.wm_name,
+                property: self.atoms.net_wm_name,
                 r#type: x::ATOM_STRING,
                 data: b"exwayland wm",
             })
@@ -244,10 +257,16 @@ impl XState {
         event: x::PropertyNotifyEvent,
         server_state: &mut super::RealServerState,
     ) {
+        if event.state() != x::Property::NewValue {
+            println!("ignoring non newvalue for property {:?}", event.atom());
+            return;
+        }
+
+        let window = event.window();
         let get_prop = |r#type, long_length| {
             self.connection
                 .wait_for_reply(self.connection.send_request(&x::GetProperty {
-                    window: event.window(),
+                    window,
                     property: event.atom(),
                     r#type,
                     long_offset: 0,
@@ -255,23 +274,14 @@ impl XState {
                     delete: false,
                 }))
         };
-        if event.state() != x::Property::NewValue {
-            return;
-        }
 
         match event.atom() {
-            x if x == self.atoms.wm_window_type => {
-                let Ok(prop) = get_prop(x::ATOM_ATOM, 8) else {
-                    return;
-                };
-                let types: &[x::Atom] = prop.value();
-                let win_type = types.iter().find_map(|a| self.window_types.get_type(*a));
-                debug!(
-                    "set {:?} type to {} ({})",
-                    event.window(),
-                    win_type.unwrap_or("[Unknown/Unrecognized]".to_string()),
-                    types.len()
-                );
+            x if x == self.atoms.wm_hints => {
+                let prop = get_prop(self.atoms.wm_hints, 9).unwrap();
+                let data: &[u32] = prop.value();
+                let hints = WmHints::from(data);
+                debug!("wm hints: {hints:?}");
+                server_state.set_win_hints(event.window(), hints);
             }
             x if x == x::ATOM_WM_NORMAL_HINTS => {
                 let Ok(prop) = get_prop(x::ATOM_WM_SIZE_HINTS, 9) else {
@@ -279,22 +289,47 @@ impl XState {
                 };
                 let data: &[u32] = prop.value();
                 let hints = WmNormalHints::from(data);
-                server_state.set_win_hints(event.window(), hints);
+                server_state.set_size_hints(window, hints);
+            }
+            x if x == x::ATOM_WM_NAME || x == self.atoms.net_wm_name => {
+                let ty = if x == x::ATOM_WM_NAME {
+                    x::ATOM_STRING
+                } else {
+                    self.atoms.utf8_string
+                };
+                let prop = get_prop(ty, 256).unwrap();
+                let data: &[u8] = prop.value();
+                let name = String::from_utf8(data.to_vec()).unwrap();
+                debug!("{:?} named: {name}", window);
+                let name = if x == x::ATOM_WM_NAME {
+                    WmName::WmName(name)
+                } else {
+                    WmName::NetWmName(name)
+                };
+                server_state.set_win_title(window, name);
+            }
+            x if x == x::ATOM_WM_CLASS => {
+                let prop = get_prop(x::ATOM_STRING, 256).unwrap();
+                let data: &[u8] = prop.value();
+                // wm class is instance + class - ignore instance
+                let class_start = data.iter().copied().position(|b| b == 0u8).unwrap() + 1;
+                let data = data[class_start..].to_vec();
+                let class = CString::from_vec_with_nul(data).unwrap();
+                debug!("{:?} class: {class:?}", window);
+                server_state.set_win_class(window, class.to_string_lossy().to_string());
             }
             _ => {
-                let prop = self
-                    .connection
-                    .wait_for_reply(
-                        self.connection
-                            .send_request(&x::GetAtomName { atom: event.atom() }),
-                    )
-                    .unwrap();
+                if log::log_enabled!(log::Level::Debug) {
+                    let prop = self
+                        .connection
+                        .wait_for_reply(
+                            self.connection
+                                .send_request(&x::GetAtomName { atom: event.atom() }),
+                        )
+                        .unwrap();
 
-                debug!(
-                    "changed property {:?} for {:?}",
-                    prop.name(),
-                    event.window()
-                );
+                    debug!("changed property {:?} for {:?}", prop.name(), window);
+                }
             }
         }
     }
@@ -309,14 +344,14 @@ xcb::atoms_struct! {
         pub wm_transient_for => b"WM_TRANSIENT_FOR" only_if_exists = false,
         pub wm_hints => b"WM_HINTS" only_if_exists = false,
         pub wm_check => b"_NET_SUPPORTING_WM_CHECK" only_if_exists = false,
-        pub wm_name => b"_NET_WM_NAME" only_if_exists = false,
-        pub wm_window_type => b"_NET_WM_WINDOW_TYPE" only_if_exists = false,
+        pub net_wm_name => b"_NET_WM_NAME" only_if_exists = false,
         pub wm_pid => b"_NET_WM_PID" only_if_exists = false,
         pub net_wm_state => b"_NET_WM_STATE" only_if_exists = false,
         pub wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
         pub active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         pub client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
         pub supported => b"_NET_SUPPORTED" only_if_exists = false,
+        pub utf8_string => b"UTF8_STRING" only_if_exists = false,
     }
 }
 
@@ -327,25 +362,6 @@ xcb::atoms_struct! {
         pub splash => b"_NET_WM_WINDOW_TYPE_SPLASH" only_if_exists = false,
         pub menu => b"_NET_WM_WINDOW_TYPE_MENU" only_if_exists = false,
         pub utility => b"_NET_WM_WINDOW_TYPE_UTILITY" only_if_exists = false,
-    }
-}
-
-impl WindowTypes {
-    pub fn new(connection: &xcb::Connection) -> Self {
-        let r = Self::intern_all(connection).unwrap();
-        assert_ne!(r.normal, x::ATOM_NONE);
-        assert_ne!(r.dialog, x::ATOM_NONE);
-        assert_ne!(r.utility, x::ATOM_NONE);
-        r
-    }
-    pub fn get_type(&self, atom: x::Atom) -> Option<String> {
-        match atom {
-            x if x == self.normal => Some("Normal".to_string()),
-            x if x == self.dialog => Some("Dialog".to_string()),
-            x if x == self.utility => Some("Utility".to_string()),
-            x if x == self.menu => Some("Menu".to_string()),
-            _ => None,
-        }
     }
 }
 
@@ -361,16 +377,16 @@ bitflags! {
     /// From ICCCM spec.
     /// https://tronche.com/gui/x/icccm/sec-4.html#s-4.1.2.3
     pub struct WmSizeHintsFlags: u32 {
-        const UserPosition = 1;
-        const UserSize = 2;
-        const ProgramPosition = 4;
-        const ProgramSize = 8;
         const ProgramMinSize = 16;
         const ProgramMaxSize = 32;
-        const ProgramResizeIncrement = 64;
-        const ProgramAspect = 128;
-        const ProgramBaseSize = 256;
-        const ProgramWinGravity = 512;
+    }
+}
+
+bitflags! {
+    /// https://tronche.com/gui/x/icccm/sec-4.html#s-4.1.2.4
+    pub struct WmHintsFlags: u32 {
+        const Input = 1;
+        const WindowGroup = 64;
     }
 }
 
@@ -384,6 +400,49 @@ pub struct WinSize {
 pub struct WmNormalHints {
     pub min_size: Option<WinSize>,
     pub max_size: Option<WinSize>,
+}
+
+impl From<&[u32]> for WmNormalHints {
+    fn from(value: &[u32]) -> Self {
+        let mut ret = Self::default();
+        let flags = WmSizeHintsFlags::from_bits_truncate(value[0]);
+
+        if flags.contains(WmSizeHintsFlags::ProgramMinSize) {
+            ret.min_size = Some(WinSize {
+                width: value[5] as _,
+                height: value[6] as _,
+            });
+        }
+
+        if flags.contains(WmSizeHintsFlags::ProgramMaxSize) {
+            ret.max_size = Some(WinSize {
+                width: value[7] as _,
+                height: value[8] as _,
+            });
+        }
+
+        ret
+    }
+}
+
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct WmHints {
+    pub input: Option<bool>,
+    pub window_group: Option<x::Window>,
+}
+
+impl From<&[u32]> for WmHints {
+    fn from(value: &[u32]) -> Self {
+        let mut ret = Self::default();
+        let flags = WmHintsFlags::from_bits_truncate(value[0]);
+
+        if flags.contains(WmHintsFlags::WindowGroup) {
+            let window = unsafe { x::Window::new(value[8]) };
+            ret.window_group = Some(window);
+        }
+
+        ret
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -402,29 +461,6 @@ impl TryFrom<u32> for SetState {
             2 => Ok(Self::Toggle),
             _ => Err(()),
         }
-    }
-}
-
-impl From<&[u32]> for WmNormalHints {
-    fn from(value: &[u32]) -> Self {
-        let mut ret = Self::default();
-        let flags = WmSizeHintsFlags::from_bits(value[0]).unwrap();
-
-        if flags.contains(WmSizeHintsFlags::ProgramMinSize) {
-            ret.min_size = Some(WinSize {
-                width: value[5] as _,
-                height: value[6] as _,
-            });
-        }
-
-        if flags.contains(WmSizeHintsFlags::ProgramMaxSize) {
-            ret.max_size = Some(WinSize {
-                width: value[7] as _,
-                height: value[8] as _,
-            });
-        }
-
-        ret
     }
 }
 
