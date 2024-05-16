@@ -2,19 +2,73 @@ use rustix::event::{poll, PollFd, PollFlags};
 use std::mem::ManuallyDrop;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
-use std::sync::mpsc;
-use std::sync::Once;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, Once,
+};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wayland_protocols::xdg::shell::server::xdg_toplevel;
 use wayland_server::Resource;
 use xcb::{x, Xid};
 use xwayland_satellite as xwls;
 
+#[derive(Default)]
+struct TestDataInner {
+    server_created: AtomicBool,
+    server_connected: AtomicBool,
+    display: Mutex<Option<String>>,
+    server: Mutex<Option<UnixStream>>,
+}
+
+#[derive(Default, Clone)]
+struct TestData(Arc<TestDataInner>);
+
+impl TestData {
+    fn new(server: UnixStream) -> Self {
+        Self(Arc::new(TestDataInner {
+            server: Mutex::new(server.into()),
+            ..Default::default()
+        }))
+    }
+}
+
+impl std::ops::Deref for TestData {
+    type Target = Arc<TestDataInner>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl xwls::RunData for TestData {
+    fn created_server(&self) {
+        self.server_created.store(true, Ordering::Relaxed);
+    }
+
+    fn connected_server(&self) {
+        self.server_connected.store(true, Ordering::Relaxed);
+    }
+
+    fn xwayland_ready(&self, display: String) {
+        *self.display.lock().unwrap() = Some(display);
+    }
+
+    fn display(&self) -> Option<&str> {
+        None
+    }
+
+    fn server(&self) -> Option<UnixStream> {
+        let mut server = self.server.lock().unwrap();
+        assert!(server.is_some());
+        server.take()
+    }
+}
+
 struct Fixture {
     testwl: testwl::Server,
     thread: ManuallyDrop<JoinHandle<Option<()>>>,
     pollfd: PollFd<'static>,
+    display: String,
 }
 
 impl Drop for Fixture {
@@ -26,19 +80,9 @@ impl Drop for Fixture {
     }
 }
 
-xcb::atoms_struct! {
-    struct Atoms {
-        wm_protocols => b"WM_PROTOCOLS",
-        wm_delete_window => b"WM_DELETE_WINDOW",
-        wm_class => b"WM_CLASS",
-        wm_name => b"WM_NAME",
-    }
-}
-
-static INIT: Once = Once::new();
 impl Fixture {
-    #[track_caller]
     fn new() -> Self {
+        static INIT: Once = Once::new();
         INIT.call_once(|| {
             env_logger::builder()
                 .is_test(true)
@@ -49,9 +93,9 @@ impl Fixture {
         let (a, b) = UnixStream::pair().unwrap();
         let mut testwl = testwl::Server::new(false);
         testwl.connect(a);
-
-        let (send, recv) = mpsc::channel();
-        let thread = std::thread::spawn(move || xwls::main(Some(b), Some(send)));
+        let our_data = TestData::new(b);
+        let data = our_data.clone();
+        let thread = std::thread::spawn(move || xwls::main(data));
 
         // wait for connection
         let fd = unsafe { BorrowedFd::borrow_raw(testwl.poll_fd().as_raw_fd()) };
@@ -59,38 +103,46 @@ impl Fixture {
         assert!(poll(&mut [pollfd.clone()], 100).unwrap() > 0);
         testwl.dispatch();
 
-        let wait = Duration::from_secs(1);
-        assert_eq!(
-            recv.recv_timeout(wait),
-            Ok(xwls::StateEvent::CreatedServer),
+        let try_bool_timeout = |b: &AtomicBool| {
+            let timeout = Duration::from_secs(1);
+            let mut res = b.load(Ordering::Relaxed);
+            let start = Instant::now();
+            while !res && start.elapsed() < timeout {
+                res = b.load(Ordering::Relaxed);
+            }
+
+            res
+        };
+        assert!(
+            try_bool_timeout(&our_data.server_created),
             "creating server"
         );
-        assert_eq!(
-            recv.recv_timeout(wait),
-            Ok(xwls::StateEvent::ConnectedServer),
+        assert!(
+            try_bool_timeout(&our_data.server_connected),
             "connecting to server"
         );
 
         let mut f = [pollfd.clone()];
         let start = std::time::Instant::now();
         // Give Xwayland time to do its thing
-        while start.elapsed() < Duration::from_millis(500) {
+
+        let mut ready = our_data.display.lock().unwrap().is_some();
+        while !ready && start.elapsed() < Duration::from_millis(3000) {
             let n = poll(&mut f, 100).unwrap();
             if n > 0 {
                 testwl.dispatch();
             }
+            ready = our_data.display.lock().unwrap().is_some();
         }
 
-        assert_eq!(
-            recv.try_recv(),
-            Ok(xwls::StateEvent::XwaylandReady),
-            "connecting to xwayland"
-        );
+        assert!(ready, "connecting to xwayland");
 
+        let display = our_data.display.lock().unwrap().take().unwrap();
         Self {
             testwl,
             thread: ManuallyDrop::new(thread),
             pollfd,
+            display,
         }
     }
 
@@ -217,6 +269,15 @@ impl Fixture {
     }
 }
 
+xcb::atoms_struct! {
+    struct Atoms {
+        wm_protocols => b"WM_PROTOCOLS",
+        wm_delete_window => b"WM_DELETE_WINDOW",
+        wm_class => b"WM_CLASS",
+        wm_name => b"WM_NAME",
+    }
+}
+
 struct Connection {
     inner: xcb::Connection,
     pollfd: PollFd<'static>,
@@ -231,10 +292,8 @@ impl std::ops::Deref for Connection {
 }
 
 impl Connection {
-    fn new() -> Self {
-        // TODO: this will not work if there is an Xserver at 1024, or whenever we add multiple
-        // tests.
-        let (inner, _) = xcb::Connection::connect(Some(":0")).unwrap();
+    fn new(display: &str) -> Self {
+        let (inner, _) = xcb::Connection::connect(Some(display)).unwrap();
         let fd = unsafe { BorrowedFd::borrow_raw(inner.as_raw_fd()) };
         let pollfd = PollFd::from_borrowed_fd(fd, PollFlags::IN);
         let atoms = Atoms::intern_all(&inner).unwrap();
@@ -258,7 +317,7 @@ impl Connection {
 #[test]
 fn toplevel_flow() {
     let mut f = Fixture::new();
-    let mut connection = Connection::new();
+    let mut connection = Connection::new(&f.display);
     let (window, surface) = f.create_toplevel(&connection.inner, 200, 200);
 
     connection

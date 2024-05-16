@@ -18,7 +18,6 @@ wayland-scanner = "0.31.1"
 wayland-server = "0.31.1"
 xcb = { version = "1.3.0", features = ["composite"] }
 wl_drm = { path = "../wl_drm" }
-signal-hook = "0.3.17"
 libc = "0.2.153"
 log = "0.4.21"
 env_logger = "0.11.3"
