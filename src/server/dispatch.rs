@@ -25,9 +25,18 @@ use wayland_protocols::{
 };
 use wayland_server::{
     protocol::{
-        wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
-        wl_keyboard::WlKeyboard, wl_output::WlOutput, wl_pointer::WlPointer, wl_seat::WlSeat,
-        wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface, wl_touch::WlTouch,
+        wl_buffer::WlBuffer,
+        wl_callback::WlCallback,
+        wl_compositor::WlCompositor,
+        wl_keyboard::WlKeyboard,
+        wl_output::WlOutput,
+        wl_pointer::WlPointer,
+        wl_region::{self, WlRegion},
+        wl_seat::WlSeat,
+        wl_shm::WlShm,
+        wl_shm_pool::WlShmPool,
+        wl_surface::WlSurface,
+        wl_touch::WlTouch,
     },
     Dispatch, DisplayHandle, GlobalDispatch, Resource,
 };
@@ -114,7 +123,31 @@ impl<C: XConnection> Dispatch<WlSurface, ObjectKey> for ServerState<C> {
             Request::<WlSurface>::SetBufferScale { scale } => {
                 surface.client.set_buffer_scale(scale);
             }
+            Request::<WlSurface>::SetInputRegion { region } => {
+                let region = region.as_ref().map(|r| r.data().unwrap());
+                surface.client.set_input_region(region);
+            }
             other => warn!("unhandled surface request: {other:?}"),
+        }
+    }
+}
+
+impl<C: XConnection> Dispatch<WlRegion, client::wl_region::WlRegion> for ServerState<C> {
+    fn request(
+        _: &mut Self,
+        _: &wayland_server::Client,
+        _: &WlRegion,
+        request: <WlRegion as Resource>::Request,
+        client: &client::wl_region::WlRegion,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        simple_event_shunt! {
+            client, request: wl_region::Request => [
+                Add { x, y, width, height },
+                Subtract { x, y, width, height },
+                Destroy
+            ]
         }
     }
 }
@@ -167,6 +200,10 @@ impl<C: XConnection>
                         state.create_role_window(win, key);
                     }
                 }
+            }
+            Request::<WlCompositor>::CreateRegion { id } => {
+                let c_region = client.create_region(&state.qh, ());
+                data_init.init(id, c_region);
             }
             other => {
                 warn!("unhandled wlcompositor request: {other:?}");

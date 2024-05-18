@@ -6,7 +6,7 @@ use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
     wl_keyboard::WlKeyboard, wl_output::WlOutput, wl_pointer::WlPointer, wl_registry::WlRegistry,
     wl_seat::WlSeat, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface,
-    wl_touch::WlTouch,
+    wl_touch::WlTouch, wl_region::WlRegion
 };
 use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 use wayland_protocols::wp::relative_pointer::zv1::client::{
@@ -92,6 +92,7 @@ impl ClientState {
 pub type Event<T> = <T as Proxy>::Event;
 
 delegate_noop!(Globals: WlCompositor);
+delegate_noop!(Globals: WlRegion);
 delegate_noop!(Globals: ignore WlShm);
 delegate_noop!(Globals: ignore ZwpLinuxDmabufV1);
 delegate_noop!(Globals: ZwpRelativePointerManagerV1);
