@@ -118,7 +118,7 @@ impl Compositor {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct WindowData {
     mapped: bool,
     fullscreen: bool,
@@ -135,7 +135,7 @@ impl FakeXConnection {
     fn window(&mut self, window: Window) -> &mut WindowData {
         self.windows
             .get_mut(&window)
-            .expect("Unknown window: {window:?}")
+            .expect(&format!("Unknown window: {window:?}"))
     }
 }
 

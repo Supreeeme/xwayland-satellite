@@ -1,3 +1,4 @@
+use crate::server::WindowAttributes;
 use bitflags::bitflags;
 use log::{debug, trace, warn};
 use std::ffi::CString;
@@ -10,6 +11,39 @@ pub struct XState {
     pub connection: Arc<xcb::Connection>,
     root: x::Window,
     pub atoms: Atoms,
+}
+
+/// Essentially a trait alias.
+trait PropertyResolver {
+    type Output;
+    fn resolve(self, reply: x::GetPropertyReply) -> Self::Output;
+}
+impl<T, Output> PropertyResolver for T
+where
+    T: FnOnce(x::GetPropertyReply) -> Output,
+{
+    type Output = Output;
+    fn resolve(self, reply: x::GetPropertyReply) -> Self::Output {
+        (self)(reply)
+    }
+}
+
+struct PropertyCookieWrapper<'a, F: PropertyResolver> {
+    connection: &'a xcb::Connection,
+    cookie: x::GetPropertyCookie,
+    resolver: F,
+}
+
+impl<F: PropertyResolver> PropertyCookieWrapper<'_, F> {
+    /// Get the result from our property cookie.
+    fn resolve(self) -> Option<F::Output> {
+        let reply = self.connection.wait_for_reply(self.cookie).unwrap();
+        if reply.r#type() == x::ATOM_NONE {
+            None
+        } else {
+            Some(self.resolver.resolve(reply))
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -107,11 +141,7 @@ impl XState {
 
         self.set_root_property(self.atoms.wm_check, x::ATOM_WINDOW, &[window]);
         self.set_root_property(self.atoms.active_win, x::ATOM_WINDOW, &[x::Window::none()]);
-        self.set_root_property(
-            self.atoms.supported,
-            x::ATOM_ATOM,
-            &[self.atoms.active_win],
-        );
+        self.set_root_property(self.atoms.supported, x::ATOM_ATOM, &[self.atoms.active_win]);
 
         self.connection
             .send_and_check_request(&x::ChangeProperty {
@@ -140,20 +170,6 @@ impl XState {
             match event {
                 xcb::Event::X(x::Event::CreateNotify(e)) => {
                     debug!("new window: {:?}", e);
-                    match self
-                        .connection
-                        .send_and_check_request(&x::ChangeWindowAttributes {
-                            window: e.window(),
-                            value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
-                        }) {
-                        // This can sometimes fail if the window was created and then immediately
-                        // destroyed.
-                        Ok(()) | Err(xcb::ProtocolError::X(x::Error::Window(_), _)) => {}
-                        Err(other) => {
-                            panic!("error subscribing to property change on new window: {other:?}")
-                        }
-                    }
-
                     let parent = e.parent();
                     let parent = if parent.is_none() || parent == self.root {
                         None
@@ -162,6 +178,22 @@ impl XState {
                     };
                     server_state.new_window(e.window(), e.override_redirect(), (&e).into(), parent);
                 }
+                xcb::Event::X(x::Event::ReparentNotify(e)) => {
+                    debug!("reparent event: {e:?}");
+                    if e.parent() == self.root {
+                        let attrs = self.get_window_attributes(e.window());
+                        server_state.new_window(
+                            e.window(),
+                            attrs.override_redirect,
+                            attrs.dims,
+                            None,
+                        );
+                        self.handle_window_attributes(server_state, e.window(), attrs);
+                    } else {
+                        debug!("destroying window since its parent is no longer root!");
+                        server_state.destroy_window(e.window());
+                    }
+                }
                 xcb::Event::X(x::Event::MapRequest(e)) => {
                     debug!("requested to map {:?}", e.window());
                     self.connection
@@ -169,7 +201,15 @@ impl XState {
                         .unwrap();
                 }
                 xcb::Event::X(x::Event::MapNotify(e)) => {
+                    let attrs = self.get_window_attributes(e.window());
+                    self.handle_window_attributes(server_state, e.window(), attrs);
                     server_state.map_window(e.window());
+                    self.connection
+                        .send_and_check_request(&x::ChangeWindowAttributes {
+                            window: e.window(),
+                            value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
+                        })
+                        .unwrap();
                 }
                 xcb::Event::X(x::Event::ConfigureNotify(e)) => {
                     server_state.reconfigure_window(e);
@@ -177,6 +217,17 @@ impl XState {
                 xcb::Event::X(x::Event::UnmapNotify(e)) => {
                     trace!("unmap event: {:?}", e.event());
                     server_state.unmap_window(e.window());
+                    match self
+                        .connection
+                        .send_and_check_request(&x::ChangeWindowAttributes {
+                            window: e.window(),
+                            value_list: &[x::Cw::EventMask(x::EventMask::empty())],
+                        }) {
+                        // Window error may occur if the window has been destroyed,
+                        // which is fine
+                        Ok(_) | Err(xcb::ProtocolError::X(x::Error::Window(_), _)) => {}
+                        Err(other) => panic!("Error removing event mask from window: {other:?}"),
+                    }
                 }
                 xcb::Event::X(x::Event::DestroyNotify(e)) => {
                     debug!("destroying window {:?}", e.window());
@@ -252,6 +303,173 @@ impl XState {
         }
     }
 
+    fn get_window_attributes(&self, window: x::Window) -> WindowAttributes {
+        let geometry = self.connection.send_request(&x::GetGeometry {
+            drawable: x::Drawable::Window(window),
+        });
+        let attrs = self
+            .connection
+            .send_request(&x::GetWindowAttributes { window });
+
+        let name = self.get_net_wm_name(window);
+        let class = self.get_wm_class(window);
+        let wm_hints = self.get_wm_hints(window);
+        let size_hints = self.get_wm_size_hints(window);
+
+        let geometry = self.connection.wait_for_reply(geometry).unwrap();
+        let attrs = self.connection.wait_for_reply(attrs).unwrap();
+        let title = name
+            .resolve()
+            .or_else(|| self.get_wm_name(window).resolve());
+        let class = class.resolve();
+        let wm_hints = wm_hints.resolve();
+        let size_hints = size_hints.resolve();
+
+        WindowAttributes {
+            override_redirect: attrs.override_redirect(),
+            popup_for: None,
+            dims: WindowDims {
+                x: geometry.x(),
+                y: geometry.y(),
+                width: geometry.width(),
+                height: geometry.height(),
+            },
+            title,
+            class,
+            group: wm_hints.map(|h| h.window_group).flatten(),
+            size_hints,
+        }
+    }
+
+    fn handle_window_attributes(
+        &self,
+        server_state: &mut super::RealServerState,
+        window: x::Window,
+        attrs: WindowAttributes,
+    ) {
+        if let Some(name) = attrs.title {
+            debug!("setting {window:?} title to {name:?}");
+            server_state.set_win_title(window, name);
+        }
+        if let Some(class) = attrs.class {
+            debug!("setting {window:?} class to {class}");
+            server_state.set_win_class(window, class);
+        }
+        if let Some(hints) = attrs.size_hints {
+            debug!("{window:?} size hints: {hints:?}");
+            server_state.set_size_hints(window, hints);
+        }
+    }
+
+    fn get_property_cookie(
+        &self,
+        window: x::Window,
+        property: x::Atom,
+        ty: x::Atom,
+        long_length: u32,
+    ) -> x::GetPropertyCookie {
+        self.connection.send_request(&x::GetProperty {
+            delete: false,
+            window,
+            property,
+            r#type: ty,
+            long_offset: 0,
+            long_length,
+        })
+    }
+
+    fn get_wm_class(
+        &self,
+        window: x::Window,
+    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = String>> {
+        let cookie = self.get_property_cookie(window, x::ATOM_WM_CLASS, x::ATOM_STRING, 256);
+        let resolver = move |reply: x::GetPropertyReply| {
+            let data: &[u8] = reply.value();
+            // wm class is instance + class - ignore instance
+            let class_start = data.iter().copied().position(|b| b == 0u8).unwrap() + 1;
+            let data = data[class_start..].to_vec();
+            let class = CString::from_vec_with_nul(data).unwrap();
+            debug!("{:?} class: {class:?}", window);
+            class.to_string_lossy().to_string()
+        };
+        PropertyCookieWrapper {
+            connection: &self.connection,
+            cookie,
+            resolver,
+        }
+    }
+
+    fn get_wm_name(
+        &self,
+        window: x::Window,
+    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = WmName>> {
+        let cookie = self.get_property_cookie(window, x::ATOM_WM_NAME, x::ATOM_STRING, 256);
+        let resolver = |reply: x::GetPropertyReply| {
+            let data: &[u8] = reply.value();
+            WmName::WmName(String::from_utf8(data.to_vec()).unwrap())
+        };
+
+        PropertyCookieWrapper {
+            connection: &self.connection,
+            cookie,
+            resolver,
+        }
+    }
+
+    fn get_net_wm_name(
+        &self,
+        window: x::Window,
+    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = WmName>> {
+        let cookie =
+            self.get_property_cookie(window, self.atoms.net_wm_name, self.atoms.utf8_string, 256);
+        let resolver = |reply: x::GetPropertyReply| {
+            let data: &[u8] = reply.value();
+            WmName::NetWmName(String::from_utf8(data.to_vec()).unwrap())
+        };
+
+        PropertyCookieWrapper {
+            connection: &self.connection,
+            cookie,
+            resolver,
+        }
+    }
+
+    fn get_wm_hints(
+        &self,
+        window: x::Window,
+    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = WmHints>> {
+        let cookie = self.get_property_cookie(window, x::ATOM_WM_HINTS, x::ATOM_WM_HINTS, 9);
+        let resolver = |reply: x::GetPropertyReply| {
+            let data: &[u32] = reply.value();
+            let hints = WmHints::from(data);
+            debug!("wm hints: {hints:?}");
+            hints
+        };
+        PropertyCookieWrapper {
+            connection: &self.connection,
+            cookie,
+            resolver,
+        }
+    }
+
+    fn get_wm_size_hints(
+        &self,
+        window: x::Window,
+    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = WmNormalHints>> {
+        let cookie =
+            self.get_property_cookie(window, x::ATOM_WM_NORMAL_HINTS, x::ATOM_WM_SIZE_HINTS, 9);
+        let resolver = |reply: x::GetPropertyReply| {
+            let data: &[u32] = reply.value();
+            WmNormalHints::from(data)
+        };
+
+        PropertyCookieWrapper {
+            connection: &self.connection,
+            cookie,
+            resolver,
+        }
+    }
+
     fn handle_property_change(
         &self,
         event: x::PropertyNotifyEvent,
@@ -276,19 +494,12 @@ impl XState {
         };
 
         match event.atom() {
-            x if x == self.atoms.wm_hints => {
-                let prop = get_prop(self.atoms.wm_hints, 9).unwrap();
-                let data: &[u32] = prop.value();
-                let hints = WmHints::from(data);
-                debug!("wm hints: {hints:?}");
-                server_state.set_win_hints(event.window(), hints);
+            x if x == x::ATOM_WM_HINTS => {
+                let hints = self.get_wm_hints(window).resolve().unwrap();
+                server_state.set_win_hints(window, hints);
             }
             x if x == x::ATOM_WM_NORMAL_HINTS => {
-                let Ok(prop) = get_prop(x::ATOM_WM_SIZE_HINTS, 9) else {
-                    return;
-                };
-                let data: &[u32] = prop.value();
-                let hints = WmNormalHints::from(data);
+                let hints = self.get_wm_size_hints(window).resolve().unwrap();
                 server_state.set_size_hints(window, hints);
             }
             x if x == x::ATOM_WM_NAME || x == self.atoms.net_wm_name => {
@@ -309,14 +520,8 @@ impl XState {
                 server_state.set_win_title(window, name);
             }
             x if x == x::ATOM_WM_CLASS => {
-                let prop = get_prop(x::ATOM_STRING, 256).unwrap();
-                let data: &[u8] = prop.value();
-                // wm class is instance + class - ignore instance
-                let class_start = data.iter().copied().position(|b| b == 0u8).unwrap() + 1;
-                let data = data[class_start..].to_vec();
-                let class = CString::from_vec_with_nul(data).unwrap();
-                debug!("{:?} class: {class:?}", window);
-                server_state.set_win_class(window, class.to_string_lossy().to_string());
+                let class = self.get_wm_class(window).resolve().unwrap();
+                server_state.set_win_class(window, class);
             }
             _ => {
                 if log::log_enabled!(log::Level::Debug) {
@@ -342,7 +547,6 @@ xcb::atoms_struct! {
         pub wm_protocols => b"WM_PROTOCOLS" only_if_exists = false,
         pub wm_delete_window => b"WM_DELETE_WINDOW" only_if_exists = false,
         pub wm_transient_for => b"WM_TRANSIENT_FOR" only_if_exists = false,
-        pub wm_hints => b"WM_HINTS" only_if_exists = false,
         pub wm_check => b"_NET_SUPPORTING_WM_CHECK" only_if_exists = false,
         pub net_wm_name => b"_NET_WM_NAME" only_if_exists = false,
         pub wm_pid => b"_NET_WM_PID" only_if_exists = false,
@@ -506,8 +710,8 @@ impl super::XConnection for Arc<xcb::Connection> {
             .wait_for_reply(self.send_request(&x::GetProperty {
                 delete: false,
                 window,
-                property: atoms.wm_hints,
-                r#type: atoms.wm_hints,
+                property: x::ATOM_WM_HINTS,
+                r#type: x::ATOM_WM_HINTS,
                 long_offset: 0,
                 long_length: 8,
             }))

@@ -1,6 +1,6 @@
 mod clientside;
 mod server;
-mod xstate;
+pub mod xstate;
 
 use crate::server::{PendingSurfaceState, ServerState};
 use crate::xstate::XState;

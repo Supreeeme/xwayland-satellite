@@ -12,6 +12,7 @@ use wayland_protocols::xdg::shell::server::xdg_toplevel;
 use wayland_server::Resource;
 use xcb::{x, Xid};
 use xwayland_satellite as xwls;
+use xwayland_satellite::xstate::WmSizeHintsFlags;
 
 #[derive(Default)]
 struct TestDataInner {
@@ -87,6 +88,7 @@ impl Fixture {
             env_logger::builder()
                 .is_test(true)
                 .filter_level(log::LevelFilter::Debug)
+                .parse_default_env()
                 .init();
         });
 
@@ -127,7 +129,7 @@ impl Fixture {
         // Give Xwayland time to do its thing
 
         let mut ready = our_data.display.lock().unwrap().is_some();
-        while !ready && start.elapsed() < Duration::from_millis(3000) {
+        while !ready && start.elapsed() < Duration::from_millis(2000) {
             let n = poll(&mut f, 100).unwrap();
             if n > 0 {
                 testwl.dispatch();
@@ -162,58 +164,13 @@ impl Fixture {
         }
     }
 
-    fn create_and_map_window(
+    fn configure_and_verify_new_toplevel(
         &mut self,
-        connection: &xcb::Connection,
-        override_redirect: bool,
-        x: i16,
-        y: i16,
-        width: u16,
-        height: u16,
-    ) -> (x::Window, testwl::SurfaceId) {
-        let screen = connection.get_setup().roots().next().unwrap();
-        let wid = connection.generate_id();
-        let req = x::CreateWindow {
-            depth: x::COPY_FROM_PARENT as _,
-            wid,
-            parent: screen.root(),
-            x,
-            y,
-            width,
-            height,
-            border_width: 0,
-            class: x::WindowClass::InputOutput,
-            visual: screen.root_visual(),
-            value_list: &[
-                x::Cw::BackPixel(screen.white_pixel()),
-                x::Cw::OverrideRedirect(override_redirect),
-            ],
-        };
-        connection.send_and_check_request(&req).unwrap();
-
-        let req = x::MapWindow { window: wid };
-        connection.send_and_check_request(&req).unwrap();
-        self.wait_and_dispatch();
-
-        let id = self
-            .testwl
-            .last_created_surface_id()
-            .expect("No surface created for window");
-
-        (wid, id)
-    }
-
-    fn create_toplevel(
-        &mut self,
-        connection: &xcb::Connection,
-        width: u16,
-        height: u16,
-    ) -> (x::Window, testwl::SurfaceId) {
-        let (window, surface) = self.create_and_map_window(connection, false, 0, 0, width, height);
-        let data = self
-            .testwl
-            .get_surface_data(surface)
-            .expect("No surface data");
+        connection: &mut Connection,
+        window: x::Window,
+        surface: testwl::SurfaceId,
+    ) {
+        let data = self.testwl.get_surface_data(surface).unwrap();
         assert!(
             matches!(data.role, Some(testwl::SurfaceRole::Toplevel(_))),
             "surface role was wrong: {:?}",
@@ -233,8 +190,6 @@ impl Fixture {
         assert_eq!(geometry.y(), 0);
         assert_eq!(geometry.width(), 100);
         assert_eq!(geometry.height(), 100);
-
-        (window, surface)
     }
 
     /// Triggers a Wayland side toplevel Close event and processes the corresponding
@@ -273,8 +228,6 @@ xcb::atoms_struct! {
     struct Atoms {
         wm_protocols => b"WM_PROTOCOLS",
         wm_delete_window => b"WM_DELETE_WINDOW",
-        wm_class => b"WM_CLASS",
-        wm_name => b"WM_NAME",
     }
 }
 
@@ -282,6 +235,8 @@ struct Connection {
     inner: xcb::Connection,
     pollfd: PollFd<'static>,
     atoms: Atoms,
+    root: x::Window,
+    visual: u32,
 }
 
 impl std::ops::Deref for Connection {
@@ -297,12 +252,69 @@ impl Connection {
         let fd = unsafe { BorrowedFd::borrow_raw(inner.as_raw_fd()) };
         let pollfd = PollFd::from_borrowed_fd(fd, PollFlags::IN);
         let atoms = Atoms::intern_all(&inner).unwrap();
+        let screen = inner.get_setup().roots().next().unwrap();
+        let root = screen.root();
+        let visual = screen.root_visual();
 
         Self {
             inner,
             pollfd,
             atoms,
+            root,
+            visual,
         }
+    }
+
+    fn new_window(
+        &self,
+        parent: x::Window,
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+        override_redirect: bool,
+    ) -> x::Window {
+        let wid = self.inner.generate_id();
+        let req = x::CreateWindow {
+            depth: 0,
+            wid,
+            parent,
+            x,
+            y,
+            width,
+            height,
+            border_width: 0,
+            class: x::WindowClass::InputOutput,
+            visual: self.visual,
+            value_list: &[x::Cw::OverrideRedirect(override_redirect)],
+        };
+        self.inner
+            .send_and_check_request(&req)
+            .expect("creating window failed");
+
+        wid
+    }
+
+    fn map_window(&self, window: x::Window) {
+        self.send_and_check_request(&x::MapWindow { window })
+            .unwrap();
+    }
+
+    fn set_property<P: x::PropEl>(
+        &self,
+        window: x::Window,
+        r#type: x::Atom,
+        property: x::Atom,
+        data: &[P],
+    ) {
+        self.send_and_check_request(&x::ChangeProperty {
+            mode: x::PropMode::Replace,
+            window,
+            r#type,
+            property,
+            data,
+        })
+        .unwrap();
     }
 
     #[track_caller]
@@ -318,39 +330,85 @@ impl Connection {
 fn toplevel_flow() {
     let mut f = Fixture::new();
     let mut connection = Connection::new(&f.display);
-    let (window, surface) = f.create_toplevel(&connection.inner, 200, 200);
+    let window = connection.new_window(connection.root, 0, 0, 200, 200, false);
 
-    connection
-        .inner
-        .send_and_check_request(&x::ChangeProperty {
-            mode: x::PropMode::Replace,
-            window,
-            r#type: x::ATOM_STRING,
-            property: connection.atoms.wm_name,
-            data: c"window".to_bytes(),
-        })
-        .unwrap();
+    // Pre-map properties
+    connection.set_property(
+        window,
+        x::ATOM_STRING,
+        x::ATOM_WM_NAME,
+        c"window".to_bytes(),
+    );
+    connection.set_property(
+        window,
+        x::ATOM_STRING,
+        x::ATOM_WM_CLASS,
+        &[
+            c"instance".to_bytes_with_nul(),
+            c"class".to_bytes_with_nul(),
+        ]
+        .concat(),
+    );
 
-    connection
-        .inner
-        .send_and_check_request(&x::ChangeProperty {
-            mode: x::PropMode::Replace,
-            window,
-            r#type: x::ATOM_STRING,
-            property: connection.atoms.wm_class,
-            data: &[
-                c"instance".to_bytes_with_nul(),
-                c"class".to_bytes_with_nul(),
-            ]
-            .concat(),
-        })
-        .unwrap();
-
+    let flags = (WmSizeHintsFlags::ProgramMaxSize | WmSizeHintsFlags::ProgramMinSize).bits();
+    connection.set_property(
+        window,
+        x::ATOM_WM_SIZE_HINTS,
+        x::ATOM_WM_NORMAL_HINTS,
+        &[flags, 0, 0, 0, 0, 50, 100, 300, 400],
+    );
+    connection.map_window(window);
     f.wait_and_dispatch();
+
+    let surface = f
+        .testwl
+        .last_created_surface_id()
+        .expect("No surface created!");
+    f.configure_and_verify_new_toplevel(&mut connection, window, surface);
 
     let data = f.testwl.get_surface_data(surface).unwrap();
     assert_eq!(data.toplevel().title, Some("window".into()));
     assert_eq!(data.toplevel().app_id, Some("class".into()));
+    assert_eq!(
+        data.toplevel().min_size,
+        Some(testwl::Vec2 { x: 50, y: 100 })
+    );
+    assert_eq!(
+        data.toplevel().max_size,
+        Some(testwl::Vec2 { x: 300, y: 400 })
+    );
+
+    // Post map properties
+    connection.set_property(
+        window,
+        x::ATOM_STRING,
+        x::ATOM_WM_NAME,
+        c"bindow".to_bytes(),
+    );
+    connection.set_property(
+        window,
+        x::ATOM_STRING,
+        x::ATOM_WM_CLASS,
+        &[c"f".to_bytes_with_nul(), c"ssalc".to_bytes_with_nul()].concat(),
+    );
+    connection.set_property(
+        window,
+        x::ATOM_WM_SIZE_HINTS,
+        x::ATOM_WM_NORMAL_HINTS,
+        &[flags, 1, 2, 3, 4, 25, 50, 150, 200],
+    );
+    f.wait_and_dispatch();
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert_eq!(data.toplevel().title, Some("bindow".into()));
+    assert_eq!(data.toplevel().app_id, Some("ssalc".into()));
+    assert_eq!(
+        data.toplevel().min_size,
+        Some(testwl::Vec2 { x: 25, y: 50 })
+    );
+    assert_eq!(
+        data.toplevel().max_size,
+        Some(testwl::Vec2 { x: 150, y: 200 })
+    );
 
     f.close_toplevel(&mut connection, window, surface);
 
@@ -360,4 +418,28 @@ fn toplevel_flow() {
 
     let data = f.testwl.get_surface_data(surface).expect("No surface data");
     assert!(!data.toplevel().toplevel.is_alive());
+}
+
+#[test]
+fn reparent() {
+    let mut f = Fixture::new();
+    let connection = Connection::new(&f.display);
+
+    let parent = connection.new_window(connection.root, 0, 0, 1, 1, false);
+    let child = connection.new_window(parent, 0, 0, 20, 20, false);
+
+    connection
+        .send_and_check_request(&x::ReparentWindow {
+            window: child,
+            parent: connection.root,
+            x: 0,
+            y: 0,
+        })
+        .unwrap();
+
+    connection
+        .send_and_check_request(&x::MapWindow { window: child })
+        .unwrap();
+
+    f.wait_and_dispatch();
 }

@@ -158,12 +158,12 @@ impl SurfaceData {
             let width = if pending.width > 0 {
                 pending.width as _
             } else {
-                window.dims.width
+                window.attrs.dims.width
             };
             let height = if pending.height > 0 {
                 pending.height as _
             } else {
-                window.dims.height
+                window.attrs.dims.height
             };
             debug!(
                 "configuring {:?}: {}x{}, {width}x{height}",
@@ -178,7 +178,7 @@ impl SurfaceData {
                     height: height as _,
                 },
             );
-            window.dims = WindowDims {
+            window.attrs.dims = WindowDims {
                 x: pending.x as _,
                 y: pending.y as _,
                 width,

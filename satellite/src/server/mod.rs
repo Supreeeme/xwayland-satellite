@@ -68,19 +68,24 @@ where
     u32::from(wenum).try_into().unwrap()
 }
 
+#[derive(Default, Debug)]
+pub struct WindowAttributes {
+    pub override_redirect: bool,
+    pub popup_for: Option<x::Window>,
+    pub dims: WindowDims,
+    pub size_hints: Option<WmNormalHints>,
+    pub title: Option<WmName>,
+    pub class: Option<String>,
+    pub group: Option<x::Window>,
+}
+
 #[derive(Debug)]
 struct WindowData {
     window: x::Window,
+    surface_id: u32,
     surface_key: Option<ObjectKey>,
     mapped: bool,
-    surface_id: u32,
-    popup_for: Option<x::Window>,
-    dims: WindowDims,
-    size_hints: Option<WmNormalHints>,
-    override_redirect: bool,
-    title: Option<WmName>,
-    class: Option<String>,
-    group: Option<x::Window>,
+    attrs: WindowAttributes,
 }
 
 impl WindowData {
@@ -92,16 +97,15 @@ impl WindowData {
     ) -> Self {
         Self {
             window,
+            surface_id: 0,
             surface_key: None,
             mapped: false,
-            popup_for: parent,
-            surface_id: 0,
-            dims,
-            size_hints: None,
-            override_redirect,
-            title: None,
-            class: None,
-            group: None
+            attrs: WindowAttributes {
+                override_redirect,
+                dims,
+                popup_for: parent,
+                ..Default::default()
+            },
         }
     }
 }
@@ -491,7 +495,7 @@ impl<C: XConnection> ServerState<C> {
     pub fn set_win_title(&mut self, window: x::Window, name: WmName) {
         let win = self.windows.get_mut(&window).unwrap();
 
-        let new_title = match &mut win.title {
+        let new_title = match &mut win.attrs.title {
             Some(w) => {
                 if matches!(w, WmName::NetWmName(_)) && matches!(name, WmName::WmName(_)) {
                     debug!("skipping setting window name to {name:?} because a _NET_WM_NAME title is already set");
@@ -501,7 +505,7 @@ impl<C: XConnection> ServerState<C> {
                     Some(w)
                 }
             }
-            None => Some(win.title.insert(name)),
+            None => Some(win.attrs.title.insert(name)),
         };
 
         let Some(title) = new_title else {
@@ -518,7 +522,7 @@ impl<C: XConnection> ServerState<C> {
     pub fn set_win_class(&mut self, window: x::Window, class: String) {
         let win = self.windows.get_mut(&window).unwrap();
 
-        let class = win.class.insert(class);
+        let class = win.attrs.class.insert(class);
         if let Some(key) = win.surface_key {
             let surface: &SurfaceData = self.objects[key].as_ref();
             if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
@@ -529,13 +533,13 @@ impl<C: XConnection> ServerState<C> {
 
     pub fn set_win_hints(&mut self, window: x::Window, hints: WmHints) {
         let win = self.windows.get_mut(&window).unwrap();
-        win.group = hints.window_group;
+        win.attrs.group = hints.window_group;
     }
 
     pub fn set_size_hints(&mut self, window: x::Window, hints: WmNormalHints) {
         let win = self.windows.get_mut(&window).unwrap();
 
-        if win.size_hints.is_none() || *win.size_hints.as_ref().unwrap() != hints {
+        if win.attrs.size_hints.is_none() || *win.attrs.size_hints.as_ref().unwrap() != hints {
             debug!("setting {window:?} hints {hints:?}");
             if let Some(surface) = win.surface_key {
                 let surface: &SurfaceData = self.objects[surface].as_ref();
@@ -548,7 +552,7 @@ impl<C: XConnection> ServerState<C> {
                     }
                 }
             }
-            win.size_hints = Some(hints);
+            win.attrs.size_hints = Some(hints);
         }
     }
 
@@ -577,7 +581,7 @@ impl<C: XConnection> ServerState<C> {
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
         let win = self.windows.get_mut(&event.window()).unwrap();
-        win.dims = WindowDims {
+        win.attrs.dims = WindowDims {
             x: event.x(),
             y: event.y(),
             width: event.width(),
@@ -693,21 +697,21 @@ impl<C: XConnection> ServerState<C> {
             .get_xdg_surface(client, &self.qh, surface_key);
 
         let window_data = self.windows.get_mut(&window).unwrap();
-        if window_data.override_redirect {
+        if window_data.attrs.override_redirect {
             // Override redirect is hard to convert to Wayland!
             // We will just make them be popups for the last focused toplevel.
             if let Some(win) = self.last_focused_toplevel {
-                window_data.popup_for = Some(win)
+                window_data.attrs.popup_for = Some(win)
             }
         }
         let window = self.windows.get(&window).unwrap();
 
-        let role = if let Some(parent) = window.popup_for {
+        let role = if let Some(parent) = window.attrs.popup_for {
             debug!(
                 "creating popup ({:?}) {:?} {:?} {:?} {surface_key:?}",
                 window.window,
                 parent,
-                window.dims,
+                window.attrs.dims,
                 surface.client.id()
             );
 
@@ -716,15 +720,15 @@ impl<C: XConnection> ServerState<C> {
                 self.objects[parent_window.surface_key.unwrap()].as_ref();
 
             let positioner = self.xdg_wm_base.create_positioner(&self.qh, ());
-            positioner.set_size(window.dims.width as _, window.dims.height as _);
-            positioner.set_offset(window.dims.x as i32, window.dims.y as i32);
+            positioner.set_size(window.attrs.dims.width as _, window.attrs.dims.height as _);
+            positioner.set_offset(window.attrs.dims.x as i32, window.attrs.dims.y as i32);
             positioner.set_anchor(Anchor::TopLeft);
             positioner.set_gravity(Gravity::BottomRight);
             positioner.set_anchor_rect(
                 0,
                 0,
-                parent_window.dims.width as _,
-                parent_window.dims.height as _,
+                parent_window.attrs.dims.width as _,
+                parent_window.attrs.dims.height as _,
             );
             let popup = xdg_surface.get_popup(
                 Some(&parent_surface.xdg().unwrap().surface),
@@ -772,7 +776,7 @@ impl<C: XConnection> ServerState<C> {
         debug!("creating toplevel for {:?}", window.window);
 
         let toplevel = xdg.get_toplevel(&self.qh, surface_key);
-        if let Some(hints) = &window.size_hints {
+        if let Some(hints) = &window.attrs.size_hints {
             if let Some(min) = &hints.min_size {
                 toplevel.set_min_size(min.width, min.height);
             }
@@ -781,18 +785,20 @@ impl<C: XConnection> ServerState<C> {
             }
         }
 
-        let group = window.group.and_then(|win| self.windows.get(&win));
+        let group = window.attrs.group.and_then(|win| self.windows.get(&win));
         if let Some(class) = window
+            .attrs
             .class
             .as_ref()
-            .or(group.and_then(|g| g.class.as_ref()))
+            .or(group.and_then(|g| g.attrs.class.as_ref()))
         {
             toplevel.set_app_id(class.to_string());
         }
         if let Some(title) = window
+            .attrs
             .title
             .as_ref()
-            .or(group.and_then(|g| g.title.as_ref()))
+            .or(group.and_then(|g| g.attrs.title.as_ref()))
         {
             toplevel.set_title(title.name().to_string());
         }
