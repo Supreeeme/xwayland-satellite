@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-wayland-protocols = { version = "0.31.2", features = ["server", "unstable"] }
-wayland-server = "0.31.1"
+wayland-protocols = { workspace = true, features = ["server", "unstable"] }
+wayland-server.workspace = true
 wl_drm = { path = "../wl_drm" }

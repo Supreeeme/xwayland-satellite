@@ -6,6 +6,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-wayland-client = "0.31.2"
-wayland-scanner = "0.31.1"
-wayland-server = "0.31.1"
+wayland-client.workspace = true
+wayland-scanner.workspace = true
+wayland-server.workspace = true
