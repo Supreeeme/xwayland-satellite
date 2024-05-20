@@ -20,6 +20,11 @@ use wayland_protocols::{
             zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1 as DmabufFeedback,
             zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
         },
+        pointer_constraints::zv1::client::{
+            zwp_confined_pointer_v1::ZwpConfinedPointerV1,
+            zwp_locked_pointer_v1::ZwpLockedPointerV1,
+            zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
+        },
         viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
     },
     xdg::{
@@ -102,6 +107,7 @@ delegate_noop!(Globals: WlShmPool);
 delegate_noop!(Globals: WpViewporter);
 delegate_noop!(Globals: WpViewport);
 delegate_noop!(Globals: ZxdgOutputManagerV1);
+delegate_noop!(Globals: ZwpPointerConstraintsV1);
 
 impl Dispatch<WlRegistry, ()> for Globals {
     fn event(
@@ -201,3 +207,5 @@ push_events!(WlDrm);
 push_events!(DmabufFeedback);
 push_events!(XdgOutput);
 push_events!(WlTouch);
+push_events!(ZwpConfinedPointerV1);
+push_events!(ZwpLockedPointerV1);

@@ -23,6 +23,7 @@ use wayland_client::{
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::client::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+        pointer_constraints::zv1::client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
         relative_pointer::zv1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
         viewporter::client::wp_viewporter::WpViewporter,
     },
@@ -699,7 +700,8 @@ fn pass_through_globals() {
         ZwpRelativePointerManagerV1,
         ZxdgOutputManagerV1,
         WpViewporter,
-        WlDrm
+        WlDrm,
+        ZwpPointerConstraintsV1
     }
 
     let mut globals = SupportedGlobals::default();

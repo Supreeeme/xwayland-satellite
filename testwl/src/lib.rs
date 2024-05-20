@@ -5,6 +5,7 @@ use std::time::Instant;
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::server::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+        pointer_constraints::zv1::server::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
         relative_pointer::zv1::server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
         viewporter::server::wp_viewporter::WpViewporter,
     },
@@ -253,6 +254,7 @@ impl Server {
         global_noop!(ZxdgOutputManagerV1);
         global_noop!(WpViewporter);
         global_noop!(WlDrm);
+        global_noop!(ZwpPointerConstraintsV1);
 
         Self {
             display,
@@ -276,7 +278,6 @@ impl Server {
             self.client.replace(client).is_none(),
             "Client already connected to test server"
         );
-        //self.dispatch();
     }
 
     pub fn dispatch(&mut self) {

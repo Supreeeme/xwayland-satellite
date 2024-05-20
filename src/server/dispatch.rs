@@ -4,6 +4,18 @@ use std::sync::{Arc, OnceLock};
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
+        pointer_constraints::zv1::{
+            client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1 as PointerConstraintsClient,
+            server::{
+                zwp_confined_pointer_v1::{
+                    self as cp, ZwpConfinedPointerV1 as ConfinedPointerServer,
+                },
+                zwp_locked_pointer_v1::{self as lp, ZwpLockedPointerV1 as LockedPointerServer},
+                zwp_pointer_constraints_v1::{
+                    self as pc, ZwpPointerConstraintsV1 as PointerConstraintsServer,
+                },
+            },
+        },
         relative_pointer::zv1::{
             client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1 as RelativePointerManClient,
             server::{
@@ -838,6 +850,135 @@ impl<C: XConnection> Dispatch<OutputManServer, ClientGlobalWrapper<OutputManClie
     }
 }
 
+impl<C: XConnection> Dispatch<ConfinedPointerServer, ObjectKey> for ServerState<C> {
+    fn request(
+        state: &mut Self,
+        _: &wayland_server::Client,
+        _: &ConfinedPointerServer,
+        request: <ConfinedPointerServer as Resource>::Request,
+        key: &ObjectKey,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        let confined_ptr: &ConfinedPointer = state.objects[*key].as_ref();
+        simple_event_shunt! {
+            confined_ptr.client, request: cp::Request => [
+                SetRegion {
+                    |region| region.as_ref().map(|r| r.data().unwrap())
+                },
+                Destroy
+            ]
+        }
+    }
+}
+
+impl<C: XConnection> Dispatch<LockedPointerServer, ObjectKey> for ServerState<C> {
+    fn request(
+        state: &mut Self,
+        _: &wayland_server::Client,
+        _: &LockedPointerServer,
+        request: <LockedPointerServer as Resource>::Request,
+        key: &ObjectKey,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        let locked_ptr: &LockedPointer = state.objects[*key].as_ref();
+        simple_event_shunt! {
+            locked_ptr.client, request: lp::Request => [
+                SetCursorPositionHint { surface_x, surface_y },
+                SetRegion {
+                    |region| region.as_ref().map(|r| r.data().unwrap())
+                },
+                Destroy
+            ]
+        }
+    }
+}
+
+impl<C: XConnection>
+    Dispatch<PointerConstraintsServer, ClientGlobalWrapper<PointerConstraintsClient>>
+    for ServerState<C>
+{
+    fn request(
+        state: &mut Self,
+        _: &wayland_server::Client,
+        _: &PointerConstraintsServer,
+        request: <PointerConstraintsServer as Resource>::Request,
+        client: &ClientGlobalWrapper<PointerConstraintsClient>,
+        _: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        use pc::Request;
+
+        match request {
+            Request::ConfinePointer {
+                id,
+                surface,
+                pointer,
+                region,
+                lifetime,
+            } => {
+                let surf_key: ObjectKey = surface.data().copied().unwrap();
+                let ptr_key: ObjectKey = pointer.data().copied().unwrap();
+                state.objects.insert_from_other_objects(
+                    [surf_key, ptr_key],
+                    |[surf_obj, ptr_obj], key| {
+                        let SurfaceData {
+                            client: c_surface, ..
+                        }: &SurfaceData = surf_obj.try_into().unwrap();
+                        let Pointer { client: c_ptr, .. }: &Pointer = ptr_obj.try_into().unwrap();
+
+                        let client = client.confine_pointer(
+                            c_surface,
+                            c_ptr,
+                            region.as_ref().map(|r| r.data().unwrap()),
+                            convert_wenum(lifetime),
+                            &state.qh,
+                            key,
+                        );
+                        let server = data_init.init(id, key);
+
+                        ConfinedPointer { client, server }.into()
+                    },
+                );
+            }
+            Request::LockPointer {
+                id,
+                surface,
+                pointer,
+                region,
+                lifetime,
+            } => {
+                let surf_key: ObjectKey = surface.data().copied().unwrap();
+                let ptr_key: ObjectKey = pointer.data().copied().unwrap();
+                state.objects.insert_from_other_objects(
+                    [surf_key, ptr_key],
+                    |[surf_obj, ptr_obj], key| {
+                        let SurfaceData {
+                            client: c_surface, ..
+                        }: &SurfaceData = surf_obj.try_into().unwrap();
+                        let Pointer { client: c_ptr, .. }: &Pointer = ptr_obj.try_into().unwrap();
+                        let client = client.lock_pointer(
+                            c_surface,
+                            c_ptr,
+                            region.as_ref().map(|r| r.data().unwrap()),
+                            convert_wenum(lifetime),
+                            &state.qh,
+                            key,
+                        );
+                        let server = data_init.init(id, key);
+                        LockedPointer { client, server }.into()
+                    },
+                );
+            }
+            Request::Destroy => {
+                client.destroy();
+            }
+            _ => unreachable!("unhandled pointer constraints request"),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ClientGlobalWrapper<T: Proxy>(Arc<OnceLock<T>>);
 impl<T: Proxy> std::ops::Deref for ClientGlobalWrapper<T> {
@@ -929,6 +1070,7 @@ global_dispatch_no_events!(
     s_vp::wp_viewporter::WpViewporter,
     c_vp::wp_viewporter::WpViewporter
 );
+global_dispatch_no_events!(PointerConstraintsServer, PointerConstraintsClient);
 
 global_dispatch_with_events!(WlSeat, client::wl_seat::WlSeat);
 global_dispatch_with_events!(WlOutput, client::wl_output::WlOutput);

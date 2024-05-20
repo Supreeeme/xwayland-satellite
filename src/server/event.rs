@@ -3,9 +3,23 @@ use log::{debug, trace, warn};
 use std::os::fd::AsFd;
 use wayland_client::{protocol as client, Proxy};
 use wayland_protocols::{
-    wp::relative_pointer::zv1::{
-        client::zwp_relative_pointer_v1::{self, ZwpRelativePointerV1 as RelativePointerClient},
-        server::zwp_relative_pointer_v1::ZwpRelativePointerV1 as RelativePointerServer,
+    wp::{
+        pointer_constraints::zv1::{
+            client::{
+                zwp_confined_pointer_v1::{self, ZwpConfinedPointerV1 as ConfinedPointerClient},
+                zwp_locked_pointer_v1::{self, ZwpLockedPointerV1 as LockedPointerClient},
+            },
+            server::{
+                zwp_confined_pointer_v1::ZwpConfinedPointerV1 as ConfinedPointerServer,
+                zwp_locked_pointer_v1::ZwpLockedPointerV1 as LockedPointerServer,
+            },
+        },
+        relative_pointer::zv1::{
+            client::zwp_relative_pointer_v1::{
+                self, ZwpRelativePointerV1 as RelativePointerClient,
+            },
+            server::zwp_relative_pointer_v1::ZwpRelativePointerV1 as RelativePointerServer,
+        },
     },
     xdg::{
         shell::client::{xdg_popup, xdg_surface, xdg_toplevel},
@@ -631,7 +645,7 @@ impl HandleEvent for RelativePointer {
 
     fn handle_event<C: XConnection>(&mut self, event: Self::Event, _: &mut ServerState<C>) {
         simple_event_shunt! {
-            self.server, event: rp::client::zwp_relative_pointer_v1::Event => [
+            self.server, event: zwp_relative_pointer_v1::Event => [
                 RelativeMotion {
                     utime_hi,
                     utime_lo,
@@ -640,6 +654,34 @@ impl HandleEvent for RelativePointer {
                     dx_unaccel,
                     dy_unaccel
                 }
+            ]
+        }
+    }
+}
+
+pub type LockedPointer = GenericObject<LockedPointerServer, LockedPointerClient>;
+impl HandleEvent for LockedPointer {
+    type Event = zwp_locked_pointer_v1::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, _: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_locked_pointer_v1::Event => [
+                Locked,
+                Unlocked
+            ]
+        }
+    }
+}
+
+pub type ConfinedPointer = GenericObject<ConfinedPointerServer, ConfinedPointerClient>;
+impl HandleEvent for ConfinedPointer {
+    type Event = zwp_confined_pointer_v1::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, _: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_confined_pointer_v1::Event => [
+                Confined,
+                Unconfined
             ]
         }
     }

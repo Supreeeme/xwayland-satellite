@@ -19,9 +19,8 @@ use wayland_client::{protocol as client, Proxy};
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
-        relative_pointer::zv1::{
-            self as rp, server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
-        },
+        pointer_constraints::zv1::server::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
+        relative_pointer::zv1::server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
         viewporter::server as s_vp,
     },
     xdg::{
@@ -306,7 +305,9 @@ pub(crate) enum Object {
     DmabufFeedback(DmabufFeedback),
     Drm(Drm),
     XdgOutput(XdgOutput),
-    Touch(Touch)
+    Touch(Touch),
+    ConfinedPointer(ConfinedPointer),
+    LockedPointer(LockedPointer)
 }
 
 }
@@ -465,7 +466,8 @@ impl<C: XConnection> ServerState<C> {
                 WlDrmServer,
                 s_dmabuf::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
                 ZxdgOutputManagerV1,
-                s_vp::wp_viewporter::WpViewporter
+                s_vp::wp_viewporter::WpViewporter,
+                ZwpPointerConstraintsV1
             ];
         }
     }
