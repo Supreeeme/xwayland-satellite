@@ -92,7 +92,7 @@ pub struct Toplevel {
     pub states: Vec<xdg_toplevel::State>,
     pub closed: bool,
     pub title: Option<String>,
-    pub app_id: Option<String>
+    pub app_id: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -501,7 +501,6 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                     unreachable!();
                 };
                 toplevel.app_id = app_id.into();
-
             }
             other => todo!("unhandled request {other:?}"),
         }
@@ -531,7 +530,7 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                     states: Vec::new(),
                     closed: false,
                     title: None,
-                    app_id: None
+                    app_id: None,
                 };
                 let data = state.surfaces.get_mut(surface_id).unwrap();
                 data.role = Some(SurfaceRole::Toplevel(t));
@@ -838,6 +837,7 @@ impl Dispatch<WlSurface, ()> for State {
                     .surfaces
                     .remove(&SurfaceId(resource.id().protocol_id()));
             }
+            SetInputRegion { .. } => {}
             other => todo!("unhandled request {other:?}"),
         }
     }
