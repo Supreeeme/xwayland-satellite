@@ -12,7 +12,7 @@ use wayland_protocols::xdg::shell::server::xdg_toplevel;
 use wayland_server::Resource;
 use xcb::{x, Xid};
 use xwayland_satellite as xwls;
-use xwayland_satellite::xstate::WmSizeHintsFlags;
+use xwayland_satellite::xstate::{WmHintsFlags, WmSizeHintsFlags};
 
 #[derive(Default)]
 struct TestDataInner {
@@ -300,6 +300,11 @@ impl Connection {
             .unwrap();
     }
 
+    fn unmap_window(&self, window: x::Window) {
+        self.send_and_check_request(&x::UnmapWindow { window })
+            .unwrap();
+    }
+
     fn set_property<P: x::PropEl>(
         &self,
         window: x::Window,
@@ -423,7 +428,7 @@ fn toplevel_flow() {
 #[test]
 fn reparent() {
     let mut f = Fixture::new();
-    let connection = Connection::new(&f.display);
+    let mut connection = Connection::new(&f.display);
 
     let parent = connection.new_window(connection.root, 0, 0, 1, 1, false);
     let child = connection.new_window(parent, 0, 0, 20, 20, false);
@@ -437,9 +442,80 @@ fn reparent() {
         })
         .unwrap();
 
-    connection
-        .send_and_check_request(&x::MapWindow { window: child })
-        .unwrap();
-
+    connection.map_window(child);
     f.wait_and_dispatch();
+    let surface = f
+        .testwl
+        .last_created_surface_id()
+        .expect("No surface created!");
+    f.configure_and_verify_new_toplevel(&mut connection, child, surface);
+}
+
+#[test]
+fn input_focus() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    fn tst(
+        f: &mut Fixture,
+        connection: &mut Connection,
+        set_props: impl FnOnce(&mut Connection, x::Window),
+        check: impl FnOnce(/* win: */ x::Window, /* focus: */ x::Window),
+    ) {
+        let win = connection.new_window(connection.root, 0, 0, 20, 20, false);
+        set_props(connection, win);
+        connection.map_window(win);
+        f.wait_and_dispatch();
+        let surface = f
+            .testwl
+            .last_created_surface_id()
+            .expect("No surface created!");
+        f.configure_and_verify_new_toplevel(connection, win, surface);
+
+        let focus = connection
+            .wait_for_reply(connection.send_request(&x::GetInputFocus {}))
+            .unwrap()
+            .focus();
+        check(win, focus);
+
+        f.close_toplevel(connection, win, surface);
+    }
+
+    // Input field unset
+    tst(
+        &mut f,
+        &mut connection,
+        |_, _| {},
+        |win, focus| assert_eq!(win, focus),
+    );
+
+    // Input field set to false
+    tst(
+        &mut f,
+        &mut connection,
+        |connection, win| {
+            connection.set_property(
+                win,
+                x::ATOM_WM_HINTS,
+                x::ATOM_WM_HINTS,
+                &[WmHintsFlags::Input.bits(), 0],
+            );
+        },
+        |win, focus| assert_ne!(win, focus),
+    );
+
+    // Input field set to true
+    tst(
+        &mut f,
+        &mut connection,
+        |connection, win| {
+            connection.set_property(
+                win,
+                x::ATOM_WM_HINTS,
+                x::ATOM_WM_HINTS,
+                &[WmHintsFlags::Input.bits(), 1],
+            );
+        },
+        |win, focus| assert_eq!(win, focus),
+    );
 }

@@ -336,7 +336,7 @@ impl XState {
             },
             title,
             class,
-            group: wm_hints.map(|h| h.window_group).flatten(),
+            group: wm_hints.and_then(|h| h.window_group),
             size_hints,
         }
     }
@@ -640,6 +640,9 @@ impl From<&[u32]> for WmHints {
         let mut ret = Self::default();
         let flags = WmHintsFlags::from_bits_truncate(value[0]);
 
+        if flags.contains(WmHintsFlags::Input) {
+            ret.input = Some(value[1] == 1);
+        }
         if flags.contains(WmHintsFlags::WindowGroup) {
             let window = unsafe { x::Window::new(value[8]) };
             ret.window_group = Some(window);
@@ -713,20 +716,17 @@ impl super::XConnection for Arc<xcb::Connection> {
                 property: x::ATOM_WM_HINTS,
                 r#type: x::ATOM_WM_HINTS,
                 long_offset: 0,
-                long_length: 8,
+                long_length: 9,
             }))
             .unwrap();
 
-        let fields: &[u32] = prop.value();
-        let mut input = false;
-        if !fields.is_empty() {
-            let flags = fields[0];
-            if (flags & 0x1) > 0 {
-                input = fields[1] > 0;
-            }
-        }
+        let set_focus = if prop.r#type() == x::ATOM_NONE {
+            true
+        } else {
+            WmHints::from(prop.value()).input.unwrap_or(true)
+        };
 
-        if input {
+        if set_focus {
             // might fail if window is not visible but who cares
             let _ = self.send_and_check_request(&x::SetInputFocus {
                 focus: window,
