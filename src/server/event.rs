@@ -395,6 +395,9 @@ impl HandleEvent for Pointer {
                 }
             }
             client::wl_pointer::Event::Leave { serial, surface } => {
+                if !surface.is_alive() {
+                    return;
+                }
                 debug!("leaving surface ({serial})");
                 self.pending_enter.0.take();
                 self.server
@@ -504,7 +507,12 @@ impl HandleEvent for Keyboard {
                 },
                 Leave {
                     serial,
-                    |surface| state.get_server_surface_from_client(surface)
+                    |surface| {
+                        if !surface.is_alive() {
+                            return;
+                        }
+                        state.get_server_surface_from_client(surface)
+                    }
                 },
                 Key {
                     serial,

@@ -31,6 +31,9 @@ use wayland_protocols::{
         shell::server::{xdg_positioner, xdg_toplevel},
         xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1,
     },
+    xwayland::shell::v1::client::{
+        xwayland_shell_v1::XwaylandShellV1, xwayland_surface_v1::XwaylandSurfaceV1,
+    },
 };
 use wayland_server::{protocol as s_proto, Display, Resource};
 use wl_drm::client::wl_drm::WlDrm;
@@ -82,6 +85,7 @@ with_optional! {
 struct Compositor {
     compositor: TestObject<WlCompositor>,
     shm: TestObject<WlShm>,
+    shell: TestObject<XwaylandShellV1>
 }
 
 }
@@ -202,6 +206,7 @@ struct TestFixture {
     exwl_connection: Arc<Connection>,
     /// Exwayland's display - must dispatch this for our server state to advance
     exwl_display: Display<FakeServerState>,
+    surface_serial: u64,
 }
 
 static INIT: std::sync::Once = std::sync::Once::new();
@@ -240,6 +245,7 @@ impl TestFixture {
             exwayland,
             exwl_connection: Connection::from_socket(fake_client).unwrap().into(),
             exwl_display: display,
+            surface_serial: 1,
         };
         f.run();
         f
@@ -291,6 +297,12 @@ impl TestFixture {
                             bind_req(name, WlShm::interface(), version),
                         ));
                     }
+                    x if x == XwaylandShellV1::interface().name => {
+                        ret.shell = Some(TestObject::from_request(
+                            &registry.obj,
+                            bind_req(name, XwaylandShellV1::interface(), version),
+                        ));
+                    }
                     _ => {}
                 }
             }
@@ -339,44 +351,68 @@ impl TestFixture {
             .insert(window, data);
     }
 
-    fn create_and_map_window(
+    fn new_window(
+        &mut self,
+        window: Window,
+        override_redirect: bool,
+        data: WindowData,
+        parent: Option<Window>,
+    ) {
+        let dims = data.dims;
+        self.register_window(window, data);
+        self.exwayland
+            .new_window(window, override_redirect, dims, parent);
+    }
+
+    fn map_window(
         &mut self,
         comp: &Compositor,
         window: Window,
-        override_redirect: bool,
-    ) -> (TestObject<WlSurface>, testwl::SurfaceId) {
-        let (_buffer, surface) = comp.create_surface();
-
-        let data = WindowData {
-            mapped: true,
-            dims: WindowDims {
+        surface: &WlSurface,
+        buffer: &TestObject<WlBuffer>,
+    ) {
+        self.exwayland.map_window(window);
+        self.associate_window(comp, window, surface);
+        self.run();
+        surface
+            .send_request(Req::<WlSurface>::Attach {
+                buffer: Some(buffer.obj.clone()),
                 x: 0,
                 y: 0,
-                width: 50,
-                height: 50,
+            })
+            .unwrap();
+    }
+
+    fn associate_window(&mut self, comp: &Compositor, window: Window, surface: &WlSurface) {
+        let xwl = TestObject::<XwaylandSurfaceV1>::from_request(
+            &comp.shell.obj,
+            Req::<XwaylandShellV1>::GetXwaylandSurface {
+                surface: surface.clone(),
             },
-            fullscreen: false,
-        };
+        );
 
-        let dims = data.dims;
+        let serial = self.surface_serial;
+        let serial_lo = (serial & 0xFF) as u32;
+        let serial_hi = (serial >> 8 & 0xFF) as u32;
+        self.surface_serial += 1;
 
-        self.register_window(window, data);
+        xwl.send_request(Req::<XwaylandSurfaceV1>::SetSerial {
+            serial_lo,
+            serial_hi,
+        })
+        .unwrap();
         self.exwayland
-            .new_window(window, override_redirect, dims, None);
-        self.exwayland.map_window(window);
-        self.exwayland
-            .associate_window(window, surface.id().protocol_id());
+            .set_window_serial(window, [serial_lo, serial_hi]);
+    }
 
-        self.run();
-
-        let testwl_id = self
+    #[track_caller]
+    fn check_new_surface(&mut self) -> testwl::SurfaceId {
+        let id = self
             .testwl
             .last_created_surface_id()
             .expect("Surface not created");
-
-        assert!(self.testwl.get_surface_data(testwl_id).is_some());
-
-        (surface, testwl_id)
+        assert!(self.testwl.get_surface_data(id).is_some());
+        id
     }
 
     fn create_toplevel(
@@ -384,7 +420,7 @@ impl TestFixture {
         comp: &Compositor,
         window: Window,
     ) -> (TestObject<WlSurface>, testwl::SurfaceId) {
-        let (_buffer, surface) = comp.create_surface();
+        let (buffer, surface) = comp.create_surface();
 
         let data = WindowData {
             mapped: true,
@@ -397,27 +433,18 @@ impl TestFixture {
             fullscreen: false,
         };
 
-        let dims = data.dims;
-
-        self.register_window(window, data);
-        self.exwayland.new_window(window, false, dims, None);
-        self.exwayland.map_window(window);
-        self.exwayland
-            .associate_window(window, surface.id().protocol_id());
-
+        self.new_window(window, false, data, None);
+        self.map_window(comp, window, &surface.obj, &buffer);
         self.run();
+        let id = self.check_new_surface();
 
-        let testwl_id = self
-            .testwl
-            .last_created_surface_id()
-            .expect("Toplevel surface not created");
         {
-            let surface_data = self.testwl.get_surface_data(testwl_id).unwrap();
+            let surface_data = self.testwl.get_surface_data(id).unwrap();
             assert!(
                 surface_data.surface
                     == self
                         .testwl
-                        .get_object::<s_proto::wl_surface::WlSurface>(testwl_id)
+                        .get_object::<s_proto::wl_surface::WlSurface>(id)
                         .unwrap()
             );
             assert!(surface_data.buffer.is_none());
@@ -429,11 +456,11 @@ impl TestFixture {
         }
 
         self.testwl
-            .configure_toplevel(testwl_id, 100, 100, vec![xdg_toplevel::State::Activated]);
+            .configure_toplevel(id, 100, 100, vec![xdg_toplevel::State::Activated]);
         self.run();
 
         {
-            let surface_data = self.testwl.get_surface_data(testwl_id).unwrap();
+            let surface_data = self.testwl.get_surface_data(id).unwrap();
             assert!(surface_data.buffer.is_some());
         }
 
@@ -451,7 +478,7 @@ impl TestFixture {
             "Incorrect window geometry: {win_data:?}"
         );
 
-        (surface, testwl_id)
+        (surface, id)
     }
 
     fn create_popup(
@@ -460,7 +487,7 @@ impl TestFixture {
         window: Window,
         parent_id: testwl::SurfaceId,
     ) -> (TestObject<WlSurface>, testwl::SurfaceId) {
-        let (_, popup_surface) = comp.create_surface();
+        let (buffer, surface) = comp.create_surface();
         let data = WindowData {
             mapped: true,
             dims: WindowDims {
@@ -472,13 +499,11 @@ impl TestFixture {
             fullscreen: false,
         };
         let dims = data.dims;
-        self.register_window(window, data);
-        self.exwayland.new_window(window, true, dims, None);
-        self.exwayland.map_window(window);
-        self.exwayland
-            .associate_window(window, popup_surface.id().protocol_id());
+        self.new_window(window, true, data, None);
+        self.map_window(&comp, window, &surface.obj, &buffer);
         self.run();
-        let popup_id = self.testwl.last_created_surface_id().unwrap();
+
+        let popup_id = self.check_new_surface();
         assert_ne!(popup_id, parent_id);
 
         {
@@ -533,7 +558,7 @@ impl TestFixture {
             assert!(surface_data.buffer.is_some());
         }
 
-        (popup_surface, popup_id)
+        (surface, popup_id)
     }
 }
 
@@ -597,8 +622,6 @@ type Ev<T> = <T as Proxy>::Event;
 
 // TODO: tests to add
 // - destroy window before surface
-// - destroy surface before window
-// - destroy popup and reassociate with new surface
 // - reconfigure window (popup) before mapping
 // - associate window after surface is already created
 
@@ -701,7 +724,8 @@ fn pass_through_globals() {
         ZxdgOutputManagerV1,
         WpViewporter,
         WlDrm,
-        ZwpPointerConstraintsV1
+        ZwpPointerConstraintsV1,
+        XwaylandShellV1
     }
 
     let mut globals = SupportedGlobals::default();
@@ -777,8 +801,7 @@ fn popup_window_changes_surface() {
     assert!(f.testwl.get_surface_data(id).is_some());
 
     f.exwayland.map_window(win);
-    f.exwayland
-        .associate_window(win, surface.id().protocol_id());
+    f.associate_window(&comp, win, &surface.obj);
     f.run();
 
     let data = f.testwl.get_surface_data(id).unwrap();
@@ -807,7 +830,10 @@ fn override_redirect_window_after_toplevel_close() {
     assert!(f.testwl.get_surface_data(first).is_none());
 
     let win2 = unsafe { Window::new(2) };
-    let (_, second) = f.create_and_map_window(&comp, win2, true);
+    let (buffer, surface) = comp.create_surface();
+    f.new_window(win2, true, WindowData::default(), None);
+    f.map_window(&comp, win2, &surface.obj, &buffer);
+    let second = f.check_new_surface();
     let data = f.testwl.get_surface_data(second).unwrap();
     assert!(
         matches!(data.role, Some(testwl::SurfaceRole::Toplevel(_))),
@@ -934,8 +960,7 @@ fn window_group_properties() {
         },
     );
     f.exwayland.map_window(win);
-    f.exwayland
-        .associate_window(win, surface.id().protocol_id());
+    f.associate_window(&comp, win, &surface.obj);
     f.run();
 
     let id = f.testwl.last_created_surface_id().unwrap();

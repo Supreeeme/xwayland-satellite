@@ -263,11 +263,13 @@ impl XState {
                 }
                 xcb::Event::X(x::Event::ClientMessage(e)) => match e.r#type() {
                     x if x == self.atoms.wl_surface_id => {
+                        panic!("Xserver should be using WL_SURFACE_SERIAL, not WL_SURFACE_ID");
+                    }
+                    x if x == self.atoms.wl_surface_serial => {
                         let x::ClientMessageData::Data32(data) = e.data() else {
                             unreachable!();
                         };
-                        let id: u32 = (data[0] as u64 | ((data[1] as u64) << 32)) as u32;
-                        server_state.associate_window(e.window(), id);
+                        server_state.set_window_serial(e.window(), [data[0], data[1]]);
                     }
                     x if x == self.atoms.net_wm_state => {
                         let x::ClientMessageData::Data32(data) = e.data() else {
@@ -544,6 +546,7 @@ xcb::atoms_struct! {
     #[derive(Clone, Debug)]
     pub struct Atoms {
         pub wl_surface_id => b"WL_SURFACE_ID" only_if_exists = false,
+        pub wl_surface_serial => b"WL_SURFACE_SERIAL" only_if_exists = false,
         pub wm_protocols => b"WM_PROTOCOLS" only_if_exists = false,
         pub wm_delete_window => b"WM_DELETE_WINDOW" only_if_exists = false,
         pub wm_transient_for => b"WM_TRANSIENT_FOR" only_if_exists = false,

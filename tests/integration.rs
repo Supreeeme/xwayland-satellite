@@ -300,11 +300,6 @@ impl Connection {
             .unwrap();
     }
 
-    fn unmap_window(&self, window: x::Window) {
-        self.send_and_check_request(&x::UnmapWindow { window })
-            .unwrap();
-    }
-
     fn set_property<P: x::PropEl>(
         &self,
         window: x::Window,
@@ -404,6 +399,7 @@ fn toplevel_flow() {
     );
     f.wait_and_dispatch();
     let data = f.testwl.get_surface_data(surface).unwrap();
+    let toplevel = data.toplevel().toplevel.clone();
     assert_eq!(data.toplevel().title, Some("bindow".into()));
     assert_eq!(data.toplevel().app_id, Some("ssalc".into()));
     assert_eq!(
@@ -421,8 +417,7 @@ fn toplevel_flow() {
     drop(connection);
     f.wait_and_dispatch();
 
-    let data = f.testwl.get_surface_data(surface).expect("No surface data");
-    assert!(!data.toplevel().toplevel.is_alive());
+    assert!(!toplevel.is_alive());
 }
 
 #[test]

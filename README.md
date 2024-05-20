@@ -3,6 +3,7 @@ xwayland-satellite grants rootless Xwayland integration to any Wayland composito
 This is particularly useful for compositors that (understandably) do not want to go through implementing support for rootless Xwayland themselves.
 
 ## Dependencies
+- Xwayland >=23.1
 - xcb
 - xcb-util-cursor
 - clang (building only)

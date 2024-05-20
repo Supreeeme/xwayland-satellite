@@ -33,6 +33,9 @@ use wayland_protocols::{
         },
         xdg_output::zv1::server::zxdg_output_manager_v1::ZxdgOutputManagerV1,
     },
+    xwayland::shell::v1::server::{
+        xwayland_shell_v1::XwaylandShellV1, xwayland_surface_v1::XwaylandSurfaceV1,
+    },
 };
 use wayland_server::{
     protocol::{
@@ -81,7 +84,7 @@ pub struct WindowAttributes {
 #[derive(Debug)]
 struct WindowData {
     window: x::Window,
-    surface_id: u32,
+    surface_serial: Option<[u32; 2]>,
     surface_key: Option<ObjectKey>,
     mapped: bool,
     attrs: WindowAttributes,
@@ -96,8 +99,8 @@ impl WindowData {
     ) -> Self {
         Self {
             window,
-            surface_id: 0,
             surface_key: None,
+            surface_serial: None,
             mapped: false,
             attrs: WindowAttributes {
                 override_redirect,
@@ -119,9 +122,12 @@ pub struct SurfaceData {
     client: client::wl_surface::WlSurface,
     server: WlSurface,
     key: ObjectKey,
+    serial: Option<[u32; 2]>,
     frame_callback: Option<WlCallback>,
     attach: Option<SurfaceAttach>,
     role: Option<SurfaceRole>,
+    xwl: Option<XwaylandSurfaceV1>,
+    window: Option<x::Window>,
 }
 
 impl SurfaceData {
@@ -410,6 +416,8 @@ impl<C: XConnection> ServerState<C> {
                 .registry
                 .bind::<XdgWmBase, _, _>(data.name, XDG_WM_BASE_VERSION, &qh, ());
 
+        dh.create_global::<Self, XwaylandShellV1, _>(1, ());
+
         let mut ret = Self {
             windows: HashMap::new(),
             clientside,
@@ -558,27 +566,9 @@ impl<C: XConnection> ServerState<C> {
         }
     }
 
-    pub fn associate_window(&mut self, window: x::Window, surface_id: u32) {
+    pub fn set_window_serial(&mut self, window: x::Window, serial: [u32; 2]) {
         let win = self.windows.get_mut(&window).unwrap();
-        win.surface_id = surface_id;
-
-        if let Some(key) = self
-            .objects
-            .iter_mut()
-            .filter_map(|(key, obj)| {
-                Some(key).zip(<&mut SurfaceData>::try_from(obj.0.as_mut().unwrap()).ok())
-            })
-            .find_map(|(key, surface)| {
-                (surface_id == surface.server.id().protocol_id()).then_some(key)
-            })
-        {
-            win.surface_key = Some(key);
-            self.associated_windows.insert(key, window);
-            debug!("associate {:?} with surface {surface_id}", window);
-            if win.mapped {
-                self.create_role_window(window, key);
-            }
-        }
+        win.surface_serial = Some(serial);
     }
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
@@ -689,7 +679,8 @@ impl<C: XConnection> ServerState<C> {
     }
 
     fn create_role_window(&mut self, window: x::Window, surface_key: ObjectKey) {
-        let surface: &SurfaceData = self.objects[surface_key].as_ref();
+        let surface: &mut SurfaceData = self.objects[surface_key].as_mut();
+        surface.window = Some(window);
         let client = &surface.client;
         client.attach(None, 0, 0);
         client.commit();
@@ -714,7 +705,7 @@ impl<C: XConnection> ServerState<C> {
                 window.window,
                 parent,
                 window.attrs.dims,
-                surface.client.id()
+                client.id()
             );
 
             let parent_window = self.windows.get(&parent).unwrap();

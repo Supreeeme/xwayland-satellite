@@ -1,5 +1,5 @@
 use super::*;
-use log::{debug, trace, warn};
+use log::{debug, error, trace, warn};
 use std::sync::{Arc, OnceLock};
 use wayland_protocols::{
     wp::{
@@ -33,6 +33,10 @@ use wayland_protocols::{
             },
             zxdg_output_v1::{self as s_xdgo, ZxdgOutputV1 as XdgOutputServer},
         },
+    },
+    xwayland::shell::v1::server::{
+        xwayland_shell_v1::{self, XwaylandShellV1},
+        xwayland_surface_v1::{self, XwaylandSurfaceV1},
     },
 };
 use wayland_server::{
@@ -128,9 +132,15 @@ impl<C: XConnection> Dispatch<WlSurface, ObjectKey> for ServerState<C> {
             Request::<WlSurface>::Destroy => {
                 let mut object = state.objects.remove(*key).unwrap();
                 let surface: &mut SurfaceData = object.as_mut();
+                if let Some(window_data) = surface.window.and_then(|w| state.windows.get_mut(&w)) {
+                    window_data.surface_key.take();
+                }
                 surface.destroy_role();
                 surface.client.destroy();
-                debug!("deleting key: {:?}", key);
+                debug!(
+                    "deleting key: {key:?} (surface {:?})",
+                    surface.server.id().protocol_id()
+                );
             }
             Request::<WlSurface>::SetBufferScale { scale } => {
                 surface.client.set_buffer_scale(scale);
@@ -181,37 +191,25 @@ impl<C: XConnection>
             Request::<WlCompositor>::CreateSurface { id } => {
                 let mut surface_id = None;
 
-                let key = state.objects.insert_with_key(|key| {
-                    debug!("new surface with key {key:?}");
+                state.objects.insert_with_key(|key| {
                     let client = client.create_surface(&state.qh, key);
                     let server = data_init.init(id, key);
                     surface_id = Some(server.id().protocol_id());
+                    debug!("new surface with key {key:?} ({surface_id:?})");
 
                     SurfaceData {
                         client,
                         server,
                         key,
+                        serial: Default::default(),
                         attach: None,
                         frame_callback: None,
                         role: None,
+                        xwl: None,
+                        window: None,
                     }
                     .into()
                 });
-
-                let surface_id = surface_id.unwrap();
-
-                if let Some((win, window_data)) =
-                    state.windows.iter_mut().find_map(|(win, data)| {
-                        Some(*win).zip((data.surface_id == surface_id).then_some(data))
-                    })
-                {
-                    window_data.surface_key = Some(key);
-                    state.associated_windows.insert(key, win);
-                    debug!("associate surface {surface_id} with window {win:?}");
-                    if window_data.mapped {
-                        state.create_role_window(win, key);
-                    }
-                }
             }
             Request::<WlCompositor>::CreateRegion { id } => {
                 let c_region = client.create_region(&state.qh, ());
@@ -1075,3 +1073,95 @@ global_dispatch_no_events!(PointerConstraintsServer, PointerConstraintsClient);
 global_dispatch_with_events!(WlSeat, client::wl_seat::WlSeat);
 global_dispatch_with_events!(WlOutput, client::wl_output::WlOutput);
 global_dispatch_with_events!(WlDrmServer, WlDrmClient);
+
+impl<C: XConnection> GlobalDispatch<XwaylandShellV1, ()> for ServerState<C> {
+    fn bind(
+        _: &mut Self,
+        _: &DisplayHandle,
+        _: &wayland_server::Client,
+        resource: wayland_server::New<XwaylandShellV1>,
+        _: &(),
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+    }
+}
+
+impl<C: XConnection> Dispatch<XwaylandShellV1, ()> for ServerState<C> {
+    fn request(
+        state: &mut Self,
+        client: &wayland_server::Client,
+        _: &XwaylandShellV1,
+        request: <XwaylandShellV1 as Resource>::Request,
+        _: &(),
+        dhandle: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        use xwayland_shell_v1::Request;
+        match request {
+            Request::GetXwaylandSurface { id, surface } => {
+                let key: ObjectKey = surface.data().copied().unwrap();
+                let data: &mut SurfaceData = state.objects[key].as_mut();
+                if data.xwl.is_some() {
+                    error!("Surface {surface:?} already has the xwayland surface role!");
+                    client.kill(
+                        dhandle,
+                        wayland_client::backend::protocol::ProtocolError {
+                            code: 0,
+                            object_id: surface.id().protocol_id(),
+                            object_interface: "wl_surface".to_string(),
+                            message: "Surface already has role".to_string(),
+                        },
+                    );
+                    return;
+                }
+
+                let xwl = data_init.init(id, key);
+                data.xwl = Some(xwl);
+            }
+            Request::Destroy => {}
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl<C: XConnection> Dispatch<XwaylandSurfaceV1, ObjectKey> for ServerState<C> {
+    fn request(
+        state: &mut Self,
+        _: &wayland_server::Client,
+        _: &XwaylandSurfaceV1,
+        request: <XwaylandSurfaceV1 as Resource>::Request,
+        key: &ObjectKey,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        use xwayland_surface_v1::Request;
+        let data: &mut SurfaceData = state.objects[*key].as_mut();
+        match request {
+            Request::SetSerial {
+                serial_lo,
+                serial_hi,
+            } => {
+                let serial = [serial_lo, serial_hi];
+                data.serial = Some(serial);
+                if let Some((win, window_data)) =
+                    state.windows.iter_mut().find_map(|(win, data)| {
+                        Some(*win)
+                            .zip((data.surface_serial.is_some_and(|s| s == serial)).then_some(data))
+                    })
+                {
+                    debug!("associate surface {} with {:?}", data.server.id().protocol_id(), win);
+                    window_data.surface_key = Some(*key);
+                    state.associated_windows.insert(*key, win);
+                    if window_data.mapped {
+                        state.create_role_window(win, *key);
+                    }
+                }
+            }
+            Request::Destroy => {
+                data.xwl.take();
+            }
+            _ => unreachable!(),
+        }
+    }
+}
