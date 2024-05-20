@@ -228,6 +228,29 @@ impl XState {
                         Ok(_) | Err(xcb::ProtocolError::X(x::Error::Window(_), _)) => {}
                         Err(other) => panic!("Error removing event mask from window: {other:?}"),
                     }
+
+                    let active_win = self
+                        .connection
+                        .wait_for_reply(self.get_property_cookie(
+                            self.root,
+                            self.atoms.active_win,
+                            x::ATOM_WINDOW,
+                            1,
+                        ))
+                        .unwrap();
+
+                    let active_win: &[x::Window] = active_win.value();
+                    if active_win[0] == e.window() {
+                        self.connection
+                            .send_and_check_request(&x::ChangeProperty {
+                                mode: x::PropMode::Replace,
+                                window: self.root,
+                                property: self.atoms.active_win,
+                                r#type: x::ATOM_WINDOW,
+                                data: &[x::Window::none()],
+                            })
+                            .unwrap();
+                    }
                 }
                 xcb::Event::X(x::Event::DestroyNotify(e)) => {
                     debug!("destroying window {:?}", e.window());
