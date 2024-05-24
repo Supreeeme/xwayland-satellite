@@ -403,7 +403,7 @@ fn toplevel_flow() {
         window,
         x::ATOM_STRING,
         x::ATOM_WM_CLASS,
-        &[c"f".to_bytes_with_nul(), c"ssalc".to_bytes_with_nul()].concat(),
+        &[c"boink".to_bytes()].concat(),
     );
     connection.set_property(
         window,
@@ -415,7 +415,7 @@ fn toplevel_flow() {
     let data = f.testwl.get_surface_data(surface).unwrap();
     let toplevel = data.toplevel().toplevel.clone();
     assert_eq!(data.toplevel().title, Some("bindow".into()));
-    assert_eq!(data.toplevel().app_id, Some("ssalc".into()));
+    assert_eq!(data.toplevel().app_id, Some("boink".into()));
     assert_eq!(
         data.toplevel().min_size,
         Some(testwl::Vec2 { x: 25, y: 50 })

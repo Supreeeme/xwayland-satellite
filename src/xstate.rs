@@ -449,11 +449,19 @@ impl XState {
         let cookie = self.get_property_cookie(window, x::ATOM_WM_CLASS, x::ATOM_STRING, 256);
         let resolver = move |reply: x::GetPropertyReply| {
             let data: &[u8] = reply.value();
-            // wm class is instance + class - ignore instance
-            let class_start = data.iter().copied().position(|b| b == 0u8).unwrap() + 1;
-            let data = data[class_start..].to_vec();
+            trace!("wm class data: {data:?}");
+            // wm class (normally) is instance + class - ignore instance
+            let class_start = if let Some(p) = data.iter().copied().position(|b| b == 0u8) {
+                p + 1
+            } else {
+                0
+            };
+            let mut data = data[class_start..].to_vec();
+            if data.last().copied().unwrap() != 0 {
+                data.push(0);
+            }
             let class = CString::from_vec_with_nul(data).unwrap();
-            debug!("{:?} class: {class:?}", window);
+            trace!("{:?} class: {class:?}", window);
             class.to_string_lossy().to_string()
         };
         PropertyCookieWrapper {
@@ -506,7 +514,7 @@ impl XState {
         let resolver = |reply: x::GetPropertyReply| {
             let data: &[u32] = reply.value();
             let hints = WmHints::from(data);
-            debug!("wm hints: {hints:?}");
+            trace!("wm hints: {hints:?}");
             hints
         };
         PropertyCookieWrapper {
