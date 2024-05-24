@@ -1150,7 +1150,11 @@ impl<C: XConnection> Dispatch<XwaylandSurfaceV1, ObjectKey> for ServerState<C> {
                             .zip((data.surface_serial.is_some_and(|s| s == serial)).then_some(data))
                     })
                 {
-                    debug!("associate surface {} with {:?}", data.server.id().protocol_id(), win);
+                    debug!(
+                        "associate surface {} with {:?}",
+                        data.server.id().protocol_id(),
+                        win
+                    );
                     window_data.surface_key = Some(*key);
                     state.associated_windows.insert(*key, win);
                     if window_data.mapped {

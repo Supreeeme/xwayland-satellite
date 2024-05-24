@@ -511,6 +511,7 @@ impl<C: XConnection> ServerState<C> {
                     debug!("skipping setting window name to {name:?} because a _NET_WM_NAME title is already set");
                     None
                 } else {
+                    debug!("setting {window:?} title to {name:?}");
                     *w = name;
                     Some(w)
                 }

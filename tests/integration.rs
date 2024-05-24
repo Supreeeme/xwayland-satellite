@@ -295,8 +295,15 @@ impl Connection {
         wid
     }
 
+    #[track_caller]
     fn map_window(&self, window: x::Window) {
         self.send_and_check_request(&x::MapWindow { window })
+            .unwrap();
+    }
+
+    #[track_caller]
+    fn destroy_window(&self, window: x::Window) {
+        self.send_and_check_request(&x::DestroyWindow { window })
             .unwrap();
     }
 
@@ -356,6 +363,13 @@ fn toplevel_flow() {
         x::ATOM_WM_SIZE_HINTS,
         x::ATOM_WM_NORMAL_HINTS,
         &[flags, 0, 0, 0, 0, 50, 100, 300, 400],
+    );
+    println!("set title: window");
+    connection.set_property(
+        window,
+        x::ATOM_STRING,
+        x::ATOM_WM_NAME,
+        c"window".to_bytes(),
     );
     connection.map_window(window);
     f.wait_and_dispatch();
@@ -513,4 +527,52 @@ fn input_focus() {
         },
         |win, focus| assert_eq!(win, focus),
     );
+}
+
+#[test]
+fn quick_delete() {
+    let mut f = Fixture::new();
+    let connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    connection.map_window(window);
+    connection.set_property(
+        window,
+        x::ATOM_WM_HINTS,
+        x::ATOM_WM_HINTS,
+        &[WmHintsFlags::Input.bits(), 0],
+    );
+    connection.set_property(
+        window,
+        x::ATOM_STRING,
+        x::ATOM_WM_NAME,
+        c"bindow".to_bytes(),
+    );
+    connection.set_property(
+        window,
+        x::ATOM_STRING,
+        x::ATOM_WM_CLASS,
+        &[c"f".to_bytes_with_nul(), c"ssalc".to_bytes_with_nul()].concat(),
+    );
+    let flags = (WmSizeHintsFlags::ProgramMaxSize | WmSizeHintsFlags::ProgramMinSize).bits();
+    connection.set_property(
+        window,
+        x::ATOM_WM_SIZE_HINTS,
+        x::ATOM_WM_NORMAL_HINTS,
+        &[flags, 1, 2, 3, 4, 25, 50, 150, 200],
+    );
+    connection
+        .send_and_check_request(&x::ConfigureWindow {
+            window,
+            value_list: &[x::ConfigWindow::X(10), x::ConfigWindow::Y(40)],
+        })
+        .unwrap();
+    connection.destroy_window(window);
+    f.wait_and_dispatch();
+
+    let last_surf = f
+        .testwl
+        .last_created_surface_id()
+        .expect("No surface created");
+    assert_eq!(f.testwl.get_surface_data(last_surf), None);
 }

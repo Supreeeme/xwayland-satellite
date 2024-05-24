@@ -13,6 +13,35 @@ pub struct XState {
     pub atoms: Atoms,
 }
 
+// Sometimes we'll get events on windows that have already been destroyed
+#[derive(Debug)]
+enum MaybeBadWindow {
+    BadWindow,
+    Other(xcb::Error),
+}
+impl From<xcb::Error> for MaybeBadWindow {
+    fn from(value: xcb::Error) -> Self {
+        match value {
+            xcb::Error::Protocol(xcb::ProtocolError::X(
+                x::Error::Window(_) | x::Error::Drawable(_),
+                _,
+            )) => Self::BadWindow,
+            other => Self::Other(other),
+        }
+    }
+}
+impl From<xcb::ProtocolError> for MaybeBadWindow {
+    fn from(value: xcb::ProtocolError) -> Self {
+        match value {
+            xcb::ProtocolError::X(x::Error::Window(_) | x::Error::Drawable(_), _) => {
+                Self::BadWindow
+            }
+            other => Self::Other(xcb::Error::Protocol(other)),
+        }
+    }
+}
+
+type XResult<T> = Result<T, MaybeBadWindow>;
 /// Essentially a trait alias.
 trait PropertyResolver {
     type Output;
@@ -36,12 +65,12 @@ struct PropertyCookieWrapper<'a, F: PropertyResolver> {
 
 impl<F: PropertyResolver> PropertyCookieWrapper<'_, F> {
     /// Get the result from our property cookie.
-    fn resolve(self) -> Option<F::Output> {
-        let reply = self.connection.wait_for_reply(self.cookie).unwrap();
+    fn resolve(self) -> XResult<Option<F::Output>> {
+        let reply = self.connection.wait_for_reply(self.cookie)?;
         if reply.r#type() == x::ATOM_NONE {
-            None
+            Ok(None)
         } else {
-            Some(self.resolver.resolve(reply))
+            Ok(Some(self.resolver.resolve(reply)))
         }
     }
 }
@@ -165,6 +194,20 @@ impl XState {
     }
 
     pub fn handle_events(&mut self, server_state: &mut super::RealServerState) {
+        macro_rules! unwrap_or_skip_bad_window {
+            ($err:expr) => {
+                match $err {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let err = MaybeBadWindow::from(e);
+                        match err {
+                            MaybeBadWindow::BadWindow => continue,
+                            MaybeBadWindow::Other(other) => panic!("X11 protocol error: {other:?}"),
+                        }
+                    }
+                }
+            };
+        }
         while let Some(event) = self.connection.poll_for_event().unwrap() {
             trace!("x11 event: {event:?}");
             match event {
@@ -181,7 +224,8 @@ impl XState {
                 xcb::Event::X(x::Event::ReparentNotify(e)) => {
                     debug!("reparent event: {e:?}");
                     if e.parent() == self.root {
-                        let attrs = self.get_window_attributes(e.window());
+                        let attrs =
+                            unwrap_or_skip_bad_window!(self.get_window_attributes(e.window()));
                         server_state.new_window(
                             e.window(),
                             attrs.override_redirect,
@@ -196,20 +240,20 @@ impl XState {
                 }
                 xcb::Event::X(x::Event::MapRequest(e)) => {
                     debug!("requested to map {:?}", e.window());
-                    self.connection
-                        .send_and_check_request(&x::MapWindow { window: e.window() })
-                        .unwrap();
+                    unwrap_or_skip_bad_window!(self
+                        .connection
+                        .send_and_check_request(&x::MapWindow { window: e.window() }));
                 }
                 xcb::Event::X(x::Event::MapNotify(e)) => {
-                    let attrs = self.get_window_attributes(e.window());
-                    self.handle_window_attributes(server_state, e.window(), attrs);
-                    server_state.map_window(e.window());
-                    self.connection
-                        .send_and_check_request(&x::ChangeWindowAttributes {
+                    unwrap_or_skip_bad_window!(self.connection.send_and_check_request(
+                        &x::ChangeWindowAttributes {
                             window: e.window(),
                             value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
-                        })
-                        .unwrap();
+                        }
+                    ));
+                    let attrs = unwrap_or_skip_bad_window!(self.get_window_attributes(e.window()));
+                    self.handle_window_attributes(server_state, e.window(), attrs);
+                    server_state.map_window(e.window());
                 }
                 xcb::Event::X(x::Event::ConfigureNotify(e)) => {
                     server_state.reconfigure_window(e);
@@ -217,17 +261,12 @@ impl XState {
                 xcb::Event::X(x::Event::UnmapNotify(e)) => {
                     trace!("unmap event: {:?}", e.event());
                     server_state.unmap_window(e.window());
-                    match self
-                        .connection
-                        .send_and_check_request(&x::ChangeWindowAttributes {
+                    unwrap_or_skip_bad_window!(self.connection.send_and_check_request(
+                        &x::ChangeWindowAttributes {
                             window: e.window(),
                             value_list: &[x::Cw::EventMask(x::EventMask::empty())],
-                        }) {
-                        // Window error may occur if the window has been destroyed,
-                        // which is fine
-                        Ok(_) | Err(xcb::ProtocolError::X(x::Error::Window(_), _)) => {}
-                        Err(other) => panic!("Error removing event mask from window: {other:?}"),
-                    }
+                        }
+                    ));
 
                     let active_win = self
                         .connection
@@ -277,12 +316,12 @@ impl XState {
                         list.push(x::ConfigWindow::Height(e.height().into()));
                     }
 
-                    self.connection
-                        .send_and_check_request(&x::ConfigureWindow {
+                    unwrap_or_skip_bad_window!(self.connection.send_and_check_request(
+                        &x::ConfigureWindow {
                             window: e.window(),
                             value_list: &list,
-                        })
-                        .unwrap();
+                        }
+                    ));
                 }
                 xcb::Event::X(x::Event::ClientMessage(e)) => match e.r#type() {
                     x if x == self.atoms.wl_surface_id => {
@@ -328,7 +367,7 @@ impl XState {
         }
     }
 
-    fn get_window_attributes(&self, window: x::Window) -> WindowAttributes {
+    fn get_window_attributes(&self, window: x::Window) -> XResult<WindowAttributes> {
         let geometry = self.connection.send_request(&x::GetGeometry {
             drawable: x::Drawable::Window(window),
         });
@@ -341,16 +380,19 @@ impl XState {
         let wm_hints = self.get_wm_hints(window);
         let size_hints = self.get_wm_size_hints(window);
 
-        let geometry = self.connection.wait_for_reply(geometry).unwrap();
-        let attrs = self.connection.wait_for_reply(attrs).unwrap();
-        let title = name
-            .resolve()
-            .or_else(|| self.get_wm_name(window).resolve());
-        let class = class.resolve();
-        let wm_hints = wm_hints.resolve();
-        let size_hints = size_hints.resolve();
+        let geometry = self.connection.wait_for_reply(geometry)?;
+        let attrs = self.connection.wait_for_reply(attrs)?;
+        let mut title = name.resolve()?;
+        if title.is_none() {
+            title = self.get_wm_name(window).resolve()?;
+        }
 
-        WindowAttributes {
+        debug!("got title: {title:?}");
+        let class = class.resolve()?;
+        let wm_hints = wm_hints.resolve()?;
+        let size_hints = size_hints.resolve()?;
+
+        Ok(WindowAttributes {
             override_redirect: attrs.override_redirect(),
             popup_for: None,
             dims: WindowDims {
@@ -363,7 +405,7 @@ impl XState {
             class,
             group: wm_hints.and_then(|h| h.window_group),
             size_hints,
-        }
+        })
     }
 
     fn handle_window_attributes(
@@ -373,15 +415,12 @@ impl XState {
         attrs: WindowAttributes,
     ) {
         if let Some(name) = attrs.title {
-            debug!("setting {window:?} title to {name:?}");
             server_state.set_win_title(window, name);
         }
         if let Some(class) = attrs.class {
-            debug!("setting {window:?} class to {class}");
             server_state.set_win_class(window, class);
         }
         if let Some(hints) = attrs.size_hints {
-            debug!("{window:?} size hints: {hints:?}");
             server_state.set_size_hints(window, hints);
         }
     }
@@ -506,46 +545,44 @@ impl XState {
         }
 
         let window = event.window();
-        let get_prop = |r#type, long_length| {
-            self.connection
-                .wait_for_reply(self.connection.send_request(&x::GetProperty {
-                    window,
-                    property: event.atom(),
-                    r#type,
-                    long_offset: 0,
-                    long_length,
-                    delete: false,
-                }))
-        };
+        macro_rules! unwrap_or_skip_bad_window {
+            ($err:expr) => {
+                match $err {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let err = MaybeBadWindow::from(e);
+                        match err {
+                            MaybeBadWindow::BadWindow => return,
+                            MaybeBadWindow::Other(other) => panic!("X11 protocol error: {other:?}"),
+                        }
+                    }
+                }
+            };
+        }
 
         match event.atom() {
             x if x == x::ATOM_WM_HINTS => {
-                let hints = self.get_wm_hints(window).resolve().unwrap();
+                let hints =
+                    unwrap_or_skip_bad_window!(self.get_wm_hints(window).resolve()).unwrap();
                 server_state.set_win_hints(window, hints);
             }
             x if x == x::ATOM_WM_NORMAL_HINTS => {
-                let hints = self.get_wm_size_hints(window).resolve().unwrap();
+                let hints =
+                    unwrap_or_skip_bad_window!(self.get_wm_size_hints(window).resolve()).unwrap();
                 server_state.set_size_hints(window, hints);
             }
-            x if x == x::ATOM_WM_NAME || x == self.atoms.net_wm_name => {
-                let ty = if x == x::ATOM_WM_NAME {
-                    x::ATOM_STRING
-                } else {
-                    self.atoms.utf8_string
-                };
-                let prop = get_prop(ty, 256).unwrap();
-                let data: &[u8] = prop.value();
-                let name = String::from_utf8(data.to_vec()).unwrap();
-                debug!("{:?} named: {name}", window);
-                let name = if x == x::ATOM_WM_NAME {
-                    WmName::WmName(name)
-                } else {
-                    WmName::NetWmName(name)
-                };
+            x if x == x::ATOM_WM_NAME => {
+                let name = unwrap_or_skip_bad_window!(self.get_wm_name(window).resolve()).unwrap();
+                server_state.set_win_title(window, name);
+            }
+            x if x == self.atoms.net_wm_name => {
+                let name =
+                    unwrap_or_skip_bad_window!(self.get_net_wm_name(window).resolve()).unwrap();
                 server_state.set_win_title(window, name);
             }
             x if x == x::ATOM_WM_CLASS => {
-                let class = self.get_wm_class(window).resolve().unwrap();
+                let class =
+                    unwrap_or_skip_bad_window!(self.get_wm_class(window).resolve()).unwrap();
                 server_state.set_win_class(window, class);
             }
             _ => {
