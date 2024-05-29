@@ -536,6 +536,11 @@ fn quick_delete() {
 
     let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
     connection.map_window(window);
+    f.wait_and_dispatch();
+    let surf = f
+        .testwl
+        .last_created_surface_id()
+        .expect("No surface created");
     connection.set_property(
         window,
         x::ATOM_WM_HINTS,
@@ -567,12 +572,10 @@ fn quick_delete() {
             value_list: &[x::ConfigWindow::X(10), x::ConfigWindow::Y(40)],
         })
         .unwrap();
+    f.testwl
+        .configure_toplevel(surf, 100, 100, vec![xdg_toplevel::State::Activated]);
     connection.destroy_window(window);
     f.wait_and_dispatch();
 
-    let last_surf = f
-        .testwl
-        .last_created_surface_id()
-        .expect("No surface created");
-    assert_eq!(f.testwl.get_surface_data(last_surf), None);
+    assert_eq!(f.testwl.get_surface_data(surf), None);
 }

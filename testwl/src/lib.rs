@@ -170,7 +170,10 @@ impl State {
 
     #[track_caller]
     fn get_toplevel(&mut self, surface_id: SurfaceId) -> &mut Toplevel {
-        let surface = self.surfaces.get_mut(&surface_id).unwrap();
+        let surface = self
+            .surfaces
+            .get_mut(&surface_id)
+            .expect("Surface does not exist");
         match &mut surface.role {
             Some(SurfaceRole::Toplevel(t)) => t,
             other => panic!("Surface does not have toplevel role: {:?}", other),

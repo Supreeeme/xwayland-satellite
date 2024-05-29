@@ -42,6 +42,21 @@ impl From<xcb::ProtocolError> for MaybeBadWindow {
 }
 
 type XResult<T> = Result<T, MaybeBadWindow>;
+macro_rules! unwrap_or_skip_bad_window {
+    ($err:expr) => {
+        match $err {
+            Ok(v) => v,
+            Err(e) => {
+                let err = MaybeBadWindow::from(e);
+                match err {
+                    MaybeBadWindow::BadWindow => return,
+                    MaybeBadWindow::Other(other) => panic!("X11 protocol error: {other:?}"),
+                }
+            }
+        }
+    };
+}
+
 /// Essentially a trait alias.
 trait PropertyResolver {
     type Output;
@@ -194,7 +209,7 @@ impl XState {
     }
 
     pub fn handle_events(&mut self, server_state: &mut super::RealServerState) {
-        macro_rules! unwrap_or_skip_bad_window {
+        macro_rules! unwrap_or_skip_bad_window_cont {
             ($err:expr) => {
                 match $err {
                     Ok(v) => v,
@@ -225,7 +240,7 @@ impl XState {
                     debug!("reparent event: {e:?}");
                     if e.parent() == self.root {
                         let attrs =
-                            unwrap_or_skip_bad_window!(self.get_window_attributes(e.window()));
+                            unwrap_or_skip_bad_window_cont!(self.get_window_attributes(e.window()));
                         server_state.new_window(
                             e.window(),
                             attrs.override_redirect,
@@ -240,18 +255,19 @@ impl XState {
                 }
                 xcb::Event::X(x::Event::MapRequest(e)) => {
                     debug!("requested to map {:?}", e.window());
-                    unwrap_or_skip_bad_window!(self
+                    unwrap_or_skip_bad_window_cont!(self
                         .connection
                         .send_and_check_request(&x::MapWindow { window: e.window() }));
                 }
                 xcb::Event::X(x::Event::MapNotify(e)) => {
-                    unwrap_or_skip_bad_window!(self.connection.send_and_check_request(
+                    unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
                         &x::ChangeWindowAttributes {
                             window: e.window(),
                             value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
                         }
                     ));
-                    let attrs = unwrap_or_skip_bad_window!(self.get_window_attributes(e.window()));
+                    let attrs =
+                        unwrap_or_skip_bad_window_cont!(self.get_window_attributes(e.window()));
                     self.handle_window_attributes(server_state, e.window(), attrs);
                     server_state.map_window(e.window());
                 }
@@ -261,7 +277,7 @@ impl XState {
                 xcb::Event::X(x::Event::UnmapNotify(e)) => {
                     trace!("unmap event: {:?}", e.event());
                     server_state.unmap_window(e.window());
-                    unwrap_or_skip_bad_window!(self.connection.send_and_check_request(
+                    unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
                         &x::ChangeWindowAttributes {
                             window: e.window(),
                             value_list: &[x::Cw::EventMask(x::EventMask::empty())],
@@ -316,7 +332,7 @@ impl XState {
                         list.push(x::ConfigWindow::Height(e.height().into()));
                     }
 
-                    unwrap_or_skip_bad_window!(self.connection.send_and_check_request(
+                    unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
                         &x::ConfigureWindow {
                             window: e.window(),
                             value_list: &list,
@@ -553,20 +569,6 @@ impl XState {
         }
 
         let window = event.window();
-        macro_rules! unwrap_or_skip_bad_window {
-            ($err:expr) => {
-                match $err {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let err = MaybeBadWindow::from(e);
-                        match err {
-                            MaybeBadWindow::BadWindow => return,
-                            MaybeBadWindow::Other(other) => panic!("X11 protocol error: {other:?}"),
-                        }
-                    }
-                }
-            };
-        }
 
         match event.atom() {
             x if x == x::ATOM_WM_HINTS => {
@@ -751,7 +753,7 @@ impl super::XConnection for Arc<xcb::Connection> {
 
     fn set_window_dims(&mut self, window: x::Window, dims: crate::server::PendingSurfaceState) {
         trace!("reconfiguring window {window:?}");
-        self.send_and_check_request(&x::ConfigureWindow {
+        unwrap_or_skip_bad_window!(self.send_and_check_request(&x::ConfigureWindow {
             window,
             value_list: &[
                 x::ConfigWindow::X(dims.x),
@@ -759,8 +761,7 @@ impl super::XConnection for Arc<xcb::Connection> {
                 x::ConfigWindow::Width(dims.width as _),
                 x::ConfigWindow::Height(dims.height as _),
             ],
-        })
-        .unwrap();
+        }));
     }
 
     fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool, atoms: Self::ExtraData) {
@@ -780,16 +781,15 @@ impl super::XConnection for Arc<xcb::Connection> {
     }
 
     fn focus_window(&mut self, window: x::Window, atoms: Self::ExtraData) {
-        let prop = self
-            .wait_for_reply(self.send_request(&x::GetProperty {
+        let prop =
+            unwrap_or_skip_bad_window!(self.wait_for_reply(self.send_request(&x::GetProperty {
                 delete: false,
                 window,
                 property: x::ATOM_WM_HINTS,
                 r#type: x::ATOM_WM_HINTS,
                 long_offset: 0,
                 long_length: 9,
-            }))
-            .unwrap();
+            })));
 
         let set_focus = if prop.r#type() == x::ATOM_NONE {
             true
@@ -806,19 +806,17 @@ impl super::XConnection for Arc<xcb::Connection> {
             });
         }
 
-        self.send_and_check_request(&x::ConfigureWindow {
+        unwrap_or_skip_bad_window!(self.send_and_check_request(&x::ConfigureWindow {
             window,
             value_list: &[x::ConfigWindow::StackMode(x::StackMode::Above)],
-        })
-        .unwrap();
-        self.send_and_check_request(&x::ChangeProperty {
+        }));
+        unwrap_or_skip_bad_window!(self.send_and_check_request(&x::ChangeProperty {
             mode: x::PropMode::Replace,
             window: self.root_window(),
             property: atoms.active_win,
             r#type: x::ATOM_WINDOW,
             data: &[window],
-        })
-        .unwrap();
+        }));
     }
 
     fn close_window(&mut self, window: x::Window, atoms: Self::ExtraData) {
@@ -829,13 +827,12 @@ impl super::XConnection for Arc<xcb::Connection> {
             x::ClientMessageData::Data32(data),
         );
 
-        self.send_and_check_request(&x::SendEvent {
+        unwrap_or_skip_bad_window!(self.send_and_check_request(&x::SendEvent {
             destination: x::SendEventDest::Window(window),
             propagate: false,
             event_mask: x::EventMask::empty(),
             event,
-        })
-        .unwrap();
+        }));
     }
 }
 
