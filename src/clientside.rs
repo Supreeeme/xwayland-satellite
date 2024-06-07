@@ -8,7 +8,11 @@ use wayland_client::protocol::{
     wl_registry::WlRegistry, wl_seat::WlSeat, wl_shm::WlShm, wl_shm_pool::WlShmPool,
     wl_surface::WlSurface, wl_touch::WlTouch,
 };
-use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, Proxy, QueueHandle};
+use wayland_client::{
+    delegate_noop,
+    globals::{registry_queue_init, Global, GlobalList, GlobalListContents},
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle,
+};
 use wayland_protocols::wp::relative_pointer::zv1::client::{
     zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
     zwp_relative_pointer_v1::ZwpRelativePointerV1,
@@ -40,17 +44,16 @@ use wayland_protocols::{
 use wayland_server::protocol as server;
 use wl_drm::client::wl_drm::WlDrm;
 
-#[derive(Debug)]
-pub struct GlobalData {
-    pub name: u32,
-    pub interface: String,
-    pub version: u32,
-}
-
 #[derive(Default)]
 pub struct Globals {
     pub(crate) events: Vec<(ObjectKey, ObjectEvent)>,
-    pub new_globals: Vec<GlobalData>,
+    pub new_globals: Vec<Global>,
+    pub selection: Option<wayland_client::protocol::wl_data_device::WlDataDevice>,
+    pub selection_requests: Vec<(
+        String,
+        smithay_client_toolkit::data_device_manager::WritePipe,
+    )>,
+    pub cancelled: bool,
 }
 
 pub type ClientQueueHandle = QueueHandle<Globals>;
@@ -65,7 +68,7 @@ pub struct ClientState {
     pub queue: EventQueue<Globals>,
     pub qh: ClientQueueHandle,
     pub globals: Globals,
-    pub registry: WlRegistry,
+    pub global_list: GlobalList,
 }
 
 impl ClientState {
@@ -76,20 +79,16 @@ impl ClientState {
             Connection::connect_to_env()
         }
         .unwrap();
-        let mut queue = connection.new_event_queue::<Globals>();
+        let (global_list, queue) = registry_queue_init::<Globals>(&connection).unwrap();
+        let globals = Globals::default();
         let qh = queue.handle();
-        let mut globals = Globals::default();
-
-        let registry = connection.display().get_registry(&qh, ());
-        // Get initial globals
-        queue.roundtrip(&mut globals).unwrap();
 
         Self {
             connection,
             queue,
             qh,
             globals,
-            registry,
+            global_list,
         }
     }
 }
@@ -109,12 +108,12 @@ delegate_noop!(Globals: WpViewport);
 delegate_noop!(Globals: ZxdgOutputManagerV1);
 delegate_noop!(Globals: ZwpPointerConstraintsV1);
 
-impl Dispatch<WlRegistry, ()> for Globals {
+impl Dispatch<WlRegistry, GlobalListContents> for Globals {
     fn event(
         state: &mut Self,
         _: &WlRegistry,
         event: <WlRegistry as Proxy>::Event,
-        _: &(),
+        _: &GlobalListContents,
         _: &wayland_client::Connection,
         _: &wayland_client::QueueHandle<Self>,
     ) {
@@ -124,7 +123,7 @@ impl Dispatch<WlRegistry, ()> for Globals {
             version,
         } = event
         {
-            state.new_globals.push(GlobalData {
+            state.new_globals.push(Global {
                 name,
                 interface,
                 version,

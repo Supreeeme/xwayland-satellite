@@ -1,4 +1,5 @@
 mod clientside;
+mod data_device;
 mod server;
 pub mod xstate;
 
@@ -16,6 +17,7 @@ use xcb::x;
 
 pub trait XConnection: Sized + 'static {
     type ExtraData: FromServerState<Self>;
+    type MimeTypeData: MimeTypeData;
 
     fn root_window(&self) -> x::Window;
     fn set_window_dims(&mut self, window: x::Window, dims: PendingSurfaceState);
@@ -26,6 +28,11 @@ pub trait XConnection: Sized + 'static {
 
 pub trait FromServerState<C: XConnection> {
     fn create(state: &ServerState<C>) -> Self;
+}
+
+pub trait MimeTypeData {
+    fn name(&self) -> &str;
+    fn data(&self) -> &[u8];
 }
 
 type RealServerState = ServerState<Arc<xcb::Connection>>;
@@ -152,12 +159,18 @@ pub fn main(data: impl RunData) -> Option<()> {
             server_state.atoms = Some(xstate.atoms.clone());
         }
 
-        if let Some(state) = &mut xstate {
-            state.handle_events(&mut server_state);
+        if let Some(xstate) = &mut xstate {
+            xstate.handle_events(&mut server_state);
         }
 
         display.dispatch_clients(&mut server_state).unwrap();
         server_state.run();
         display.flush_clients().unwrap();
+
+        if let Some(xstate) = &mut xstate {
+            if let Some(sel) = server_state.new_selection() {
+                xstate.set_clipboard(sel);
+            }
+        }
     }
 }

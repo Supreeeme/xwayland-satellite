@@ -1,3 +1,6 @@
+mod selection;
+use selection::{SelectionData, SelectionTarget};
+
 use crate::server::WindowAttributes;
 use bitflags::bitflags;
 use log::{debug, trace, warn};
@@ -6,12 +9,6 @@ use std::os::fd::{AsRawFd, BorrowedFd};
 use std::sync::Arc;
 use xcb::{x, Xid, XidNew};
 use xcb_util_cursor::{Cursor, CursorContext};
-
-pub struct XState {
-    pub connection: Arc<xcb::Connection>,
-    root: x::Window,
-    pub atoms: Atoms,
-}
 
 // Sometimes we'll get events on windows that have already been destroyed
 #[derive(Debug)]
@@ -105,6 +102,14 @@ impl WmName {
     }
 }
 
+pub struct XState {
+    pub connection: Arc<xcb::Connection>,
+    pub atoms: Atoms,
+    root: x::Window,
+    wm_window: x::Window,
+    selection_data: SelectionData,
+}
+
 impl XState {
     pub fn new(fd: BorrowedFd) -> Self {
         let connection = Arc::new(xcb::Connection::connect_to_fd(fd.as_raw_fd(), None).unwrap());
@@ -144,10 +149,14 @@ impl XState {
             })
             .unwrap();
 
+        let wm_window = connection.generate_id();
+
         let mut r = Self {
             connection,
+            wm_window,
             root,
             atoms,
+            selection_data: Default::default(),
         };
         r.create_ewmh_window();
         r
@@ -166,11 +175,10 @@ impl XState {
     }
 
     fn create_ewmh_window(&mut self) {
-        let window = self.connection.generate_id();
         self.connection
             .send_and_check_request(&x::CreateWindow {
                 depth: 0,
-                wid: window,
+                wid: self.wm_window,
                 parent: self.root,
                 x: 0,
                 y: 0,
@@ -183,29 +191,31 @@ impl XState {
             })
             .unwrap();
 
-        self.set_root_property(self.atoms.wm_check, x::ATOM_WINDOW, &[window]);
+        self.set_root_property(self.atoms.wm_check, x::ATOM_WINDOW, &[self.wm_window]);
         self.set_root_property(self.atoms.active_win, x::ATOM_WINDOW, &[x::Window::none()]);
         self.set_root_property(self.atoms.supported, x::ATOM_ATOM, &[self.atoms.active_win]);
 
         self.connection
             .send_and_check_request(&x::ChangeProperty {
                 mode: x::PropMode::Replace,
-                window,
+                window: self.wm_window,
                 property: self.atoms.wm_check,
                 r#type: x::ATOM_WINDOW,
-                data: &[window],
+                data: &[self.wm_window],
             })
             .unwrap();
 
         self.connection
             .send_and_check_request(&x::ChangeProperty {
                 mode: x::PropMode::Replace,
-                window,
+                window: self.wm_window,
                 property: self.atoms.net_wm_name,
                 r#type: x::ATOM_STRING,
                 data: b"exwayland wm",
             })
             .unwrap();
+
+        self.set_clipboard_owner(x::CURRENT_TIME);
     }
 
     pub fn handle_events(&mut self, server_state: &mut super::RealServerState) {
@@ -225,6 +235,11 @@ impl XState {
         }
         while let Some(event) = self.connection.poll_for_event().unwrap() {
             trace!("x11 event: {event:?}");
+
+            if self.handle_selection_event(&event, server_state) {
+                continue;
+            }
+
             match event {
                 xcb::Event::X(x::Event::CreateNotify(e)) => {
                     debug!("new window: {:?}", e);
@@ -381,6 +396,14 @@ impl XState {
 
             server_state.run();
         }
+    }
+
+    fn get_atom_name(&self, atom: x::Atom) -> String {
+        self.connection
+            .wait_for_reply(self.connection.send_request(&x::GetAtomName { atom }))
+            .unwrap()
+            .name()
+            .to_string()
     }
 
     fn get_window_attributes(&self, window: x::Window) -> XResult<WindowAttributes> {
@@ -564,7 +587,7 @@ impl XState {
         server_state: &mut super::RealServerState,
     ) {
         if event.state() != x::Property::NewValue {
-            println!("ignoring non newvalue for property {:?}", event.atom());
+            debug!("ignoring non newvalue for property {:?}", event.atom());
             return;
         }
 
@@ -597,15 +620,11 @@ impl XState {
             }
             _ => {
                 if log::log_enabled!(log::Level::Debug) {
-                    let prop = self
-                        .connection
-                        .wait_for_reply(
-                            self.connection
-                                .send_request(&x::GetAtomName { atom: event.atom() }),
-                        )
-                        .unwrap();
-
-                    debug!("changed property {:?} for {:?}", prop.name(), window);
+                    debug!(
+                        "changed property {:?} for {:?}",
+                        self.get_atom_name(event.atom()),
+                        window
+                    );
                 }
             }
         }
@@ -629,6 +648,11 @@ xcb::atoms_struct! {
         pub client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
         pub supported => b"_NET_SUPPORTED" only_if_exists = false,
         pub utf8_string => b"UTF8_STRING" only_if_exists = false,
+        pub clipboard => b"CLIPBOARD" only_if_exists = false,
+        pub targets => b"TARGETS" only_if_exists = false,
+        pub multiple => b"MULTIPLE" only_if_exists = false,
+        pub timestamp => b"TIMESTAMP" only_if_exists = false,
+        pub selection_reply => b"_selection_reply" only_if_exists = false,
     }
 }
 
@@ -746,6 +770,7 @@ impl TryFrom<u32> for SetState {
 
 impl super::XConnection for Arc<xcb::Connection> {
     type ExtraData = Atoms;
+    type MimeTypeData = SelectionTarget;
 
     fn root_window(&self) -> x::Window {
         self.get_setup().roots().next().unwrap().root()

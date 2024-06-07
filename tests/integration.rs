@@ -228,6 +228,12 @@ xcb::atoms_struct! {
     struct Atoms {
         wm_protocols => b"WM_PROTOCOLS",
         wm_delete_window => b"WM_DELETE_WINDOW",
+        clipboard => b"CLIPBOARD",
+        targets => b"TARGETS",
+        multiple => b"MULTIPLE",
+        wm_check => b"_NET_SUPPORTING_WM_CHECK",
+        mime1 => b"text/plain" only_if_exists = false,
+        mime2 => b"blah/blah" only_if_exists = false,
     }
 }
 
@@ -307,6 +313,7 @@ impl Connection {
             .unwrap();
     }
 
+    #[track_caller]
     fn set_property<P: x::PropEl>(
         &self,
         window: x::Window,
@@ -330,6 +337,17 @@ impl Connection {
             poll(&mut [self.pollfd.clone()], 100).expect("poll failed") > 0,
             "Did not get any X11 events"
         );
+    }
+
+    #[track_caller]
+    fn get_reply<R: xcb::Request>(
+        &self,
+        req: &R,
+    ) -> <R::Cookie as xcb::CookieWithReplyChecked>::Reply
+    where
+        R::Cookie: xcb::CookieWithReplyChecked,
+    {
+        self.wait_for_reply(self.send_request(req)).unwrap()
     }
 }
 
@@ -364,7 +382,6 @@ fn toplevel_flow() {
         x::ATOM_WM_NORMAL_HINTS,
         &[flags, 0, 0, 0, 0, 50, 100, 300, 400],
     );
-    println!("set title: window");
     connection.set_property(
         window,
         x::ATOM_STRING,
@@ -578,4 +595,278 @@ fn quick_delete() {
     f.wait_and_dispatch();
 
     assert_eq!(f.testwl.get_surface_data(surf), None);
+}
+
+// aaaaaaaaaa
+#[test]
+fn copy_from_x11() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    connection.map_window(window);
+    f.wait_and_dispatch();
+    let surface = f
+        .testwl
+        .last_created_surface_id()
+        .expect("No surface created");
+    f.configure_and_verify_new_toplevel(&mut connection, window, surface);
+
+    // set data
+    connection
+        .send_and_check_request(&x::SetSelectionOwner {
+            owner: window,
+            selection: connection.atoms.clipboard,
+            time: x::CURRENT_TIME,
+        })
+        .unwrap();
+    let owner = connection
+        .wait_for_reply(connection.send_request(&x::GetSelectionOwner {
+            selection: connection.atoms.clipboard,
+        }))
+        .unwrap();
+    assert_eq!(window, owner.owner());
+
+    // wait for request to come through
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let request = match connection.poll_for_event().unwrap() {
+        Some(xcb::Event::X(x::Event::SelectionRequest(r))) => r,
+        other => panic!("Didn't get selection request event, instead got {other:?}"),
+    };
+
+    assert_eq!(request.target(), connection.atoms.targets);
+    connection.set_property(
+        request.requestor(),
+        x::ATOM_ATOM,
+        request.property(),
+        &[connection.atoms.mime1, connection.atoms.mime2],
+    );
+    connection
+        .send_and_check_request(&x::SendEvent {
+            propagate: false,
+            destination: x::SendEventDest::Window(request.requestor()),
+            event_mask: x::EventMask::empty(),
+            event: &x::SelectionNotifyEvent::new(
+                request.time(),
+                request.requestor(),
+                request.selection(),
+                request.target(),
+                request.property(),
+            ),
+        })
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let request = match connection.poll_for_event().unwrap() {
+        Some(xcb::Event::X(x::Event::SelectionRequest(r))) => r,
+        other => panic!("Didn't get selection request event, instead got {other:?}"),
+    };
+
+    assert_eq!(request.target(), connection.atoms.multiple);
+    let pairs = connection
+        .wait_for_reply(connection.send_request(&x::GetProperty {
+            delete: true,
+            window: request.requestor(),
+            property: request.property(),
+            r#type: x::ATOM_ATOM,
+            long_offset: 0,
+            long_length: 4,
+        }))
+        .unwrap();
+
+    let pairs: &[x::Atom] = pairs.value();
+    assert_eq!(pairs.len(), 4);
+    assert!(pairs.contains(&connection.atoms.mime1));
+    assert!(pairs.contains(&connection.atoms.mime2));
+
+    let mime1data = b"hello world";
+    let mime2data = &[1u8, 2, 3, 4];
+    for [target, property] in pairs
+        .chunks_exact(2)
+        .map(|pair| <[x::Atom; 2]>::try_from(pair).unwrap())
+    {
+        match target {
+            x if x == connection.atoms.mime1 => {
+                connection.set_property(request.requestor(), x::ATOM_STRING, property, mime1data);
+            }
+            x if x == connection.atoms.mime2 => {
+                connection.set_property(request.requestor(), x::ATOM_INTEGER, property, mime2data);
+            }
+            _ => panic!("unexpected target: {target:?}"),
+        }
+    }
+
+    connection
+        .send_and_check_request(&x::SendEvent {
+            propagate: false,
+            destination: x::SendEventDest::Window(request.requestor()),
+            event_mask: x::EventMask::empty(),
+            event: &x::SelectionNotifyEvent::new(
+                request.time(),
+                request.requestor(),
+                request.selection(),
+                request.target(),
+                request.property(),
+            ),
+        })
+        .unwrap();
+
+    f.wait_and_dispatch();
+
+    let owner = connection
+        .wait_for_reply(connection.send_request(&x::GetSelectionOwner {
+            selection: connection.atoms.clipboard,
+        }))
+        .unwrap();
+    assert_ne!(window, owner.owner());
+
+    let mimes = f.testwl.data_source_mimes();
+    assert!(mimes.contains(&"text/plain".into())); // mime1
+    assert!(mimes.contains(&"blah/blah".into())); // mime2
+
+    let data = f.testwl.paste_data();
+    f.testwl.dispatch();
+    let data = data.resolve();
+    for testwl::PasteData { mime_type, data } in data {
+        match mime_type {
+            x if x == "text/plain" => {
+                assert_eq!(&data, mime1data);
+            }
+            x if x == "blah/blah" => {
+                assert_eq!(&data, mime2data);
+            }
+            other => panic!("unexpected mime type: {other} ({data:?})"),
+        }
+    }
+}
+
+#[test]
+fn copy_from_wayland() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    connection.map_window(window);
+    f.wait_and_dispatch();
+    let surface = f
+        .testwl
+        .last_created_surface_id()
+        .expect("No surface created");
+    f.configure_and_verify_new_toplevel(&mut connection, window, surface);
+    let offer = vec![
+        testwl::PasteData {
+            mime_type: "text/plain".into(),
+            data: b"boingloings".to_vec(),
+        },
+        testwl::PasteData {
+            mime_type: "yah/hah".into(),
+            data: vec![1, 2, 3, 2, 1],
+        },
+    ];
+
+    f.testwl.create_data_offer(offer.clone());
+
+    let wm_window: x::Window = connection
+        .get_reply(&x::GetProperty {
+            delete: false,
+            window: connection.root,
+            property: connection.atoms.wm_check,
+            r#type: x::ATOM_WINDOW,
+            long_offset: 0,
+            long_length: 1,
+        })
+        .value()[0];
+
+    let reply = connection.get_reply(&x::GetSelectionOwner {
+        selection: connection.atoms.clipboard,
+    });
+    assert_eq!(reply.owner(), wm_window);
+    let dest1_atom = connection
+        .get_reply(&x::InternAtom {
+            name: b"dest1",
+            only_if_exists: false,
+        })
+        .atom();
+
+    // I don't know why, but omitting this little sleep prevents the SelectionRequest notification
+    // from being sent, and I don't have the heart to determine why.
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    connection
+        .send_and_check_request(&x::ConvertSelection {
+            requestor: window,
+            selection: connection.atoms.clipboard,
+            target: connection.atoms.targets,
+            property: dest1_atom,
+            time: x::CURRENT_TIME,
+        })
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let request = match connection.poll_for_event().unwrap() {
+        Some(xcb::Event::X(x::Event::SelectionNotify(r))) => r,
+        other => panic!("Didn't get selection notify event, instead got {other:?}"),
+    };
+
+    assert_eq!(request.requestor(), window);
+    assert_eq!(request.selection(), connection.atoms.clipboard);
+    assert_eq!(request.target(), connection.atoms.targets);
+    assert_eq!(request.property(), dest1_atom);
+
+    let reply = connection.get_reply(&x::GetProperty {
+        delete: true,
+        window,
+        property: dest1_atom,
+        r#type: x::ATOM_ATOM,
+        long_offset: 0,
+        long_length: 10,
+    });
+    let targets: &[x::Atom] = reply.value();
+    assert_eq!(targets.len(), 2);
+
+    for testwl::PasteData { mime_type, data } in offer {
+        let atom = connection
+            .get_reply(&x::InternAtom {
+                only_if_exists: true,
+                name: mime_type.as_bytes(),
+            })
+            .atom();
+        assert_ne!(atom, x::ATOM_NONE);
+        assert!(targets.contains(&atom));
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        connection
+            .send_and_check_request(&x::ConvertSelection {
+                requestor: window,
+                selection: connection.atoms.clipboard,
+                target: atom,
+                property: dest1_atom,
+                time: x::CURRENT_TIME,
+            })
+            .unwrap();
+
+        f.wait_and_dispatch();
+        let request = match connection.poll_for_event().unwrap() {
+            Some(xcb::Event::X(x::Event::SelectionNotify(r))) => r,
+            other => panic!("Didn't get selection notify event, instead got {other:?}"),
+        };
+
+        assert_eq!(request.requestor(), window);
+        assert_eq!(request.selection(), connection.atoms.clipboard);
+        assert_eq!(request.target(), atom);
+        assert_eq!(request.property(), dest1_atom);
+
+        let val: Vec<u8> = connection
+            .get_reply(&x::GetProperty {
+                delete: true,
+                window,
+                property: dest1_atom,
+                r#type: x::ATOM_ANY,
+                long_offset: 0,
+                long_length: 10,
+            })
+            .value()
+            .to_vec();
+
+        assert_eq!(val, data);
+    }
 }

@@ -4,6 +4,7 @@ wayland-client = "0.31.2"
 wayland-protocols = "0.31.2"
 wayland-scanner = "0.31.1"
 wayland-server = "0.31.1"
+rustix = "0.38.31"
 
 [package]
 name = "xwayland-satellite"
@@ -18,7 +19,7 @@ crate-type = ["lib"]
 [dependencies]
 bitflags = "2.5.0"
 paste = "1.0.14"
-rustix = { version = "0.38.31", features = ["event"] }
+rustix = { workspace = true, features = ["event"] }
 wayland-client.workspace = true
 wayland-protocols = { workspace = true, features = ["client", "server", "staging", "unstable"] }
 wayland-scanner.workspace = true
@@ -31,7 +32,8 @@ env_logger = "0.11.3"
 pretty_env_logger = "0.5.0"
 slotmap = "1.0.7"
 xcb-util-cursor = "0.3.2"
+smithay-client-toolkit = { version = "0.18.1", default-features = false }
 
 [dev-dependencies]
-rustix = { version = "0.38.31", features = ["fs"] }
+rustix = { workspace = true, features = ["fs"] }
 testwl = { path = "testwl" }

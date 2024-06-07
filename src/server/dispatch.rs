@@ -1,6 +1,7 @@
 use super::*;
 use log::{debug, error, trace, warn};
 use std::sync::{Arc, OnceLock};
+use wayland_client::globals::Global;
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
@@ -994,7 +995,7 @@ impl<T: Proxy> Default for ClientGlobalWrapper<T> {
 
 macro_rules! global_dispatch_no_events {
     ($server:ty, $client:ty) => {
-        impl<C: XConnection> GlobalDispatch<$server, GlobalData> for ServerState<C>
+        impl<C: XConnection> GlobalDispatch<$server, Global> for ServerState<C>
         where
             ServerState<C>: Dispatch<$server, ClientGlobalWrapper<$client>>,
             Globals: wayland_client::Dispatch<$client, ()>,
@@ -1004,7 +1005,7 @@ macro_rules! global_dispatch_no_events {
                 _: &DisplayHandle,
                 _: &wayland_server::Client,
                 resource: wayland_server::New<$server>,
-                data: &GlobalData,
+                data: &Global,
                 data_init: &mut wayland_server::DataInit<'_, Self>,
             ) {
                 let client = ClientGlobalWrapper::<$client>::default();
@@ -1014,8 +1015,9 @@ macro_rules! global_dispatch_no_events {
                     .set(
                         state
                             .clientside
-                            .registry
-                            .bind(data.name, server.version(), &state.qh, ()),
+                            .global_list
+                            .registry()
+                            .bind::<$client, _, _>(data.name, server.version(), &state.qh, ()),
                     )
                     .unwrap();
             }
@@ -1025,7 +1027,7 @@ macro_rules! global_dispatch_no_events {
 
 macro_rules! global_dispatch_with_events {
     ($server:ty, $client:ty) => {
-        impl<C: XConnection> GlobalDispatch<$server, GlobalData> for ServerState<C>
+        impl<C: XConnection> GlobalDispatch<$server, Global> for ServerState<C>
         where
             $server: Resource,
             $client: Proxy,
@@ -1038,17 +1040,16 @@ macro_rules! global_dispatch_with_events {
                 _: &DisplayHandle,
                 _: &wayland_server::Client,
                 resource: wayland_server::New<$server>,
-                data: &GlobalData,
+                data: &Global,
                 data_init: &mut wayland_server::DataInit<'_, Self>,
             ) {
                 state.objects.insert_with_key(|key| {
                     let server = data_init.init(resource, key);
-                    let client = state.clientside.registry.bind::<$client, _, _>(
-                        data.name,
-                        server.version(),
-                        &state.qh,
-                        key,
-                    );
+                    let client = state
+                        .clientside
+                        .global_list
+                        .registry()
+                        .bind::<$client, _, _>(data.name, server.version(), &state.qh, key);
                     GenericObject { server, client }.into()
                 });
             }
@@ -1070,7 +1071,36 @@ global_dispatch_no_events!(
 );
 global_dispatch_no_events!(PointerConstraintsServer, PointerConstraintsClient);
 
-global_dispatch_with_events!(WlSeat, client::wl_seat::WlSeat);
+impl<C: XConnection> GlobalDispatch<WlSeat, Global> for ServerState<C>
+where
+    WlSeat: Resource,
+    client::wl_seat::WlSeat: Proxy,
+    ServerState<C>: Dispatch<WlSeat, ObjectKey>,
+    Globals: wayland_client::Dispatch<client::wl_seat::WlSeat, ObjectKey>,
+    GenericObject<WlSeat, client::wl_seat::WlSeat>: Into<Object>,
+{
+    fn bind(
+        state: &mut Self,
+        _: &DisplayHandle,
+        _: &wayland_server::Client,
+        resource: wayland_server::New<WlSeat>,
+        data: &Global,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        state.objects.insert_with_key(|key| {
+            let server = data_init.init(resource, key);
+            let client = state
+                .clientside
+                .global_list
+                .registry()
+                .bind::<client::wl_seat::WlSeat, _, _>(data.name, server.version(), &state.qh, key);
+            if let Some(c) = &mut state.clipboard_data {
+                c.device = Some(c.manager.get_data_device(&state.qh, &client));
+            }
+            GenericObject { server, client }.into()
+        });
+    }
+}
 global_dispatch_with_events!(WlOutput, client::wl_output::WlOutput);
 global_dispatch_with_events!(WlDrmServer, WlDrmClient);
 

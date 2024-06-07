@@ -1,6 +1,9 @@
 use std::collections::{hash_map, HashMap, HashSet};
-use std::os::fd::BorrowedFd;
+use std::io::Read;
+use std::io::Write;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+use std::sync::Mutex;
 use std::time::Instant;
 use wayland_protocols::{
     wp::{
@@ -27,6 +30,11 @@ use wayland_server::{
         wl_buffer::WlBuffer,
         wl_callback::WlCallback,
         wl_compositor::WlCompositor,
+        wl_data_device::{self, WlDataDevice},
+        wl_data_device_manager::{self, WlDataDeviceManager},
+        wl_data_offer::{self, WlDataOffer},
+        wl_data_source::{self, WlDataSource},
+        wl_keyboard::{self, WlKeyboard},
         wl_output::WlOutput,
         wl_pointer::{self, WlPointer},
         wl_seat::{self, WlSeat},
@@ -52,6 +60,7 @@ pub struct SurfaceData {
     pub buffer: Option<WlBuffer>,
     pub last_damage: Option<BufferDamage>,
     pub role: Option<SurfaceRole>,
+    pub last_enter_serial: Option<u32>,
 }
 
 impl SurfaceData {
@@ -136,6 +145,11 @@ pub struct SurfaceId(u32);
 #[derive(Hash, Clone, Copy, Eq, PartialEq)]
 struct PositionerId(u32);
 
+#[derive(Default)]
+struct DataSourceData {
+    mimes: Vec<String>,
+}
+
 struct State {
     surfaces: HashMap<SurfaceId, SurfaceData>,
     positioners: HashMap<PositionerId, PositionerState>,
@@ -144,7 +158,30 @@ struct State {
     last_surface_id: Option<SurfaceId>,
     callbacks: Vec<WlCallback>,
     pointer: Option<WlPointer>,
+    keyboard: Option<WlKeyboard>,
     configure_serial: u32,
+    selection: Option<WlDataSource>,
+    data_device_man: Option<WlDataDeviceManager>,
+    data_device: Option<WlDataDevice>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            surfaces: Default::default(),
+            buffers: Default::default(),
+            positioners: Default::default(),
+            begin: Instant::now(),
+            last_surface_id: None,
+            callbacks: Vec::new(),
+            pointer: None,
+            keyboard: None,
+            configure_serial: 0,
+            selection: None,
+            data_device_man: None,
+            data_device: None,
+        }
+    }
 }
 
 impl State {
@@ -157,9 +194,18 @@ impl State {
         states: Vec<xdg_toplevel::State>,
     ) {
         let last_serial = self.configure_serial;
+        if states.contains(&xdg_toplevel::State::Activated) {
+            if let Some(kb) = &self.keyboard {
+                kb.enter(
+                    last_serial,
+                    &self.surfaces[&surface_id].surface,
+                    Vec::default(),
+                );
+            }
+        }
         let toplevel = self.get_toplevel(surface_id);
         toplevel.states = states.clone();
-        let states = states
+        let states: Vec<u8> = states
             .into_iter()
             .map(|state| u32::from(state) as u8)
             .collect();
@@ -177,21 +223,6 @@ impl State {
         match &mut surface.role {
             Some(SurfaceRole::Toplevel(t)) => t,
             other => panic!("Surface does not have toplevel role: {:?}", other),
-        }
-    }
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            surfaces: Default::default(),
-            buffers: Default::default(),
-            positioners: Default::default(),
-            begin: Instant::now(),
-            last_surface_id: None,
-            callbacks: Vec::new(),
-            pointer: None,
-            configure_serial: 0,
         }
     }
 }
@@ -251,6 +282,7 @@ impl Server {
         dh.create_global::<State, WlShm, _>(1, ());
         dh.create_global::<State, XdgWmBase, _>(6, ());
         dh.create_global::<State, WlSeat, _>(5, ());
+        dh.create_global::<State, WlDataDeviceManager, _>(3, ());
         global_noop!(WlOutput);
         global_noop!(ZwpLinuxDmabufV1);
         global_noop!(ZwpRelativePointerManagerV1);
@@ -345,11 +377,209 @@ impl Server {
     pub fn pointer(&self) -> &WlPointer {
         self.state.pointer.as_ref().unwrap()
     }
+
+    pub fn data_source_mimes(&self) -> Vec<String> {
+        let Some(selection) = &self.state.selection else {
+            panic!("No selection set on data device");
+        };
+
+        let data: &Mutex<DataSourceData> = selection.data().unwrap();
+        let data = data.lock().unwrap();
+        data.mimes.to_vec()
+    }
+
+    pub fn paste_data(&mut self) -> PasteDataResolver {
+        let Some(selection) = &self.state.selection else {
+            panic!("No selection set on data device");
+        };
+
+        let ret = PasteDataResolver::new(&selection);
+        self.display.flush_clients().unwrap();
+        ret
+    }
+
+    pub fn data_source_exists(&self) -> bool {
+        self.state.selection.is_none()
+    }
+
+    pub fn create_data_offer(&mut self, data: Vec<PasteData>) {
+        let Some(dev) = &self.state.data_device else {
+            panic!("No data device created");
+        };
+
+        if let Some(selection) = self.state.selection.take() {
+            selection.cancelled();
+        }
+
+        let mimes: Vec<_> = data.iter().map(|m| m.mime_type.clone()).collect();
+        let offer = self
+            .client
+            .as_ref()
+            .unwrap()
+            .create_resource::<_, _, State>(&self.dh, 3, data)
+            .unwrap();
+        dev.data_offer(&offer);
+        for mime in mimes {
+            offer.offer(mime);
+        }
+        dev.selection(Some(&offer));
+        self.display.flush_clients().unwrap();
+    }
+}
+
+pub struct PasteDataResolver {
+    fds: Vec<(String, OwnedFd, OwnedFd)>,
+}
+
+impl PasteDataResolver {
+    fn new(source: &WlDataSource) -> Self {
+        let data: &Mutex<DataSourceData> = source.data().unwrap();
+        let data = data.lock().unwrap();
+        let mimes = &data.mimes;
+
+        let fds = mimes
+            .iter()
+            .map(|mime| {
+                let (rx, tx) = rustix::pipe::pipe().unwrap();
+                source.send(mime.clone(), tx.as_fd());
+                (mime.clone(), tx, rx)
+            })
+            .collect();
+
+        PasteDataResolver { fds }
+    }
+
+    pub fn resolve(self) -> Vec<PasteData> {
+        self.fds
+            .into_iter()
+            .map(|(mime, tx, rx)| {
+                drop(tx);
+                let mut data = Vec::new();
+                let mut file = std::fs::File::from(rx);
+                file.read_to_end(&mut data).unwrap();
+                PasteData {
+                    mime_type: mime,
+                    data,
+                }
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct PasteData {
+    pub mime_type: String,
+    pub data: Vec<u8>,
 }
 
 simple_global_dispatch!(WlShm);
 simple_global_dispatch!(WlCompositor);
 simple_global_dispatch!(XdgWmBase);
+
+impl GlobalDispatch<WlDataDeviceManager, ()> for State {
+    fn bind(
+        state: &mut Self,
+        _: &DisplayHandle,
+        _: &Client,
+        resource: wayland_server::New<WlDataDeviceManager>,
+        _: &(),
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        state.data_device_man = Some(data_init.init(resource, ()));
+    }
+}
+
+impl Dispatch<WlDataOffer, Vec<PasteData>> for State {
+    fn request(
+        _: &mut Self,
+        _: &Client,
+        _: &WlDataOffer,
+        request: <WlDataOffer as Resource>::Request,
+        data: &Vec<PasteData>,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_data_offer::Request::Receive { mime_type, fd } => {
+                let pos = data
+                    .iter()
+                    .position(|data| data.mime_type == mime_type)
+                    .expect("Invalid mime type: {mime_type}");
+
+                let mut stream = UnixStream::from(fd);
+                stream.write_all(&data[pos].data).unwrap();
+            }
+            other => todo!("unhandled request: {other:?}"),
+        }
+    }
+}
+
+impl Dispatch<WlDataSource, Mutex<DataSourceData>> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &WlDataSource,
+        request: <WlDataSource as Resource>::Request,
+        data: &Mutex<DataSourceData>,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        let mut data = data.lock().unwrap();
+        match request {
+            wl_data_source::Request::Offer { mime_type } => {
+                data.mimes.push(mime_type);
+            }
+            wl_data_source::Request::Destroy => {
+                state.selection = None;
+            }
+            other => todo!("unhandled request {other:?}"),
+        }
+    }
+}
+
+impl Dispatch<WlDataDevice, WlSeat> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &WlDataDevice,
+        request: <WlDataDevice as Resource>::Request,
+        _: &WlSeat,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_data_device::Request::SetSelection { source, .. } => {
+                state.selection = source;
+            }
+            wl_data_device::Request::Release => {
+                state.data_device = None;
+            }
+            other => todo!("unhandled request {other:?}"),
+        }
+    }
+}
+
+impl Dispatch<WlDataDeviceManager, ()> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &WlDataDeviceManager,
+        request: <WlDataDeviceManager as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_data_device_manager::Request::CreateDataSource { id } => {
+                data_init.init(id, DataSourceData::default().into());
+            }
+            wl_data_device_manager::Request::GetDataDevice { id, seat } => {
+                state.data_device = Some(data_init.init(id, seat));
+            }
+            other => todo!("unhandled request: {other:?}"),
+        }
+    }
+}
 
 impl GlobalDispatch<WlSeat, ()> for State {
     fn bind(
@@ -361,7 +591,7 @@ impl GlobalDispatch<WlSeat, ()> for State {
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
         let seat = data_init.init(resource, ());
-        seat.capabilities(wl_seat::Capability::Pointer);
+        seat.capabilities(wl_seat::Capability::Pointer | wl_seat::Capability::Keyboard);
     }
 }
 
@@ -378,6 +608,9 @@ impl Dispatch<WlSeat, ()> for State {
         match request {
             wl_seat::Request::GetPointer { id } => {
                 state.pointer = Some(data_init.init(id, ()));
+            }
+            wl_seat::Request::GetKeyboard { id } => {
+                state.keyboard = Some(data_init.init(id, ()));
             }
             wl_seat::Request::Release => {}
             other => todo!("unhandled request {other:?}"),
@@ -413,6 +646,23 @@ impl Dispatch<WlPointer, ()> for State {
                 state.pointer.take();
             }
             other => todo!("unhandled pointer request: {other:?}"),
+        }
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for State {
+    fn request(
+        _: &mut Self,
+        _: &Client,
+        _: &WlKeyboard,
+        request: <WlKeyboard as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_keyboard::Request::Release => {}
+            other => todo!("unhandled request {other:?}"),
         }
     }
 }
@@ -787,6 +1037,7 @@ impl Dispatch<WlCompositor, ()> for State {
                         buffer: None,
                         last_damage: None,
                         role: None,
+                        last_enter_serial: None,
                     },
                 );
                 state.last_surface_id = Some(SurfaceId(id));

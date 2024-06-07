@@ -8,14 +8,21 @@ use self::event::*;
 use super::FromServerState;
 use crate::clientside::*;
 use crate::xstate::{Atoms, WindowDims, WmHints, WmName, WmNormalHints};
-use crate::XConnection;
+use crate::{MimeTypeData, XConnection};
 use log::{debug, warn};
 use rustix::event::{poll, PollFd, PollFlags};
 use slotmap::{new_key_type, HopSlotMap, SparseSecondaryMap};
+use smithay_client_toolkit::data_device_manager::{
+    data_device::DataDevice, data_offer::SelectionOffer, data_source::CopyPasteSource,
+    DataDeviceManagerState,
+};
 use std::collections::HashMap;
+use std::io::Read;
+use std::io::Write;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
-use wayland_client::{protocol as client, Proxy};
+use std::rc::Rc;
+use wayland_client::{globals::Global, protocol as client, Proxy};
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
@@ -372,6 +379,39 @@ impl ObjectMapExt for ObjectMap {
     }
 }
 
+fn handle_globals<'a, C: XConnection>(
+    dh: &DisplayHandle,
+    globals: impl IntoIterator<Item = &'a Global>,
+) {
+    for global in globals {
+        macro_rules! server_global {
+                ($($global:ty),+) => {
+                    match global.interface {
+                        $(
+                            ref x if x == <$global>::interface().name => {
+                                dh.create_global::<ServerState<C>, $global, Global>(global.version, global.clone());
+                            }
+                        )+
+                        _ => {}
+                    }
+                }
+            }
+
+        server_global![
+            WlCompositor,
+            WlShm,
+            WlSeat,
+            WlOutput,
+            ZwpRelativePointerManagerV1,
+            WlDrmServer,
+            s_dmabuf::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+            ZxdgOutputManagerV1,
+            s_vp::wp_viewporter::WpViewporter,
+            ZwpPointerConstraintsV1
+        ];
+    }
+}
+
 new_key_type! {
     pub struct ObjectKey;
 }
@@ -383,42 +423,43 @@ pub struct ServerState<C: XConnection> {
     associated_windows: SparseSecondaryMap<ObjectKey, x::Window>,
     windows: HashMap<x::Window, WindowData>,
 
-    xdg_wm_base: XdgWmBase,
     qh: ClientQueueHandle,
     to_focus: Option<x::Window>,
     last_focused_toplevel: Option<x::Window>,
     connection: Option<C>,
-}
 
-const XDG_WM_BASE_VERSION: u32 = 2;
+    xdg_wm_base: XdgWmBase,
+    clipboard_data: Option<ClipboardData<C::MimeTypeData>>,
+    last_kb_serial: Option<u32>,
+}
 
 impl<C: XConnection> ServerState<C> {
     pub fn new(dh: DisplayHandle, server_connection: Option<UnixStream>) -> Self {
-        let mut clientside = ClientState::new(server_connection);
+        let clientside = ClientState::new(server_connection);
         let qh = clientside.qh.clone();
 
-        let xdg_pos = clientside
-            .globals
-            .new_globals
-            .iter()
-            .position(|g| g.interface == XdgWmBase::interface().name)
-            .expect("Did not get an xdg_wm_base global");
-
-        let data = clientside.globals.new_globals.swap_remove(xdg_pos);
-
-        assert!(
-            data.version >= XDG_WM_BASE_VERSION,
-            "xdg_wm_base older than version {XDG_WM_BASE_VERSION}"
-        );
-
-        let xdg_wm_base =
-            clientside
-                .registry
-                .bind::<XdgWmBase, _, _>(data.name, XDG_WM_BASE_VERSION, &qh, ());
+        let xdg_wm_base = clientside
+            .global_list
+            .bind::<XdgWmBase, _, _>(&qh, 2..=6, ())
+            .expect("Could not bind XdgWmBase");
+        let manager = DataDeviceManagerState::bind(&clientside.global_list, &qh)
+            .inspect_err(|e| {
+                warn!("Could not bind data device manager ({e:?}). Clipboard will not work.")
+            })
+            .ok();
+        let clipboard_data = manager.map(|manager| ClipboardData {
+            manager,
+            device: None,
+            source: None::<CopyPasteData<C::MimeTypeData>>,
+        });
 
         dh.create_global::<Self, XwaylandShellV1, _>(1, ());
+        clientside
+            .global_list
+            .contents()
+            .with_list(|globals| handle_globals::<C>(&dh, globals));
 
-        let mut ret = Self {
+        Self {
             windows: HashMap::new(),
             clientside,
             atoms: None,
@@ -430,9 +471,9 @@ impl<C: XConnection> ServerState<C> {
             objects: Default::default(),
             associated_windows: Default::default(),
             xdg_wm_base,
-        };
-        ret.handle_new_globals();
-        ret
+            clipboard_data,
+            last_kb_serial: None,
+        }
     }
 
     pub fn clientside_fd(&self) -> BorrowedFd<'_> {
@@ -451,33 +492,7 @@ impl<C: XConnection> ServerState<C> {
 
     fn handle_new_globals(&mut self) {
         let globals = std::mem::take(&mut self.clientside.globals.new_globals);
-        for data in globals {
-            macro_rules! server_global {
-                ($($global:ty),+) => {
-                    match data.interface {
-                        $(
-                            ref x if x == <$global>::interface().name => {
-                                self.dh.create_global::<Self, $global, GlobalData>(data.version, data);
-                            }
-                        )+
-                        _ => {}
-                    }
-                }
-            }
-
-            server_global![
-                WlCompositor,
-                WlShm,
-                WlSeat,
-                WlOutput,
-                ZwpRelativePointerManagerV1,
-                WlDrmServer,
-                s_dmabuf::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
-                ZxdgOutputManagerV1,
-                s_vp::wp_viewporter::WpViewporter,
-                ZwpPointerConstraintsV1
-            ];
-        }
+        handle_globals::<C>(&self.dh, globals.iter());
     }
 
     fn get_object_from_client_object<T, P: Proxy>(&self, proxy: &P) -> &T
@@ -638,6 +653,24 @@ impl<C: XConnection> ServerState<C> {
         let _ = self.windows.remove(&window);
     }
 
+    pub(crate) fn set_copy_paste_source(&mut self, mime_types: Rc<Vec<C::MimeTypeData>>) {
+        if let Some(d) = &mut self.clipboard_data {
+            let src = d
+                .manager
+                .create_copy_paste_source(&self.qh, mime_types.iter().map(|m| m.name()));
+            let data = CopyPasteData::X11 {
+                inner: src,
+                data: mime_types,
+            };
+            let CopyPasteData::X11 { inner, .. } = d.source.insert(data) else {
+                unreachable!();
+            };
+            if let Some(serial) = self.last_kb_serial.as_ref().copied() {
+                inner.set_selection(d.device.as_ref().unwrap(), serial);
+            }
+        }
+    }
+
     pub fn run(&mut self) {
         if let Some(r) = self.clientside.queue.prepare_read() {
             let fd = r.connection_fd();
@@ -651,7 +684,6 @@ impl<C: XConnection> ServerState<C> {
             .dispatch_pending(&mut self.clientside.globals)
             .unwrap();
         self.handle_clientside_events();
-        self.clientside.queue.flush().unwrap();
     }
 
     pub fn handle_clientside_events(&mut self) {
@@ -676,7 +708,50 @@ impl<C: XConnection> ServerState<C> {
             }
         }
 
+        self.handle_clipboard_events();
         self.clientside.queue.flush().unwrap();
+    }
+
+    pub fn new_selection(&mut self) -> Option<ForeignSelection> {
+        self.clipboard_data.as_mut().and_then(|c| {
+            c.source.take().and_then(|s| match s {
+                CopyPasteData::Foreign(f) => Some(f),
+                CopyPasteData::X11 { .. } => {
+                    c.source = Some(s);
+                    None
+                }
+            })
+        })
+    }
+
+    fn handle_clipboard_events(&mut self) {
+        let globals = &mut self.clientside.globals;
+
+        if let Some(clipboard) = self.clipboard_data.as_mut() {
+            for (mime_type, mut fd) in std::mem::take(&mut globals.selection_requests) {
+                let CopyPasteData::X11 { data, .. } = clipboard.source.as_ref().unwrap() else {
+                    unreachable!()
+                };
+                let pos = data.iter().position(|m| m.name() == mime_type).unwrap();
+                if let Err(e) = fd.write_all(data[pos].data()) {
+                    warn!("Failed to write selection data: {e:?}");
+                }
+            }
+
+            if clipboard.source.is_none() || globals.cancelled {
+                if globals.selection.take().is_some() {
+                    let device = clipboard.device.as_ref().unwrap();
+                    let offer = device.data().selection_offer().unwrap();
+                    let mime_types: Box<[String]> = offer.with_mime_types(|mimes| mimes.into());
+                    let foreign = ForeignSelection {
+                        mime_types,
+                        inner: offer,
+                    };
+                    clipboard.source = Some(CopyPasteData::Foreign(foreign));
+                }
+                globals.cancelled = false;
+            }
+        }
     }
 
     fn create_role_window(&mut self, window: x::Window, surface_key: ObjectKey) {
@@ -836,4 +911,43 @@ pub struct PendingSurfaceState {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+}
+
+struct ClipboardData<M: MimeTypeData> {
+    manager: DataDeviceManagerState,
+    device: Option<DataDevice>,
+    source: Option<CopyPasteData<M>>,
+}
+
+pub struct ForeignSelection {
+    pub mime_types: Box<[String]>,
+    inner: SelectionOffer,
+}
+
+impl ForeignSelection {
+    pub(crate) fn receive(
+        &self,
+        mime_type: String,
+        state: &ServerState<impl XConnection>,
+    ) -> Vec<u8> {
+        let mut pipe = self.inner.receive(mime_type).unwrap();
+        state.clientside.queue.flush().unwrap();
+        let mut data = Vec::new();
+        pipe.read_to_end(&mut data).unwrap();
+        data
+    }
+}
+
+impl Drop for ForeignSelection {
+    fn drop(&mut self) {
+        self.inner.destroy();
+    }
+}
+
+enum CopyPasteData<M: MimeTypeData> {
+    X11 {
+        inner: CopyPasteSource,
+        data: Rc<Vec<M>>,
+    },
+    Foreign(ForeignSelection),
 }

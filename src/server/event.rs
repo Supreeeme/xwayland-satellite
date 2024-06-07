@@ -493,45 +493,51 @@ impl HandleEvent for Keyboard {
     type Event = client::wl_keyboard::Event;
 
     fn handle_event<C: XConnection>(&mut self, event: Self::Event, state: &mut ServerState<C>) {
-        simple_event_shunt! {
-            self.server, event: client::wl_keyboard::Event => [
-                Keymap {
-                    |format| convert_wenum(format),
-                    |fd| fd.as_fd(),
-                    size
-                },
-                Enter {
-                    serial,
-                    |surface| state.get_server_surface_from_client(surface),
-                    keys
-                },
-                Leave {
-                    serial,
-                    |surface| {
-                        if !surface.is_alive() {
-                            return;
+        match event {
+            client::wl_keyboard::Event::Enter {
+                serial,
+                surface,
+                keys,
+            } => {
+                state.last_kb_serial = Some(serial);
+                self.server
+                    .enter(serial, state.get_server_surface_from_client(surface), keys);
+            }
+            _ => simple_event_shunt! {
+                self.server, event: client::wl_keyboard::Event => [
+                    Keymap {
+                        |format| convert_wenum(format),
+                        |fd| fd.as_fd(),
+                        size
+                    },
+                    Leave {
+                        serial,
+                        |surface| {
+                            if !surface.is_alive() {
+                                return;
+                            }
+                            state.get_server_surface_from_client(surface)
                         }
-                        state.get_server_surface_from_client(surface)
+                    },
+                    Key {
+                        serial,
+                        time,
+                        key,
+                        |state| convert_wenum(state)
+                    },
+                    Modifiers {
+                        serial,
+                        mods_depressed,
+                        mods_latched,
+                        mods_locked,
+                        group
+                    },
+                    RepeatInfo {
+                        rate,
+                        delay
                     }
-                },
-                Key {
-                    serial,
-                    time,
-                    key,
-                    |state| convert_wenum(state)
-                },
-                Modifiers {
-                    serial,
-                    mods_depressed,
-                    mods_latched,
-                    mods_locked,
-                    group
-                },
-                RepeatInfo {
-                    rate,
-                    delay
-                }
-            ]
+                ]
+            },
         }
     }
 }

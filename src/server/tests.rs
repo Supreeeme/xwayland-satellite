@@ -3,7 +3,7 @@ use crate::xstate::{SetState, WmName};
 use paste::paste;
 use rustix::event::{poll, PollFd, PollFlags};
 use std::collections::HashMap;
-use std::os::fd::BorrowedFd;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use wayland_client::{
@@ -12,8 +12,9 @@ use wayland_client::{
         wl_buffer::WlBuffer,
         wl_compositor::WlCompositor,
         wl_display::WlDisplay,
+        wl_keyboard::WlKeyboard,
         wl_registry::WlRegistry,
-        wl_seat::WlSeat,
+        wl_seat::{self, WlSeat},
         wl_shm::{Format, WlShm},
         wl_shm_pool::WlShmPool,
         wl_surface::WlSurface,
@@ -85,7 +86,8 @@ with_optional! {
 struct Compositor {
     compositor: TestObject<WlCompositor>,
     shm: TestObject<WlShm>,
-    shell: TestObject<XwaylandShellV1>
+    shell: TestObject<XwaylandShellV1>,
+    seat: TestObject<WlSeat>
 }
 
 }
@@ -140,7 +142,7 @@ impl FakeXConnection {
     fn window(&mut self, window: Window) -> &mut WindowData {
         self.windows
             .get_mut(&window)
-            .expect(&format!("Unknown window: {window:?}"))
+            .unwrap_or_else(|| panic!("Unknown window: {window:?}"))
     }
 }
 
@@ -155,13 +157,22 @@ impl Default for FakeXConnection {
 }
 
 impl super::FromServerState<FakeXConnection> for () {
-    fn create(_: &FakeServerState) -> Self {
-        ()
+    fn create(_: &FakeServerState) -> Self {}
+}
+
+impl crate::MimeTypeData for testwl::PasteData {
+    fn name(&self) -> &str {
+        &self.mime_type
+    }
+
+    fn data(&self) -> &[u8] {
+        &self.data
     }
 }
 
 impl super::XConnection for FakeXConnection {
     type ExtraData = ();
+    type MimeTypeData = testwl::PasteData;
     fn root_window(&self) -> Window {
         self.root
     }
@@ -270,12 +281,7 @@ impl TestFixture {
         self.run();
 
         let events = std::mem::take(&mut *registry.data.events.lock().unwrap());
-        assert!(events.len() > 0);
-
-        let bind_req = |name, interface, version| Req::<WlRegistry>::Bind {
-            name,
-            id: (interface, version),
-        };
+        assert!(!events.is_empty());
 
         for event in events {
             if let Ev::<WlRegistry>::Global {
@@ -284,23 +290,34 @@ impl TestFixture {
                 version,
             } = event
             {
+                let bind_req = |interface| Req::<WlRegistry>::Bind {
+                    name,
+                    id: (interface, version),
+                };
+
                 match interface {
                     x if x == WlCompositor::interface().name => {
                         ret.compositor = Some(TestObject::from_request(
                             &registry.obj,
-                            bind_req(name, WlCompositor::interface(), version),
+                            bind_req(WlCompositor::interface()),
                         ));
                     }
                     x if x == WlShm::interface().name => {
                         ret.shm = Some(TestObject::from_request(
                             &registry.obj,
-                            bind_req(name, WlShm::interface(), version),
+                            bind_req(WlShm::interface()),
                         ));
                     }
                     x if x == XwaylandShellV1::interface().name => {
                         ret.shell = Some(TestObject::from_request(
                             &registry.obj,
-                            bind_req(name, XwaylandShellV1::interface(), version),
+                            bind_req(XwaylandShellV1::interface()),
+                        ));
+                    }
+                    x if x == WlSeat::interface().name => {
+                        ret.seat = Some(TestObject::from_request(
+                            &registry.obj,
+                            bind_req(WlSeat::interface()),
                         ));
                     }
                     _ => {}
@@ -500,7 +517,7 @@ impl TestFixture {
         };
         let dims = data.dims;
         self.new_window(window, true, data, None);
-        self.map_window(&comp, window, &surface.obj, &buffer);
+        self.map_window(comp, window, &surface.obj, &buffer);
         self.run();
 
         let popup_id = self.check_new_surface();
@@ -734,7 +751,7 @@ fn pass_through_globals() {
         TestObject::<WlRegistry>::from_request(&display, Req::<WlDisplay>::GetRegistry {});
     f.run();
     let events = std::mem::take(&mut *registry.data.events.lock().unwrap());
-    assert!(events.len() > 0);
+    assert!(!events.is_empty());
     for event in events {
         let Ev::<WlRegistry>::Global { interface, .. } = event else {
             unreachable!();
@@ -969,6 +986,138 @@ fn window_group_properties() {
     assert_eq!(data.toplevel().title, Some("window".into()));
     assert_eq!(data.toplevel().app_id, Some("class".into()));
 }
+
+#[test]
+fn copy_from_x11() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
+    let win = unsafe { Window::new(1) };
+    let (_surface, _id) = f.create_toplevel(&comp, win);
+
+    let mimes = std::rc::Rc::new(vec![
+        testwl::PasteData {
+            mime_type: "text".to_string(),
+            data: b"abc".to_vec(),
+        },
+        testwl::PasteData {
+            mime_type: "data".to_string(),
+            data: vec![1, 2, 3, 4, 6, 10],
+        },
+    ]);
+
+    f.exwayland.set_copy_paste_source(mimes.clone());
+    f.run();
+
+    let server_mimes = f.testwl.data_source_mimes();
+    for mime in mimes.iter() {
+        assert!(server_mimes.contains(&mime.mime_type));
+    }
+
+    let data = f.testwl.paste_data();
+    f.run();
+    let data = data.resolve();
+    assert_eq!(*mimes, data);
+}
+
+#[test]
+fn copy_from_wayland() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
+    let win = unsafe { Window::new(1) };
+    let (_surface, _id) = f.create_toplevel(&comp, win);
+
+    let mimes = vec![
+        testwl::PasteData {
+            mime_type: "text".to_string(),
+            data: b"abc".to_vec(),
+        },
+        testwl::PasteData {
+            mime_type: "data".to_string(),
+            data: vec![1, 2, 3, 4, 6, 10],
+        },
+    ];
+    f.testwl.create_data_offer(mimes.clone());
+    f.run();
+
+    let selection = f.exwayland.new_selection().expect("No new selection");
+    for mime in &mimes {
+        let data = std::thread::scope(|s| {
+            // receive requires a queue flush - dispatch testwl from another thread
+            s.spawn(|| {
+                let pollfd = unsafe { BorrowedFd::borrow_raw(f.testwl.poll_fd().as_raw_fd()) };
+                let mut pollfd = [PollFd::from_borrowed_fd(pollfd, PollFlags::IN)];
+                if poll(&mut pollfd, 100).unwrap() == 0 {
+                    panic!("Did not get events for testwl!");
+                }
+                f.testwl.dispatch();
+                while poll(&mut pollfd, 100).unwrap() > 0 {
+                    f.testwl.dispatch();
+                }
+            });
+            selection.receive(mime.mime_type.clone(), &f.exwayland)
+        });
+        f.run();
+        assert_eq!(data, mime.data);
+    }
+}
+
+#[test]
+fn clipboard_x11_then_wayland() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
+    let win = unsafe { Window::new(1) };
+    let (_surface, _id) = f.create_toplevel(&comp, win);
+
+    let x11data = std::rc::Rc::new(vec![
+        testwl::PasteData {
+            mime_type: "text".to_string(),
+            data: b"abc".to_vec(),
+        },
+        testwl::PasteData {
+            mime_type: "data".to_string(),
+            data: vec![1, 2, 3, 4, 6, 10],
+        },
+    ]);
+
+    f.exwayland.set_copy_paste_source(x11data.clone());
+    f.run();
+
+    let waylanddata = vec![
+        testwl::PasteData {
+            mime_type: "asdf".to_string(),
+            data: b"fdaa".to_vec(),
+        },
+        testwl::PasteData {
+            mime_type: "boing".to_string(),
+            data: vec![10, 20, 40, 50],
+        },
+    ];
+    f.testwl.create_data_offer(waylanddata.clone());
+    f.run();
+    f.run();
+
+    let selection = f.exwayland.new_selection().expect("No new selection");
+    for mime in &waylanddata {
+        let data = std::thread::scope(|s| {
+            // receive requires a queue flush - dispatch testwl from another thread
+            s.spawn(|| {
+                let pollfd = unsafe { BorrowedFd::borrow_raw(f.testwl.poll_fd().as_raw_fd()) };
+                let mut pollfd = [PollFd::from_borrowed_fd(pollfd, PollFlags::IN)];
+                if poll(&mut pollfd, 100).unwrap() == 0 {
+                    panic!("Did not get events for testwl!");
+                }
+                f.testwl.dispatch();
+                while poll(&mut pollfd, 100).unwrap() > 0 {
+                    f.testwl.dispatch();
+                }
+            });
+            selection.receive(mime.mime_type.clone(), &f.exwayland)
+        });
+        f.run();
+        assert_eq!(data, mime.data);
+    }
+}
+
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}
