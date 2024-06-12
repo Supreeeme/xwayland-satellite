@@ -139,15 +139,17 @@ impl XState {
             })
             .unwrap();
 
-        // Setup default cursor theme
-        let ctx = CursorContext::new(&connection, screen).unwrap();
-        let left_ptr = ctx.load_cursor(Cursor::LeftPtr);
-        connection
-            .send_and_check_request(&x::ChangeWindowAttributes {
-                window: root,
-                value_list: &[x::Cw::Cursor(left_ptr)],
-            })
-            .unwrap();
+        {
+            // Setup default cursor theme
+            let ctx = CursorContext::new(&connection, screen).unwrap();
+            let left_ptr = ctx.load_cursor(Cursor::LeftPtr);
+            connection
+                .send_and_check_request(&x::ChangeWindowAttributes {
+                    window: root,
+                    value_list: &[x::Cw::Cursor(left_ptr)],
+                })
+                .unwrap();
+        }
 
         let wm_window = connection.generate_id();
 

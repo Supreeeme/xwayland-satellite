@@ -31,6 +31,8 @@ impl DataDeviceHandler for Globals {
         _: &wayland_client::Connection,
         _: &wayland_client::QueueHandle<Self>,
         _: &wayland_client::protocol::wl_data_device::WlDataDevice,
+        _: f64,
+        _: f64,
     ) {
     }
 
@@ -47,6 +49,9 @@ impl DataDeviceHandler for Globals {
         _: &wayland_client::Connection,
         _: &wayland_client::QueueHandle<Self>,
         _: &wayland_client::protocol::wl_data_device::WlDataDevice,
+        _: f64,
+        _: f64,
+        _: &wayland_client::protocol::wl_surface::WlSurface,
     ) {
     }
 }

@@ -8,7 +8,7 @@ rustix = "0.38.31"
 
 [package]
 name = "xwayland-satellite"
-version = "0.2.0"
+version = "0.4.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -32,7 +32,7 @@ env_logger = "0.11.3"
 pretty_env_logger = "0.5.0"
 slotmap = "1.0.7"
 xcb-util-cursor = "0.3.2"
-smithay-client-toolkit = { version = "0.18.1", default-features = false }
+smithay-client-toolkit = { version = "0.19.1", default-features = false }
 
 [dev-dependencies]
 rustix = { workspace = true, features = ["fs"] }

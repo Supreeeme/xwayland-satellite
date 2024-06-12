@@ -1,5 +1,4 @@
 use crate::server::{ObjectEvent, ObjectKey};
-use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 use wayland_client::protocol::{
@@ -57,11 +56,6 @@ pub struct Globals {
 }
 
 pub type ClientQueueHandle = QueueHandle<Globals>;
-
-pub struct ClientShmPool {
-    pub pool: WlShmPool,
-    pub fd: OwnedFd,
-}
 
 pub struct ClientState {
     pub connection: Connection,
