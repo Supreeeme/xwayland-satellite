@@ -241,13 +241,13 @@ impl<C: XConnection> Dispatch<WlBuffer, ObjectKey> for ServerState<C> {
     }
 }
 
-impl<C: XConnection> Dispatch<WlShmPool, ClientShmPool> for ServerState<C> {
+impl<C: XConnection> Dispatch<WlShmPool, client::wl_shm_pool::WlShmPool> for ServerState<C> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
         _: &WlShmPool,
         request: <WlShmPool as Resource>::Request,
-        c_pool: &ClientShmPool,
+        c_pool: &client::wl_shm_pool::WlShmPool,
         _: &DisplayHandle,
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
@@ -261,7 +261,7 @@ impl<C: XConnection> Dispatch<WlShmPool, ClientShmPool> for ServerState<C> {
                 format,
             } => {
                 state.objects.insert_with_key(|key| {
-                    let client = c_pool.pool.create_buffer(
+                    let client = c_pool.create_buffer(
                         offset,
                         width,
                         height,
@@ -275,7 +275,8 @@ impl<C: XConnection> Dispatch<WlShmPool, ClientShmPool> for ServerState<C> {
                 });
             }
             Request::<WlShmPool>::Destroy => {
-                c_pool.pool.destroy();
+                c_pool.destroy();
+                state.clientside.queue.flush().unwrap();
             }
             other => warn!("unhandled shmpool request: {other:?}"),
         }
@@ -297,7 +298,6 @@ impl<C: XConnection> Dispatch<WlShm, ClientGlobalWrapper<client::wl_shm::WlShm>>
         match request {
             Request::<WlShm>::CreatePool { id, fd, size } => {
                 let c_pool = client.create_pool(fd.as_fd(), size, &state.qh, ());
-                let c_pool = ClientShmPool { pool: c_pool, fd };
                 data_init.init(id, c_pool);
             }
             other => {
