@@ -389,7 +389,8 @@ fn handle_globals<'a, C: XConnection>(
                     match global.interface {
                         $(
                             ref x if x == <$global>::interface().name => {
-                                dh.create_global::<ServerState<C>, $global, Global>(global.version, global.clone());
+                                let version = u32::min(global.version, <$global>::interface().version);
+                                dh.create_global::<ServerState<C>, $global, Global>(version, global.clone());
                             }
                         )+
                         _ => {}

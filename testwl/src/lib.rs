@@ -3,7 +3,7 @@ use std::io::Read;
 use std::io::Write;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use wayland_protocols::{
     wp::{
@@ -24,7 +24,10 @@ use wayland_protocols::{
     },
 };
 use wayland_server::{
-    backend::protocol::ProtocolError,
+    backend::{
+        protocol::{Interface, ProtocolError},
+        GlobalHandler, ObjectData,
+    },
     protocol::{
         self as proto,
         wl_buffer::WlBuffer,
@@ -288,8 +291,56 @@ impl Server {
         global_noop!(ZwpRelativePointerManagerV1);
         global_noop!(ZxdgOutputManagerV1);
         global_noop!(WpViewporter);
-        global_noop!(WlDrm);
         global_noop!(ZwpPointerConstraintsV1);
+
+        struct HandlerData;
+        impl ObjectData<State> for HandlerData {
+            fn request(
+                self: Arc<Self>,
+                _: &wayland_server::backend::Handle,
+                _: &mut State,
+                _: wayland_server::backend::ClientId,
+                _: wayland_server::backend::protocol::Message<
+                    wayland_server::backend::ObjectId,
+                    OwnedFd,
+                >,
+            ) -> Option<Arc<dyn ObjectData<State>>> {
+                None
+            }
+            fn destroyed(
+                self: Arc<Self>,
+                _: &wayland_server::backend::Handle,
+                _: &mut State,
+                _: wayland_server::backend::ClientId,
+                _: wayland_server::backend::ObjectId,
+            ) {
+            }
+        }
+        struct Handler;
+        impl GlobalHandler<State> for Handler {
+            fn bind(
+                self: Arc<Self>,
+                _: &wayland_server::backend::Handle,
+                _: &mut State,
+                _: wayland_server::backend::ClientId,
+                _: wayland_server::backend::GlobalId,
+                _: wayland_server::backend::ObjectId,
+            ) -> Arc<dyn wayland_server::backend::ObjectData<State>> {
+                Arc::new(HandlerData)
+            }
+        }
+
+        // Simulate interface with higher interface than supported client side
+        static IF: OnceLock<Interface> = OnceLock::new();
+        let interface = IF.get_or_init(|| Interface {
+            version: WlDrm::interface().version + 1,
+            ..*WlDrm::interface()
+        });
+
+        if noops {
+            dh.backend_handle()
+                .create_global(&interface, interface.version, Arc::new(Handler));
+        }
 
         Self {
             display,

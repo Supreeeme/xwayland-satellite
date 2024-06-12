@@ -137,7 +137,7 @@ impl Fixture {
             ready = our_data.display.lock().unwrap().is_some();
         }
 
-        assert!(ready, "connecting to xwayland");
+        assert!(ready, "connecting to xwayland failed");
 
         let display = our_data.display.lock().unwrap().take().unwrap();
         Self {
