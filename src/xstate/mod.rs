@@ -519,7 +519,8 @@ impl XState {
         let cookie = self.get_property_cookie(window, x::ATOM_WM_NAME, x::ATOM_STRING, 256);
         let resolver = |reply: x::GetPropertyReply| {
             let data: &[u8] = reply.value();
-            WmName::WmName(String::from_utf8(data.to_vec()).unwrap())
+            let name = String::from_utf8_lossy(data).to_string();
+            WmName::WmName(name)
         };
 
         PropertyCookieWrapper {
@@ -537,7 +538,8 @@ impl XState {
             self.get_property_cookie(window, self.atoms.net_wm_name, self.atoms.utf8_string, 256);
         let resolver = |reply: x::GetPropertyReply| {
             let data: &[u8] = reply.value();
-            WmName::NetWmName(String::from_utf8(data.to_vec()).unwrap())
+            let name = String::from_utf8_lossy(data).to_string();
+            WmName::NetWmName(name)
         };
 
         PropertyCookieWrapper {
