@@ -328,7 +328,7 @@ impl<C: XConnection> Dispatch<WlPointer, ObjectKey> for ServerState<C> {
                 hotspot_y,
                 surface,
             } => {
-                let c_surface = surface.map(|s| state.get_client_surface_from_server(s));
+                let c_surface = surface.and_then(|s| state.get_client_surface_from_server(s));
                 c_pointer.set_cursor(serial, c_surface, hotspot_x, hotspot_y);
             }
             Request::<WlPointer>::Release => {
@@ -786,8 +786,10 @@ impl<C: XConnection>
     ) {
         use s_vp::wp_viewporter;
         match request {
-            wp_viewporter::Request::GetViewport { id, surface } => {
-                let c_surface = state.get_client_surface_from_server(surface);
+            wp_viewporter::Request::GetViewport { id, surface } => 'get_viewport: {
+                let Some(c_surface) = state.get_client_surface_from_server(surface) else {
+                    break 'get_viewport;
+                };
                 let c_viewport = client.get_viewport(c_surface, &state.qh, ());
                 data_init.init(id, c_viewport);
             }
