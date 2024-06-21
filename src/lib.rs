@@ -17,6 +17,7 @@ use xcb::x;
 
 pub trait XConnection: Sized + 'static {
     type ExtraData: FromServerState<Self>;
+    #[cfg(feature = "clipboard-sync")]
     type MimeTypeData: MimeTypeData;
 
     fn root_window(&self) -> x::Window;
@@ -31,6 +32,7 @@ pub trait FromServerState<C: XConnection> {
     fn create(state: &ServerState<C>) -> Self;
 }
 
+#[cfg(feature = "clipboard-sync")]
 pub trait MimeTypeData {
     fn name(&self) -> &str;
     fn data(&self) -> &[u8];
@@ -171,6 +173,7 @@ pub fn main(data: impl RunData) -> Option<()> {
         server_state.run();
         display.flush_clients().unwrap();
 
+        #[cfg(feature = "clipboard-sync")]
         if let Some(xstate) = &mut xstate {
             if let Some(sel) = server_state.new_selection() {
                 xstate.set_clipboard(sel);

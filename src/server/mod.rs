@@ -4,24 +4,29 @@ mod event;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "clipboard-sync")]
+use {
+    crate::MimeTypeData,
+    smithay_client_toolkit::data_device_manager::{
+        data_device::DataDevice, data_offer::SelectionOffer, data_source::CopyPasteSource,
+        DataDeviceManagerState,
+    },
+    std::rc::Rc,
+};
+
 use self::event::*;
 use super::FromServerState;
 use crate::clientside::*;
 use crate::xstate::{Atoms, WindowDims, WmHints, WmName, WmNormalHints};
-use crate::{MimeTypeData, XConnection};
+use crate::XConnection;
 use log::{debug, warn};
 use rustix::event::{poll, PollFd, PollFlags};
 use slotmap::{new_key_type, HopSlotMap, SparseSecondaryMap};
-use smithay_client_toolkit::data_device_manager::{
-    data_device::DataDevice, data_offer::SelectionOffer, data_source::CopyPasteSource,
-    DataDeviceManagerState,
-};
 use std::collections::HashMap;
 use std::io::Read;
 use std::io::Write;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
-use std::rc::Rc;
 use wayland_client::{globals::Global, protocol as client, Proxy};
 use wayland_protocols::{
     wp::{
@@ -474,6 +479,7 @@ pub struct ServerState<C: XConnection> {
     connection: Option<C>,
 
     xdg_wm_base: XdgWmBase,
+    #[cfg(feature = "clipboard-sync")]
     clipboard_data: Option<ClipboardData<C::MimeTypeData>>,
     last_kb_serial: Option<u32>,
 }
@@ -492,16 +498,17 @@ impl<C: XConnection> ServerState<C> {
             warn!("xdg_wm_base version 2 detected. Popup repositioning will not work, and some popups may not work correctly.");
         }
 
-        let manager = DataDeviceManagerState::bind(&clientside.global_list, &qh)
+        #[cfg(feature = "clipboard-sync")]
+        let clipboard_data = DataDeviceManagerState::bind(&clientside.global_list, &qh)
             .inspect_err(|e| {
                 warn!("Could not bind data device manager ({e:?}). Clipboard will not work.")
             })
+            .map(|manager| ClipboardData {
+                manager,
+                device: None,
+                source: None::<CopyPasteData<C::MimeTypeData>>,
+            })
             .ok();
-        let clipboard_data = manager.map(|manager| ClipboardData {
-            manager,
-            device: None,
-            source: None::<CopyPasteData<C::MimeTypeData>>,
-        });
 
         dh.create_global::<Self, XwaylandShellV1, _>(1, ());
         clientside
@@ -522,6 +529,7 @@ impl<C: XConnection> ServerState<C> {
             objects: Default::default(),
             associated_windows: Default::default(),
             xdg_wm_base,
+            #[cfg(feature = "clipboard-sync")]
             clipboard_data,
             last_kb_serial: None,
         }
@@ -765,6 +773,7 @@ impl<C: XConnection> ServerState<C> {
         let _ = self.windows.remove(&window);
     }
 
+    #[cfg(feature = "clipboard-sync")]
     pub(crate) fn set_copy_paste_source(&mut self, mime_types: Rc<Vec<C::MimeTypeData>>) {
         if let Some(d) = &mut self.clipboard_data {
             let src = d
@@ -823,10 +832,12 @@ impl<C: XConnection> ServerState<C> {
             }
         }
 
+        #[cfg(feature = "clipboard-sync")]
         self.handle_clipboard_events();
         self.clientside.queue.flush().unwrap();
     }
 
+    #[cfg(feature = "clipboard-sync")]
     pub fn new_selection(&mut self) -> Option<ForeignSelection> {
         self.clipboard_data.as_mut().and_then(|c| {
             c.source.take().and_then(|s| match s {
@@ -839,6 +850,7 @@ impl<C: XConnection> ServerState<C> {
         })
     }
 
+    #[cfg(feature = "clipboard-sync")]
     fn handle_clipboard_events(&mut self) {
         let globals = &mut self.clientside.globals;
 
@@ -1042,17 +1054,20 @@ pub struct PendingSurfaceState {
     pub height: i32,
 }
 
+#[cfg(feature = "clipboard-sync")]
 struct ClipboardData<M: MimeTypeData> {
     manager: DataDeviceManagerState,
     device: Option<DataDevice>,
     source: Option<CopyPasteData<M>>,
 }
 
+#[cfg(feature = "clipboard-sync")]
 pub struct ForeignSelection {
     pub mime_types: Box<[String]>,
     inner: SelectionOffer,
 }
 
+#[cfg(feature = "clipboard-sync")]
 impl ForeignSelection {
     pub(crate) fn receive(
         &self,
@@ -1067,12 +1082,14 @@ impl ForeignSelection {
     }
 }
 
+#[cfg(feature = "clipboard-sync")]
 impl Drop for ForeignSelection {
     fn drop(&mut self) {
         self.inner.destroy();
     }
 }
 
+#[cfg(feature = "clipboard-sync")]
 enum CopyPasteData<M: MimeTypeData> {
     X11 {
         inner: CopyPasteSource,

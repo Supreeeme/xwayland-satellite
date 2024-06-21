@@ -1096,9 +1096,12 @@ where
                 .global_list
                 .registry()
                 .bind::<client::wl_seat::WlSeat, _, _>(data.name, server.version(), &state.qh, key);
+
+            #[cfg(feature = "clipboard-sync")]
             if let Some(c) = &mut state.clipboard_data {
                 c.device = Some(c.manager.get_data_device(&state.qh, &client));
             }
+
             GenericObject { server, client }.into()
         });
     }
