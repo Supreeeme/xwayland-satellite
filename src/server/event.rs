@@ -149,8 +149,18 @@ impl SurfaceData {
         let surface = &self.server;
         simple_event_shunt! {
             surface, event: client::wl_surface::Event => [
-                Enter { |output| &state.get_object_from_client_object::<Output, _>(&output).server },
-                Leave { |output| &state.get_object_from_client_object::<Output, _>(&output).server },
+                Enter { |output| {
+                    let Some(object) = &state.get_object_from_client_object::<Output, _>(&output) else {
+                        return;
+                    };
+                    &object.server
+                }},
+                Leave { |output| {
+                    let Some(object) = &state.get_object_from_client_object::<Output, _>(&output) else {
+                        return;
+                    };
+                    &object.server
+                }},
                 PreferredBufferScale { factor }
             ]
         }
@@ -363,8 +373,11 @@ impl HandleEvent for Pointer {
             } => {
                 let do_enter = || {
                     debug!("entering surface ({serial})");
-                    let surface = state.get_server_surface_from_client(surface.clone());
-                    self.server.enter(serial, surface, surface_x, surface_y);
+                    if let Some(surface) = state.get_server_surface_from_client(surface.clone()) {
+                        self.server.enter(serial, surface, surface_x, surface_y)
+                    } else {
+                        warn!("could not enter surface: stale surface");
+                    }
                 };
                 let surface_key: ObjectKey = surface.data().copied().unwrap();
                 let surface_data: &SurfaceData = state.objects[surface_key].as_ref();
@@ -400,8 +413,11 @@ impl HandleEvent for Pointer {
                 }
                 debug!("leaving surface ({serial})");
                 self.pending_enter.0.take();
-                self.server
-                    .leave(serial, state.get_server_surface_from_client(surface));
+                if let Some(surface) = state.get_server_surface_from_client(surface) {
+                    self.server.leave(serial, surface);
+                } else {
+                    warn!("could not leave surface: stale surface");
+                }
             }
             client::wl_pointer::Event::Motion {
                 time,
@@ -434,13 +450,23 @@ impl HandleEvent for Pointer {
                 self.server, event: client::wl_pointer::Event => [
                     Enter {
                         serial,
-                        |surface| state.get_server_surface_from_client(surface),
+                        |surface| {
+                            let Some(surface_data) = state.get_server_surface_from_client(surface) else {
+                                return;
+                            };
+                            surface_data
+                        },
                         surface_x,
                         surface_y
                     },
                     Leave {
                         serial,
-                        |surface| state.get_server_surface_from_client(surface)
+                        |surface| {
+                            let Some(surface_data) = state.get_server_surface_from_client(surface) else {
+                                return;
+                            };
+                            surface_data
+                        }
                     },
                     Motion {
                         time,
@@ -500,8 +526,9 @@ impl HandleEvent for Keyboard {
                 keys,
             } => {
                 state.last_kb_serial = Some(serial);
-                self.server
-                    .enter(serial, state.get_server_surface_from_client(surface), keys);
+                if let Some(surface_data) = state.get_server_surface_from_client(surface) {
+                    self.server.enter(serial, surface_data, keys);
+                }
             }
             _ => simple_event_shunt! {
                 self.server, event: client::wl_keyboard::Event => [
@@ -516,7 +543,10 @@ impl HandleEvent for Keyboard {
                             if !surface.is_alive() {
                                 return;
                             }
-                            state.get_server_surface_from_client(surface)
+                            let Some(surface_data) = state.get_server_surface_from_client(surface) else {
+                                return;
+                            };
+                            surface_data
                         }
                     },
                     Key {
@@ -551,7 +581,12 @@ impl HandleEvent for Touch {
                 Down {
                     serial,
                     time,
-                    |surface| state.get_server_surface_from_client(surface),
+                    |surface| {
+                        let Some(surface_data) = state.get_server_surface_from_client(surface) else {
+                            return;
+                        };
+                        surface_data
+                    },
                     id,
                     x,
                     y

@@ -496,13 +496,13 @@ impl<C: XConnection> ServerState<C> {
         handle_globals::<C>(&self.dh, globals.iter());
     }
 
-    fn get_object_from_client_object<T, P: Proxy>(&self, proxy: &P) -> &T
+    fn get_object_from_client_object<T, P: Proxy>(&self, proxy: &P) -> Option<&T>
     where
         for<'a> &'a T: TryFrom<&'a Object, Error = String>,
         Globals: wayland_client::Dispatch<P, ObjectKey>,
     {
         let key: ObjectKey = proxy.data().copied().unwrap();
-        self.objects[key].as_ref()
+        Some(self.objects.get(key)?.as_ref())
     }
 
     pub fn new_window(
@@ -539,9 +539,13 @@ impl<C: XConnection> ServerState<C> {
             return;
         };
         if let Some(key) = win.surface_key {
-            let surface: &SurfaceData = self.objects[key].as_ref();
-            if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
-                data.toplevel.set_title(title.name().to_string());
+            if let Some(object) = self.objects.get(key) {
+                let surface: &SurfaceData = object.as_ref();
+                if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
+                    data.toplevel.set_title(title.name().to_string());
+                }
+            } else {
+                warn!("could not set window title: stale surface");
             }
         }
     }
@@ -551,9 +555,13 @@ impl<C: XConnection> ServerState<C> {
 
         let class = win.attrs.class.insert(class);
         if let Some(key) = win.surface_key {
-            let surface: &SurfaceData = self.objects[key].as_ref();
-            if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
-                data.toplevel.set_app_id(class.to_string());
+            if let Some(object) = self.objects.get(key) {
+                let surface: &SurfaceData = object.as_ref();
+                if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
+                    data.toplevel.set_app_id(class.to_string());
+                }
+            } else {
+                warn!("could not set window class: stale surface");
             }
         }
     }
@@ -568,15 +576,19 @@ impl<C: XConnection> ServerState<C> {
 
         if win.attrs.size_hints.is_none() || *win.attrs.size_hints.as_ref().unwrap() != hints {
             debug!("setting {window:?} hints {hints:?}");
-            if let Some(surface) = win.surface_key {
-                let surface: &SurfaceData = self.objects[surface].as_ref();
-                if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
-                    if let Some(min_size) = &hints.min_size {
-                        data.toplevel.set_min_size(min_size.width, min_size.height);
+            if let Some(key) = win.surface_key {
+                if let Some(object) = self.objects.get(key) {
+                    let surface: &SurfaceData = object.as_ref();
+                    if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
+                        if let Some(min_size) = &hints.min_size {
+                            data.toplevel.set_min_size(min_size.width, min_size.height);
+                        }
+                        if let Some(max_size) = &hints.max_size {
+                            data.toplevel.set_max_size(max_size.width, max_size.height);
+                        }
                     }
-                    if let Some(max_size) = &hints.max_size {
-                        data.toplevel.set_max_size(max_size.width, max_size.height);
-                    }
+                } else {
+                    warn!("could not set size hint on {window:?}: stale surface")
                 }
             }
             win.attrs.size_hints = Some(hints);
@@ -620,7 +632,11 @@ impl<C: XConnection> ServerState<C> {
         win.mapped = false;
 
         if let Some(key) = win.surface_key.take() {
-            let surface: &mut SurfaceData = self.objects[key].as_mut();
+            let Some(object) = self.objects.get_mut(key) else {
+                warn!("could not unmap {window:?}: stale surface");
+                return;
+            };
+            let surface: &mut SurfaceData = object.as_mut();
             surface.destroy_role();
         }
     }
@@ -631,7 +647,11 @@ impl<C: XConnection> ServerState<C> {
             warn!("Tried to set window without surface fullscreen: {window:?}");
             return;
         };
-        let surface: &mut SurfaceData = self.objects[key].as_mut();
+        let Some(object) = self.objects.get_mut(key) else {
+            warn!("Could not set fullscreen on {window:?}: stale surface");
+            return;
+        };
+        let surface: &mut SurfaceData = object.as_mut();
         let Some(SurfaceRole::Toplevel(Some(ref toplevel))) = surface.role else {
             warn!("Tried to set an unmapped toplevel or non toplevel fullscreen: {window:?}");
             return;
@@ -692,10 +712,13 @@ impl<C: XConnection> ServerState<C> {
 
         let client_events = std::mem::take(&mut self.clientside.globals.events);
         for (key, event) in client_events {
-            let object = &mut self.objects[key];
+            let Some(object) = &mut self.objects.get_mut(key) else {
+                warn!("could not handle clientside event: stale surface");
+                continue;
+            };
             let mut object = object.0.take().unwrap();
             object.handle_event(event, self);
-            let ret = self.objects[key].0.replace(object);
+            let ret = self.objects[key].0.replace(object); // safe indexed access?
             debug_assert!(ret.is_none());
         }
 
@@ -884,16 +907,22 @@ impl<C: XConnection> ServerState<C> {
         }
     }
 
-    fn get_server_surface_from_client(&self, surface: client::wl_surface::WlSurface) -> &WlSurface {
+    fn get_server_surface_from_client(
+        &self,
+        surface: client::wl_surface::WlSurface,
+    ) -> Option<&WlSurface> {
         let key: &ObjectKey = surface.data().unwrap();
-        let surface: &SurfaceData = self.objects[*key].as_ref();
-        &surface.server
+        let surface: &SurfaceData = self.objects.get(*key)?.as_ref();
+        Some(&surface.server)
     }
 
-    fn get_client_surface_from_server(&self, surface: WlSurface) -> &client::wl_surface::WlSurface {
+    fn get_client_surface_from_server(
+        &self,
+        surface: WlSurface,
+    ) -> Option<&client::wl_surface::WlSurface> {
         let key: &ObjectKey = surface.data().unwrap();
-        let surface: &SurfaceData = self.objects[*key].as_ref();
-        &surface.client
+        let surface: &SurfaceData = self.objects.get(*key)?.as_ref();
+        Some(&surface.client)
     }
 
     fn close_x_window(&mut self, window: x::Window) {
