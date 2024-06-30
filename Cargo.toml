@@ -37,3 +37,7 @@ smithay-client-toolkit = { version = "0.19.1", default-features = false }
 [dev-dependencies]
 rustix = { workspace = true, features = ["fs"] }
 testwl = { path = "testwl" }
+
+[features]
+default = ["clipboard-sync"]
+clipboard-sync = []
