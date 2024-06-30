@@ -13,6 +13,7 @@ use wayland_client::{
         wl_compositor::WlCompositor,
         wl_display::WlDisplay,
         wl_keyboard::WlKeyboard,
+        wl_pointer::WlPointer,
         wl_registry::WlRegistry,
         wl_seat::{self, WlSeat},
         wl_shm::{Format, WlShm},
@@ -205,6 +206,13 @@ impl super::XConnection for FakeXConnection {
             "Unknown window: {window:?}"
         );
         self.focused_window = window.into();
+    }
+
+    fn raise_to_top(&mut self, window: Window) {
+        assert!(
+            self.windows.contains_key(&window),
+            "Unknown window: {window:?}"
+        );
     }
 }
 
@@ -1118,6 +1126,56 @@ fn clipboard_x11_then_wayland() {
         f.run();
         assert_eq!(data, mime.data);
     }
+}
+
+#[test]
+fn raise_window_on_pointer_event() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+    let win1 = unsafe { Window::new(1) };
+    let (_, id1) = f.create_toplevel(&comp, win1);
+    f.testwl.configure_toplevel(id1, 100, 100, vec![]);
+
+    let win2 = unsafe { Window::new(2) };
+    let (_, id2) = f.create_toplevel(&comp, win2);
+    assert_eq!(f.connection().focused_window, Some(win2));
+
+    f.testwl.move_pointer_to(id2, 0.0, 0.0);
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(win2));
+    assert_eq!(f.exwayland.last_hovered, Some(win2));
+
+    f.testwl.move_pointer_to(id1, 0.0, 0.0);
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(win2));
+    assert_eq!(f.exwayland.last_hovered, Some(win1));
+}
+
+#[test]
+fn override_redirect_choose_hover_window() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+    let win1 = unsafe { Window::new(1) };
+    let (_, id1) = f.create_toplevel(&comp, win1);
+    f.testwl.configure_toplevel(id1, 100, 100, vec![]);
+
+    let win2 = unsafe { Window::new(2) };
+    let _ = f.create_toplevel(&comp, win2);
+    assert_eq!(f.connection().focused_window, Some(win2));
+
+    f.testwl.move_pointer_to(id1, 0.0, 0.0);
+    f.run();
+    assert_eq!(f.exwayland.last_hovered, Some(win1));
+
+    let win3 = unsafe { Window::new(3) };
+    let (buffer, surface) = comp.create_surface();
+    f.new_window(win3, true, WindowData::default(), None);
+    f.map_window(&comp, win3, &surface.obj, &buffer);
+    f.run();
+    let id3 = f.check_new_surface();
+    let popup_data = f.testwl.get_surface_data(id3).unwrap();
+    let win1_xdg = &f.testwl.get_surface_data(id1).unwrap().xdg().surface;
+    assert_eq!(&popup_data.popup().parent, win1_xdg);
 }
 
 /// See Pointer::handle_event for an explanation.

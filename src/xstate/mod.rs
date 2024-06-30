@@ -842,10 +842,6 @@ impl super::XConnection for Arc<xcb::Connection> {
             });
         }
 
-        unwrap_or_skip_bad_window!(self.send_and_check_request(&x::ConfigureWindow {
-            window,
-            value_list: &[x::ConfigWindow::StackMode(x::StackMode::Above)],
-        }));
         unwrap_or_skip_bad_window!(self.send_and_check_request(&x::ChangeProperty {
             mode: x::PropMode::Replace,
             window: self.root_window(),
@@ -868,6 +864,13 @@ impl super::XConnection for Arc<xcb::Connection> {
             propagate: false,
             event_mask: x::EventMask::empty(),
             event,
+        }));
+    }
+
+    fn raise_to_top(&mut self, window: x::Window) {
+        unwrap_or_skip_bad_window!(self.send_and_check_request(&x::ConfigureWindow {
+            window,
+            value_list: &[x::ConfigWindow::StackMode(x::StackMode::Above)],
         }));
     }
 }

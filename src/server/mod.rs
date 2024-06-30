@@ -427,6 +427,7 @@ pub struct ServerState<C: XConnection> {
     qh: ClientQueueHandle,
     to_focus: Option<x::Window>,
     last_focused_toplevel: Option<x::Window>,
+    last_hovered: Option<x::Window>,
     connection: Option<C>,
 
     xdg_wm_base: XdgWmBase,
@@ -468,6 +469,7 @@ impl<C: XConnection> ServerState<C> {
             dh,
             to_focus: None,
             last_focused_toplevel: None,
+            last_hovered: None,
             connection: None,
             objects: Default::default(),
             associated_windows: Default::default(),
@@ -628,6 +630,9 @@ impl<C: XConnection> ServerState<C> {
 
         if matches!(self.last_focused_toplevel, Some(x) if x == window) {
             self.last_focused_toplevel.take();
+        }
+        if self.last_hovered == Some(window) {
+            self.last_hovered.take();
         }
         win.mapped = false;
 
@@ -792,9 +797,10 @@ impl<C: XConnection> ServerState<C> {
         let window_data = self.windows.get_mut(&window).unwrap();
         if window_data.attrs.override_redirect {
             // Override redirect is hard to convert to Wayland!
-            // We will just make them be popups for the last focused toplevel.
-            if let Some(win) = self.last_focused_toplevel {
-                window_data.attrs.popup_for = Some(win)
+            if let Some(win) = self.last_hovered {
+                window_data.attrs.popup_for = Some(win);
+            } else if let Some(win) = self.last_focused_toplevel {
+                window_data.attrs.popup_for = Some(win);
             }
         }
         let window = self.windows.get(&window).unwrap();
@@ -931,6 +937,9 @@ impl<C: XConnection> ServerState<C> {
         self.connection.as_mut().unwrap().close_window(window, data);
         if self.last_focused_toplevel == Some(window) {
             self.last_focused_toplevel.take();
+        }
+        if self.last_hovered == Some(window) {
+            self.last_hovered.take();
         }
     }
 }

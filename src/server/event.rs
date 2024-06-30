@@ -385,17 +385,23 @@ impl HandleEvent for Pointer {
                 ref surface,
                 surface_x,
                 surface_y,
-            } => {
-                let do_enter = || {
-                    debug!("entering surface ({serial})");
-                    if let Some(surface) = state.get_server_surface_from_client(surface.clone()) {
-                        self.server.enter(serial, surface, surface_x, surface_y)
-                    } else {
-                        warn!("could not enter surface: stale surface");
-                    }
-                };
+            } => 'enter: {
                 let surface_key: ObjectKey = surface.data().copied().unwrap();
-                let surface_data: &SurfaceData = state.objects[surface_key].as_ref();
+                let Some(surface_data): Option<&SurfaceData> =
+                    state.objects.get(surface_key).map(|o| o.as_ref())
+                else {
+                    warn!("could not enter surface: stale surface");
+                    break 'enter;
+                };
+
+                let mut do_enter = || {
+                    debug!("entering surface ({serial})");
+                    self.server
+                        .enter(serial, &surface_data.server, surface_x, surface_y);
+                    let window = surface_data.window.unwrap();
+                    state.connection.as_mut().unwrap().raise_to_top(window);
+                    state.last_hovered = Some(window);
+                };
 
                 if matches!(surface_data.role, Some(SurfaceRole::Popup(_))) {
                     match self.pending_enter.0.take() {
