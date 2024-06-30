@@ -1103,7 +1103,31 @@ where
         });
     }
 }
-global_dispatch_with_events!(WlOutput, client::wl_output::WlOutput);
+impl<C: XConnection> GlobalDispatch<WlOutput, Global> for ServerState<C> {
+    fn bind(
+        state: &mut Self,
+        _: &DisplayHandle,
+        _: &wayland_server::Client,
+        resource: wayland_server::New<WlOutput>,
+        data: &Global,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        state.objects.insert_with_key(|key| {
+            let server = data_init.init(resource, key);
+            let client = state
+                .clientside
+                .global_list
+                .registry()
+                .bind::<client::wl_output::WlOutput, _, _>(
+                    data.name,
+                    server.version(),
+                    &state.qh,
+                    key,
+                );
+            Output::new(client, server).into()
+        });
+    }
+}
 global_dispatch_with_events!(WlDrmServer, WlDrmClient);
 
 impl<C: XConnection> GlobalDispatch<XwaylandShellV1, ()> for ServerState<C> {

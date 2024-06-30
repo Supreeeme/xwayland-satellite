@@ -191,8 +191,8 @@ impl super::XConnection for FakeXConnection {
     #[track_caller]
     fn set_window_dims(&mut self, window: Window, state: super::PendingSurfaceState) {
         self.window(window).dims = WindowDims {
-            x: state.x as _,
-            y: state.y as _,
+            x: state.x.unwrap_or(0) as _,
+            y: state.y.unwrap_or(0) as _,
             width: state.width as _,
             height: state.height as _,
         };
@@ -699,6 +699,8 @@ fn pass_through_globals() {
     use wayland_client::protocol::wl_output::WlOutput;
 
     let mut f = TestFixture::new();
+    f.testwl.new_output(0, 0);
+    f.run();
 
     const fn check<T: Proxy>() {}
 

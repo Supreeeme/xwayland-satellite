@@ -937,8 +937,8 @@ impl<C: XConnection> ServerState<C> {
 
 #[derive(Default, Debug)]
 pub struct PendingSurfaceState {
-    pub x: i32,
-    pub y: i32,
+    pub x: Option<i32>,
+    pub y: Option<i32>,
     pub width: i32,
     pub height: i32,
 }

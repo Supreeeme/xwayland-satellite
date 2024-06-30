@@ -782,14 +782,21 @@ impl super::XConnection for Arc<xcb::Connection> {
 
     fn set_window_dims(&mut self, window: x::Window, dims: crate::server::PendingSurfaceState) {
         trace!("reconfiguring window {window:?}");
+        let mut vals = vec![
+            x::ConfigWindow::Width(dims.width as _),
+            x::ConfigWindow::Height(dims.height as _),
+        ];
+        if let Some(x) = dims.x {
+            vals.push(x::ConfigWindow::X(x));
+        }
+        if let Some(y) = dims.y {
+            vals.push(x::ConfigWindow::Y(y));
+        }
+        vals.sort();
+
         unwrap_or_skip_bad_window!(self.send_and_check_request(&x::ConfigureWindow {
             window,
-            value_list: &[
-                x::ConfigWindow::X(dims.x),
-                x::ConfigWindow::Y(dims.y),
-                x::ConfigWindow::Width(dims.width as _),
-                x::ConfigWindow::Height(dims.height as _),
-            ],
+            value_list: &vals
         }));
     }
 

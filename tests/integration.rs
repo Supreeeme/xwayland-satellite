@@ -870,3 +870,42 @@ fn copy_from_wayland() {
         assert_eq!(val, data);
     }
 }
+
+// TODO: this test doesn't actually match real behavior for some reason...
+#[test]
+fn different_output_position() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 200, 200, false);
+    connection.map_window(window);
+    f.wait_and_dispatch();
+    let surface = f
+        .testwl
+        .last_created_surface_id()
+        .expect("No surface created!");
+    f.configure_and_verify_new_toplevel(&mut connection, window, surface);
+
+    f.testwl.new_output(0, 0);
+    f.wait_and_dispatch();
+    let output = f.testwl.last_created_output();
+    f.testwl.move_surface_to_output(surface, output);
+    f.testwl.move_pointer_to(surface, 10.0, 10.0);
+    f.wait_and_dispatch();
+    let reply = connection.get_reply(&x::QueryPointer { window });
+    assert_eq!(reply.same_screen(), true);
+    assert_eq!(reply.win_x(), 10);
+    assert_eq!(reply.win_y(), 10);
+
+    f.testwl.new_output(100, 0);
+    f.wait_and_dispatch();
+    let output = f.testwl.last_created_output();
+    f.testwl.move_surface_to_output(surface, output);
+    f.testwl.move_pointer_to(surface, 150.0, 12.0);
+    f.wait_and_dispatch();
+    let reply = connection.get_reply(&x::QueryPointer { window });
+    println!("reply: {reply:?}");
+    assert_eq!(reply.same_screen(), true);
+    assert_eq!(reply.win_x(), 150);
+    assert_eq!(reply.win_y(), 12);
+}

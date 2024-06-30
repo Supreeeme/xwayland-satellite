@@ -38,7 +38,7 @@ use wayland_server::{
         wl_data_offer::{self, WlDataOffer},
         wl_data_source::{self, WlDataSource},
         wl_keyboard::{self, WlKeyboard},
-        wl_output::WlOutput,
+        wl_output::{self, WlOutput},
         wl_pointer::{self, WlPointer},
         wl_seat::{self, WlSeat},
         wl_shm::WlShm,
@@ -155,6 +155,7 @@ struct DataSourceData {
 
 struct State {
     surfaces: HashMap<SurfaceId, SurfaceData>,
+    outputs: Vec<WlOutput>,
     positioners: HashMap<PositionerId, PositionerState>,
     buffers: HashSet<WlBuffer>,
     begin: Instant,
@@ -172,6 +173,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             surfaces: Default::default(),
+            outputs: Default::default(),
             buffers: Default::default(),
             positioners: Default::default(),
             begin: Instant::now(),
@@ -286,7 +288,6 @@ impl Server {
         dh.create_global::<State, XdgWmBase, _>(6, ());
         dh.create_global::<State, WlSeat, _>(5, ());
         dh.create_global::<State, WlDataDeviceManager, _>(3, ());
-        global_noop!(WlOutput);
         global_noop!(ZwpLinuxDmabufV1);
         global_noop!(ZwpRelativePointerManagerV1);
         global_noop!(ZxdgOutputManagerV1);
@@ -380,6 +381,15 @@ impl Server {
 
     pub fn last_created_surface_id(&self) -> Option<SurfaceId> {
         self.state.last_surface_id
+    }
+
+    #[track_caller]
+    pub fn last_created_output(&self) -> WlOutput {
+        self.state
+            .outputs
+            .last()
+            .expect("No outputs created!")
+            .clone()
     }
 
     pub fn get_object<T: Resource + 'static>(
@@ -476,6 +486,27 @@ impl Server {
         dev.selection(Some(&offer));
         self.display.flush_clients().unwrap();
     }
+
+    #[track_caller]
+    pub fn move_pointer_to(&mut self, surface: SurfaceId, x: f64, y: f64) {
+        let pointer = self.state.pointer.as_ref().expect("No pointer created");
+        let data = self.state.surfaces.get(&surface).expect("No such surface");
+
+        pointer.enter(24, &data.surface, x, y);
+        pointer.frame();
+        self.display.flush_clients().unwrap();
+    }
+
+    pub fn new_output(&mut self, x: i32, y: i32) {
+        self.dh.create_global::<State, WlOutput, _>(4, (x, y));
+        self.display.flush_clients().unwrap();
+    }
+
+    pub fn move_surface_to_output(&mut self, surface: SurfaceId, output: WlOutput) {
+        let data = self.state.surfaces.get(&surface).expect("No such surface");
+        data.surface.enter(&output);
+        self.display.flush_clients().unwrap();
+    }
 }
 
 pub struct PasteDataResolver {
@@ -526,6 +557,46 @@ pub struct PasteData {
 simple_global_dispatch!(WlShm);
 simple_global_dispatch!(WlCompositor);
 simple_global_dispatch!(XdgWmBase);
+
+impl GlobalDispatch<WlOutput, (i32, i32)> for State {
+    fn bind(
+        state: &mut Self,
+        _: &DisplayHandle,
+        _: &Client,
+        resource: wayland_server::New<WlOutput>,
+        &(x, y): &(i32, i32),
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        let output = data_init.init(resource, ());
+        output.geometry(
+            x,
+            y,
+            0,
+            0,
+            wl_output::Subpixel::None,
+            "xwls".to_string(),
+            "fake monitor".to_string(),
+            wl_output::Transform::Normal,
+        );
+        output.mode(wl_output::Mode::Current, 1000, 1000, 0);
+        output.done();
+        state.outputs.push(output);
+    }
+}
+
+impl Dispatch<WlOutput, ()> for State {
+    fn request(
+        _: &mut Self,
+        _: &Client,
+        _: &WlOutput,
+        _: <WlOutput as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        unreachable!();
+    }
+}
 
 impl GlobalDispatch<WlDataDeviceManager, ()> for State {
     fn bind(
@@ -688,8 +759,11 @@ impl Dispatch<WlPointer, ()> for State {
                         .unwrap();
 
                     assert!(
-                        data.role.replace(SurfaceRole::Cursor).is_none(),
-                        "Surface already had a role!"
+                        matches!(
+                            data.role.replace(SurfaceRole::Cursor),
+                            None | Some(SurfaceRole::Cursor)
+                        ),
+                        "Surface already had a non cursor role!"
                     );
                 }
             }
@@ -1144,6 +1218,7 @@ impl Dispatch<WlSurface, ()> for State {
                     .remove(&SurfaceId(resource.id().protocol_id()));
             }
             SetInputRegion { .. } => {}
+            SetBufferScale { .. } => {}
             other => todo!("unhandled request {other:?}"),
         }
     }

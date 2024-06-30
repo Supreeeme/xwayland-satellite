@@ -1,6 +1,5 @@
 use crate::server::{ObjectEvent, ObjectKey};
 use std::os::unix::net::UnixStream;
-use std::sync::mpsc;
 use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
     wl_keyboard::WlKeyboard, wl_output::WlOutput, wl_pointer::WlPointer, wl_region::WlRegion,
@@ -153,19 +152,6 @@ impl Dispatch<WlCallback, server::wl_callback::WlCallback> for Globals {
         if let Event::<WlCallback>::Done { callback_data } = event {
             s_callback.done(callback_data);
         }
-    }
-}
-
-impl Dispatch<WlOutput, mpsc::Sender<Event<WlOutput>>> for Globals {
-    fn event(
-        _: &mut Self,
-        _: &WlOutput,
-        event: <WlOutput as Proxy>::Event,
-        data: &mpsc::Sender<Event<WlOutput>>,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        let _ = data.send(event);
     }
 }
 
