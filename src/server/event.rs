@@ -157,8 +157,8 @@ impl SurfaceData {
                     };
                     let output: &mut Output = object.as_mut();
                     if let Some(win) = self.window {
-                        if let Some(data) = state.windows.get(&win) {
-                            output.add_surface(self, data.attrs.dims, state.connection.as_mut().unwrap());
+                        if let Some(data) = state.windows.get_mut(&win) {
+                            output.add_surface(self, &mut data.attrs.dims, state.connection.as_mut().unwrap());
                         }
                     }
                     &output.server
@@ -661,11 +661,13 @@ impl Output {
     fn add_surface<C: XConnection>(
         &mut self,
         surface: &SurfaceData,
-        dims: WindowDims,
+        dims: &mut WindowDims,
         connection: &mut C,
     ) {
         self.surfaces.insert(surface.client.clone());
         let window = surface.window.unwrap();
+        dims.x = self.x as _;
+        dims.y = self.y as _;
 
         debug!("moving surface to {}x{}", self.x, self.y);
         connection.set_window_dims(

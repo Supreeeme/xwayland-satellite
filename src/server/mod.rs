@@ -817,10 +817,14 @@ impl<C: XConnection> ServerState<C> {
             let parent_window = self.windows.get(&parent).unwrap();
             let parent_surface: &SurfaceData =
                 self.objects[parent_window.surface_key.unwrap()].as_ref();
+            let parent_dims = parent_window.attrs.dims;
+
+            let x = window.attrs.dims.x - parent_dims.x;
+            let y = window.attrs.dims.y - parent_dims.y;
 
             let positioner = self.xdg_wm_base.create_positioner(&self.qh, ());
             positioner.set_size(window.attrs.dims.width as _, window.attrs.dims.height as _);
-            positioner.set_offset(window.attrs.dims.x as i32, window.attrs.dims.y as i32);
+            positioner.set_offset(x as i32, y as i32);
             positioner.set_anchor(Anchor::TopLeft);
             positioner.set_gravity(Gravity::BottomRight);
             positioner.set_anchor_rect(

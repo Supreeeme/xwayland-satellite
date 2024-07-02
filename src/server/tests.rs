@@ -13,6 +13,7 @@ use wayland_client::{
         wl_compositor::WlCompositor,
         wl_display::WlDisplay,
         wl_keyboard::WlKeyboard,
+        wl_output::WlOutput,
         wl_pointer::WlPointer,
         wl_registry::WlRegistry,
         wl_seat::{self, WlSeat},
@@ -226,6 +227,7 @@ struct TestFixture {
     /// Exwayland's display - must dispatch this for our server state to advance
     exwl_display: Display<FakeServerState>,
     surface_serial: u64,
+    registry: TestObject<WlRegistry>,
 }
 
 static INIT: std::sync::Once = std::sync::Once::new();
@@ -259,12 +261,20 @@ impl TestFixture {
         exwayland.connect(ex_server);
 
         exwayland.set_x_connection(FakeXConnection::default());
+
+        let exwl_connection = Connection::from_socket(fake_client).unwrap();
+        let registry = TestObject::<WlRegistry>::from_request(
+            &exwl_connection.display(),
+            Req::<WlDisplay>::GetRegistry {},
+        );
+
         let mut f = TestFixture {
             testwl,
             exwayland,
-            exwl_connection: Connection::from_socket(fake_client).unwrap().into(),
+            exwl_connection: exwl_connection.into(),
             exwl_display: display,
             surface_serial: 1,
+            registry,
         };
         f.run();
         f
@@ -282,13 +292,7 @@ impl TestFixture {
 
     fn compositor(&mut self) -> Compositor {
         let mut ret = CompositorOptional::default();
-        let wl_display = self.exwl_connection.display();
-
-        let registry =
-            TestObject::<WlRegistry>::from_request(&wl_display, Req::<WlDisplay>::GetRegistry {});
-        self.run();
-
-        let events = std::mem::take(&mut *registry.data.events.lock().unwrap());
+        let events = std::mem::take(&mut *self.registry.data.events.lock().unwrap());
         assert!(!events.is_empty());
 
         for event in events {
@@ -306,25 +310,25 @@ impl TestFixture {
                 match interface {
                     x if x == WlCompositor::interface().name => {
                         ret.compositor = Some(TestObject::from_request(
-                            &registry.obj,
+                            &self.registry.obj,
                             bind_req(WlCompositor::interface()),
                         ));
                     }
                     x if x == WlShm::interface().name => {
                         ret.shm = Some(TestObject::from_request(
-                            &registry.obj,
+                            &self.registry.obj,
                             bind_req(WlShm::interface()),
                         ));
                     }
                     x if x == XwaylandShellV1::interface().name => {
                         ret.shell = Some(TestObject::from_request(
-                            &registry.obj,
+                            &self.registry.obj,
                             bind_req(XwaylandShellV1::interface()),
                         ));
                     }
                     x if x == WlSeat::interface().name => {
                         ret.seat = Some(TestObject::from_request(
-                            &registry.obj,
+                            &self.registry.obj,
                             bind_req(WlSeat::interface()),
                         ));
                     }
@@ -361,10 +365,38 @@ impl TestFixture {
         // Get our events
         let res = self.exwl_connection.prepare_read().unwrap().read();
         if res.is_err()
-            && !matches!(res, Err(WaylandError::Io(ref e)) if e.kind() == std::io::ErrorKind::WouldBlock)
+            && matches!(res, Err(WaylandError::Io(ref e)) if e.kind() != std::io::ErrorKind::WouldBlock)
         {
             panic!("Read failed: {res:?}")
         }
+    }
+
+    fn new_output(&mut self, x: i32, y: i32) -> wayland_server::protocol::wl_output::WlOutput {
+        self.testwl.new_output(x, y);
+        self.run();
+        self.run();
+        let mut events = std::mem::take(&mut *self.registry.data.events.lock().unwrap());
+        assert_eq!(events.len(), 1);
+        let event = events.pop().unwrap();
+        let Ev::<WlRegistry>::Global {
+            name,
+            interface,
+            version,
+        } = event
+        else {
+            panic!("Unexpected event: {event:?}");
+        };
+
+        assert_eq!(interface, WlOutput::interface().name);
+        TestObject::<WlOutput>::from_request(
+            &self.registry.obj,
+            Req::<WlRegistry>::Bind {
+                name,
+                id: (WlOutput::interface(), version),
+            },
+        );
+        self.run();
+        self.testwl.last_created_output()
     }
 
     fn register_window(&mut self, window: Window, data: WindowData) {
@@ -510,14 +542,17 @@ impl TestFixture {
         &mut self,
         comp: &Compositor,
         window: Window,
-        parent_id: testwl::SurfaceId,
+        parent_window: Window,
+        parent_surface: testwl::SurfaceId,
+        x: i16,
+        y: i16,
     ) -> (TestObject<WlSurface>, testwl::SurfaceId) {
         let (buffer, surface) = comp.create_surface();
         let data = WindowData {
             mapped: true,
             dims: WindowDims {
-                x: 10,
-                y: 10,
+                x,
+                y,
                 width: 50,
                 height: 50,
             },
@@ -529,7 +564,7 @@ impl TestFixture {
         self.run();
 
         let popup_id = self.check_new_surface();
-        assert_ne!(popup_id, parent_id);
+        assert_ne!(popup_id, parent_surface);
 
         {
             let surface_data = self.testwl.get_surface_data(popup_id).unwrap();
@@ -549,7 +584,7 @@ impl TestFixture {
 
             let toplevel_xdg = &self
                 .testwl
-                .get_surface_data(parent_id)
+                .get_surface_data(parent_surface)
                 .unwrap()
                 .xdg()
                 .surface;
@@ -557,18 +592,23 @@ impl TestFixture {
 
             let pos = &surface_data.popup().positioner_state;
             assert_eq!(pos.size.as_ref().unwrap(), &testwl::Vec2 { x: 50, y: 50 });
+
+            let parent_win = &self.connection().windows[&parent_window];
             assert_eq!(
                 pos.anchor_rect.as_ref().unwrap(),
                 &testwl::Rect {
-                    size: testwl::Vec2 { x: 100, y: 100 },
+                    size: testwl::Vec2 {
+                        x: parent_win.dims.width as _,
+                        y: parent_win.dims.height as _
+                    },
                     offset: testwl::Vec2::default()
                 }
             );
             assert_eq!(
                 pos.offset,
                 testwl::Vec2 {
-                    x: dims.x as _,
-                    y: dims.y as _
+                    x: (dims.x - parent_win.dims.x) as _,
+                    y: (dims.y - parent_win.dims.y) as _
                 }
             );
             assert_eq!(pos.anchor, xdg_positioner::Anchor::TopLeft);
@@ -692,7 +732,7 @@ fn popup_flow_simple() {
     let (_, toplevel_id) = f.create_toplevel(&compositor, win_toplevel);
 
     let win_popup = unsafe { Window::new(2) };
-    let (popup_surface, popup_id) = f.create_popup(&compositor, win_popup, toplevel_id);
+    let (popup_surface, popup_id) = f.create_popup(&compositor, win_popup, win_toplevel, toplevel_id, 10, 10);
 
     f.exwayland.unmap_window(win_popup);
     f.exwayland.destroy_window(win_popup);
@@ -756,11 +796,8 @@ fn pass_through_globals() {
     }
 
     let mut globals = SupportedGlobals::default();
-    let display = f.exwl_connection.display();
-    let registry =
-        TestObject::<WlRegistry>::from_request(&display, Req::<WlDisplay>::GetRegistry {});
     f.run();
-    let events = std::mem::take(&mut *registry.data.events.lock().unwrap());
+    let events = std::mem::take(&mut *f.registry.data.events.lock().unwrap());
     assert!(!events.is_empty());
     for event in events {
         let Ev::<WlRegistry>::Global { interface, .. } = event else {
@@ -809,7 +846,7 @@ fn popup_window_changes_surface() {
     let (_, toplevel_id) = f.create_toplevel(&comp, t_win);
 
     let win = unsafe { Window::new(2) };
-    let (surface, old_id) = f.create_popup(&comp, win, toplevel_id);
+    let (surface, old_id) = f.create_popup(&comp, win, t_win, toplevel_id, 0, 0);
 
     f.exwayland.unmap_window(win);
     surface.obj.destroy();
@@ -1176,6 +1213,28 @@ fn override_redirect_choose_hover_window() {
     let popup_data = f.testwl.get_surface_data(id3).unwrap();
     let win1_xdg = &f.testwl.get_surface_data(id1).unwrap().xdg().surface;
     assert_eq!(&popup_data.popup().parent, win1_xdg);
+}
+
+#[test]
+fn offset_output() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let output = f.new_output(500, 100);
+
+    let window = unsafe { Window::new(1) };
+    let (_, surface_id) = f.create_toplevel(&comp, window);
+    f.testwl.move_surface_to_output(surface_id, output);
+    f.run();
+    let data = &f.connection().windows[&window];
+    assert_eq!(data.dims.x, 500);
+    assert_eq!(data.dims.y, 100);
+
+    let popup = unsafe { Window::new(2) };
+    let (_, p_id) = f.create_popup(&comp, popup, window, surface_id, 510, 110);
+    let data = f.testwl.get_surface_data(p_id).unwrap();
+    assert_eq!(
+        data.popup().positioner_state.offset,
+        testwl::Vec2 { x: 10, y: 10 }
+    );
 }
 
 /// See Pointer::handle_event for an explanation.
