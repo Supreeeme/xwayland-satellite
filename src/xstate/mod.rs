@@ -406,11 +406,13 @@ impl XState {
     }
 
     fn get_atom_name(&self, atom: x::Atom) -> String {
-        self.connection
+        match self
+            .connection
             .wait_for_reply(self.connection.send_request(&x::GetAtomName { atom }))
-            .unwrap()
-            .name()
-            .to_string()
+        {
+            Ok(reply) => reply.name().to_string(),
+            Err(err) => format!("<error getting atom name: {err:?}> {atom:?}"),
+        }
     }
 
     fn get_window_attributes(&self, window: x::Window) -> XResult<WindowAttributes> {

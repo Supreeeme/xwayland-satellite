@@ -1,10 +1,11 @@
 use super::XState;
 use crate::server::ForeignSelection;
 use crate::{MimeTypeData, RealServerState};
-use log::{debug, warn};
+use log::{debug, trace, warn};
 use std::rc::Rc;
 use xcb::x;
 
+#[derive(Debug)]
 enum TargetValue {
     U8(Vec<u8>),
     U16(Vec<u16>),
@@ -12,27 +13,30 @@ enum TargetValue {
     Foreign,
 }
 
-pub struct SelectionTarget {
+#[derive(Debug)]
+struct SelectionTargetId {
     name: String,
     atom: x::Atom,
-    value: Option<TargetValue>,
+}
+
+pub struct SelectionTarget {
+    id: SelectionTargetId,
+    value: TargetValue,
 }
 
 impl MimeTypeData for SelectionTarget {
     fn name(&self) -> &str {
-        &self.name
+        &self.id.name
     }
 
     fn data(&self) -> &[u8] {
-        match self.value.as_ref() {
-            Some(TargetValue::U8(v)) => v,
+        match &self.value {
+            TargetValue::U8(v) => v,
             other => {
-                if let Some(other) = other {
-                    warn!(
+                warn!(
                     "Unexpectedly requesting data from mime type with data type {} - nothing will be copied",
                     std::any::type_name_of_val(other)
                 );
-                }
                 &[]
             }
         }
@@ -42,9 +46,9 @@ impl MimeTypeData for SelectionTarget {
 #[derive(Default)]
 pub(crate) struct SelectionData {
     clear_time: Option<u32>,
+    // Selection ID and destination atom
+    tmp_mimes: Vec<(SelectionTargetId, x::Atom)>,
     mime_types: Rc<Vec<SelectionTarget>>,
-    /// List of property on self.wm_window and corresponding index in mime_types
-    mime_destinations: Vec<(x::Atom, usize)>,
     foreign_data: Option<ForeignSelection>,
 }
 
@@ -87,15 +91,18 @@ impl XState {
                     .unwrap();
 
                 SelectionTarget {
-                    name: mime.clone(),
-                    atom: atom.atom(),
-                    value: Some(TargetValue::Foreign),
+                    id: SelectionTargetId {
+                        name: mime.clone(),
+                        atom: atom.atom(),
+                    },
+                    value: TargetValue::Foreign,
                 }
             })
             .collect();
 
         self.selection_data.mime_types = Rc::new(types);
         self.selection_data.foreign_data = Some(selection);
+        trace!("Clipboard set from Wayland");
     }
 
     pub(crate) fn handle_selection_event(
@@ -180,7 +187,7 @@ impl XState {
                             .selection_data
                             .mime_types
                             .iter()
-                            .map(|t| t.atom)
+                            .map(|t| t.id.atom)
                             .collect();
 
                         self.connection
@@ -200,28 +207,35 @@ impl XState {
                             .selection_data
                             .mime_types
                             .iter()
-                            .find(|t| t.atom == other)
+                            .find(|t| t.id.atom == other)
                         else {
-                            debug!("refusing selection requst because given atom could not be found ({other:?})");
+                            if log::log_enabled!(log::Level::Debug) {
+                                let name = self.get_atom_name(other);
+                                debug!("refusing selection request because given atom could not be found ({})", name);
+                            }
                             refuse();
                             return true;
                         };
 
                         macro_rules! set_property {
                             ($data:expr) => {
-                                self.connection
-                                    .send_and_check_request(&x::ChangeProperty {
-                                        mode: x::PropMode::Replace,
-                                        window: e.requestor(),
-                                        property: e.property(),
-                                        r#type: target.atom,
-                                        data: $data,
-                                    })
-                                    .unwrap()
+                                match self.connection.send_and_check_request(&x::ChangeProperty {
+                                    mode: x::PropMode::Replace,
+                                    window: e.requestor(),
+                                    property: e.property(),
+                                    r#type: target.id.atom,
+                                    data: $data,
+                                }) {
+                                    Ok(_) => success(),
+                                    Err(e) => {
+                                        warn!("Failed setting selection property: {e:?}");
+                                        refuse();
+                                    }
+                                }
                             };
                         }
 
-                        match target.value.as_ref().unwrap() {
+                        match &target.value {
                             TargetValue::U8(v) => set_property!(v),
                             TargetValue::U16(v) => set_property!(v),
                             TargetValue::U32(v) => set_property!(v),
@@ -231,12 +245,10 @@ impl XState {
                                     .foreign_data
                                     .as_ref()
                                     .unwrap()
-                                    .receive(target.name.clone(), server_state);
+                                    .receive(target.id.name.clone(), server_state);
                                 set_property!(&data);
                             }
                         }
-
-                        success();
                     }
                 }
             }
@@ -280,6 +292,7 @@ impl XState {
             })
             .collect();
 
+        // Setup target list
         self.connection
             .send_and_check_request(&x::ChangeProperty {
                 mode: x::PropMode::Replace,
@@ -290,6 +303,7 @@ impl XState {
             })
             .unwrap();
 
+        // Request data for our targets
         self.connection
             .send_and_check_request(&x::ConvertSelection {
                 requestor: self.wm_window,
@@ -300,10 +314,9 @@ impl XState {
             })
             .unwrap();
 
-        let (types, dests) = target_props
+        let tmp = target_props
             .chunks_exact(2)
-            .enumerate()
-            .map(|(idx, atoms)| {
+            .map(|atoms| {
                 let [target, property] = atoms.try_into().unwrap();
                 let name = self
                     .connection
@@ -313,26 +326,19 @@ impl XState {
                     )
                     .unwrap();
                 let name = name.name().to_string();
-                let target = SelectionTarget {
-                    atom: target,
-                    name,
-                    value: None,
-                };
-                let dest = (property, idx);
-                (target, dest)
+                let target = SelectionTargetId { atom: target, name };
+                (target, property)
             })
-            .unzip();
+            .collect();
 
-        self.selection_data.mime_types = Rc::new(types);
-        self.selection_data.mime_destinations = dests;
+        self.selection_data.tmp_mimes = tmp;
     }
 
     fn handle_new_clipboard_data(&mut self, server_state: &mut RealServerState) {
-        for (property, idx) in std::mem::take(&mut self.selection_data.mime_destinations) {
-            let types = Rc::get_mut(&mut self.selection_data.mime_types).unwrap();
-            let target = &mut types[idx];
-            let data = {
-                if target.atom == self.atoms.timestamp {
+        let mut mime_types = Vec::new();
+        for (id, dest) in std::mem::take(&mut self.selection_data.tmp_mimes) {
+            let value = {
+                if id.atom == self.atoms.timestamp {
                     TargetValue::U32(vec![self
                         .selection_data
                         .clear_time
@@ -345,7 +351,7 @@ impl XState {
                         .wait_for_reply(self.connection.send_request(&x::GetProperty {
                             delete: true,
                             window: self.wm_window,
-                            property,
+                            property: dest,
                             r#type: x::ATOM_ANY,
                             long_offset: 0,
                             long_length: u32::MAX,
@@ -357,23 +363,27 @@ impl XState {
                         16 => TargetValue::U16(reply.value().to_vec()),
                         32 => TargetValue::U32(reply.value().to_vec()),
                         other => {
-                            let atom = target.atom;
-                            let target = self.get_atom_name(atom);
-                            let ty = if reply.r#type() == x::ATOM_NONE {
-                                "None".to_string()
-                            } else {
-                                self.get_atom_name(reply.r#type())
-                            };
-                            warn!("unexpected format: {other} (atom: {target}, type: {ty:?}, property: {property:?}) - copies as this type will fail!");
+                            if log::log_enabled!(log::Level::Debug) {
+                                let atom = id.atom;
+                                let target = self.get_atom_name(atom);
+                                let ty = if reply.r#type() == x::ATOM_NONE {
+                                    "None".to_string()
+                                } else {
+                                    self.get_atom_name(reply.r#type())
+                                };
+                                debug!("unexpected format: {other} (atom: {target}, type: {ty:?}, property: {dest:?})");
+                            }
                             continue;
                         }
                     }
                 }
             };
 
-            target.value = Some(data);
+            trace!("Selection data: {id:?} {value:?}");
+            mime_types.push(SelectionTarget { id, value });
         }
 
+        self.selection_data.mime_types = Rc::new(mime_types);
         self.connection
             .send_and_check_request(&x::DeleteProperty {
                 window: self.wm_window,
@@ -383,5 +393,6 @@ impl XState {
 
         self.set_clipboard_owner(self.selection_data.clear_time.unwrap());
         server_state.set_copy_paste_source(Rc::clone(&self.selection_data.mime_types));
+        trace!("Clipboard set from X11");
     }
 }

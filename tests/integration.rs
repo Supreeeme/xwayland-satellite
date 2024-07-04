@@ -721,8 +721,8 @@ fn copy_from_x11() {
     assert_ne!(window, owner.owner());
 
     let mimes = f.testwl.data_source_mimes();
-    assert!(mimes.contains(&"text/plain".into())); // mime1
-    assert!(mimes.contains(&"blah/blah".into())); // mime2
+    assert!(mimes.contains(&"text/plain".into()), "text/plain not in mimes: {mimes:?}"); // mime1
+    assert!(mimes.contains(&"blah/blah".into()), "blah/blah not in mimes: {mimes:?}"); // mime2
 
     let data = f.testwl.paste_data();
     f.testwl.dispatch();
@@ -908,4 +908,120 @@ fn different_output_position() {
     assert_eq!(reply.same_screen(), true);
     assert_eq!(reply.win_x(), 150);
     assert_eq!(reply.win_y(), 12);
+}
+
+#[test]
+fn bad_clipboard_data() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    connection.map_window(window);
+    f.wait_and_dispatch();
+    let surface = f
+        .testwl
+        .last_created_surface_id()
+        .expect("No surface created");
+    f.configure_and_verify_new_toplevel(&mut connection, window, surface);
+
+    connection
+        .send_and_check_request(&x::SetSelectionOwner {
+            owner: window,
+            selection: connection.atoms.clipboard,
+            time: x::CURRENT_TIME,
+        })
+        .unwrap();
+
+    // wait for request to come through
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let request = match connection.poll_for_event().unwrap() {
+        Some(xcb::Event::X(x::Event::SelectionRequest(r))) => r,
+        other => panic!("Didn't get selection request event, instead got {other:?}"),
+    };
+    assert_eq!(request.target(), connection.atoms.targets);
+    connection.set_property(
+        request.requestor(),
+        x::ATOM_ATOM,
+        request.property(),
+        &[connection.atoms.mime2],
+    );
+    connection
+        .send_and_check_request(&x::SendEvent {
+            propagate: false,
+            destination: x::SendEventDest::Window(request.requestor()),
+            event_mask: x::EventMask::empty(),
+            event: &x::SelectionNotifyEvent::new(
+                request.time(),
+                request.requestor(),
+                request.selection(),
+                request.target(),
+                request.property(),
+            ),
+        })
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let request = match connection.poll_for_event().unwrap() {
+        Some(xcb::Event::X(x::Event::SelectionRequest(r))) => r,
+        other => panic!("Didn't get selection request event, instead got {other:?}"),
+    };
+    assert_eq!(request.target(), connection.atoms.multiple);
+    let pairs = connection
+        .wait_for_reply(connection.send_request(&x::GetProperty {
+            delete: true,
+            window: request.requestor(),
+            property: request.property(),
+            r#type: x::ATOM_ATOM,
+            long_offset: 0,
+            long_length: 4,
+        }))
+        .unwrap();
+
+    let pairs: &[x::Atom] = pairs.value();
+    assert_eq!(pairs.len(), 2);
+    assert!(pairs.contains(&connection.atoms.mime2));
+
+    connection
+        .send_and_check_request(&x::SendEvent {
+            propagate: false,
+            destination: x::SendEventDest::Window(request.requestor()),
+            event_mask: x::EventMask::empty(),
+            event: &x::SelectionNotifyEvent::new(
+                request.time(),
+                request.requestor(),
+                request.selection(),
+                request.target(),
+                request.property(),
+            ),
+        })
+        .unwrap();
+
+    f.wait_and_dispatch();
+    let owner = connection
+        .wait_for_reply(connection.send_request(&x::GetSelectionOwner {
+            selection: connection.atoms.clipboard,
+        }))
+        .unwrap();
+    assert_ne!(window, owner.owner());
+
+    connection
+        .send_and_check_request(&x::ConvertSelection {
+            requestor: window,
+            selection: connection.atoms.clipboard,
+            target: connection.atoms.mime2,
+            property: connection.atoms.mime1,
+            time: x::CURRENT_TIME,
+        })
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let mut e = None;
+    while let Some(event) = connection.poll_for_event().unwrap() {
+        if let xcb::Event::X(x::Event::SelectionNotify(event)) = event {
+            e = Some(event);
+            break;
+        }
+    }
+    let e = e.expect("No selection notify event");
+    assert_eq!(e.property(), x::ATOM_NONE);
 }
