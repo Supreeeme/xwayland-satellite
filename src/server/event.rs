@@ -147,33 +147,44 @@ impl SurfaceData {
         event: client::wl_surface::Event,
         state: &mut ServerState<C>,
     ) {
-        let surface = &self.server;
-        simple_event_shunt! {
-            surface, event: client::wl_surface::Event => [
-                Enter { |output| {
-                    let key: ObjectKey = output.data().copied().unwrap();
-                    let Some(object) = state.objects.get_mut(key) else {
-                        return;
-                    };
-                    let output: &mut Output = object.as_mut();
-                    if let Some(win) = self.window {
-                        if let Some(data) = state.windows.get_mut(&win) {
-                            output.add_surface(self, &mut data.attrs.dims, state.connection.as_mut().unwrap());
-                        }
-                    }
-                    &output.server
-                }},
-                Leave { |output| {
-                    let key: ObjectKey = output.data().copied().unwrap();
-                    let Some(object) = state.objects.get_mut(key) else {
-                        return;
-                    };
-                    let output: &mut Output = object.as_mut();
-                    output.surfaces.remove(&self.client);
-                    &output.server
-                }},
-                PreferredBufferScale { factor }
-            ]
+        use client::wl_surface::Event;
+
+        match event {
+            Event::Enter { output } => {
+                let key: ObjectKey = output.data().copied().unwrap();
+                let Some(object) = state.objects.get_mut(key) else {
+                    return;
+                };
+                let output: &mut Output = object.as_mut();
+
+                if let Some(win_data) = self
+                    .window
+                    .as_ref()
+                    .map(|win| state.windows.get_mut(&win).unwrap())
+                {
+                    win_data.update_output_offset(
+                        key,
+                        WindowOutputOffset {
+                            x: output.x,
+                            y: output.y,
+                        },
+                        state.connection.as_mut().unwrap(),
+                    );
+                    output.windows.insert(win_data.window);
+                }
+                self.server.enter(&output.server);
+                debug!("{} entered {}", self.server.id(), output.server.id());
+            }
+            Event::Leave { output } => {
+                let key: ObjectKey = output.data().copied().unwrap();
+                let Some(object) = state.objects.get_mut(key) else {
+                    return;
+                };
+                let output: &mut Output = object.as_mut();
+                self.server.leave(&output.server);
+            }
+            Event::PreferredBufferScale { factor } => self.server.preferred_buffer_scale(factor),
+            other => warn!("unhandled surface request: {other:?}"),
         }
     }
 
@@ -190,14 +201,8 @@ impl SurfaceData {
         if let Some(pending) = xdg.pending.take() {
             let window = state.associated_windows[self.key];
             let window = state.windows.get_mut(&window).unwrap();
-            let x = match pending.x {
-                Some(x) => x as i16,
-                None => 0,
-            };
-            let y = match pending.y {
-                Some(y) => y as i16,
-                None => 0,
-            };
+            let x = pending.x + window.output_offset.x;
+            let y = pending.y + window.output_offset.y;
             let width = if pending.width > 0 {
                 pending.width as u16
             } else {
@@ -212,14 +217,15 @@ impl SurfaceData {
             connection.set_window_dims(
                 window.window,
                 PendingSurfaceState {
+                    x,
+                    y,
                     width: width as _,
                     height: height as _,
-                    ..pending
                 },
             );
             window.attrs.dims = WindowDims {
-                x,
-                y,
+                x: x as i16,
+                y: y as i16,
                 width,
                 height,
             };
@@ -249,8 +255,7 @@ impl SurfaceData {
                 let activated = states.contains(&(u32::from(xdg_toplevel::State::Activated) as u8));
 
                 if activated {
-                    let window = state.associated_windows[self.key];
-                    state.to_focus = Some(window);
+                    state.to_focus = Some(self.window.unwrap());
                 }
 
                 if let Some(SurfaceRole::Toplevel(Some(toplevel))) = &mut self.role {
@@ -292,8 +297,8 @@ impl SurfaceData {
             } => {
                 trace!("popup configure: {x}x{y}, {width}x{height}");
                 self.xdg_mut().unwrap().pending = Some(PendingSurfaceState {
-                    x: Some(x),
-                    y: Some(y),
+                    x,
+                    y,
                     width,
                     height,
                 });
@@ -642,9 +647,9 @@ impl HandleEvent for Touch {
 pub struct Output {
     pub client: client::wl_output::WlOutput,
     pub server: WlOutput,
-    surfaces: HashSet<client::wl_surface::WlSurface>,
-    x: i32,
-    y: i32,
+    pub windows: HashSet<x::Window>,
+    pub x: i32,
+    pub y: i32,
 }
 
 impl Output {
@@ -652,33 +657,10 @@ impl Output {
         Self {
             client,
             server,
-            surfaces: HashSet::new(),
+            windows: HashSet::new(),
             x: 0,
             y: 0,
         }
-    }
-
-    fn add_surface<C: XConnection>(
-        &mut self,
-        surface: &SurfaceData,
-        dims: &mut WindowDims,
-        connection: &mut C,
-    ) {
-        self.surfaces.insert(surface.client.clone());
-        let window = surface.window.unwrap();
-        dims.x = self.x as _;
-        dims.y = self.y as _;
-
-        debug!("moving surface to {}x{}", self.x, self.y);
-        connection.set_window_dims(
-            window,
-            PendingSurfaceState {
-                x: Some(self.x),
-                y: Some(self.y),
-                width: dims.width as _,
-                height: dims.height as _,
-            },
-        );
     }
 }
 impl HandleEvent for Output {
@@ -686,30 +668,25 @@ impl HandleEvent for Output {
 
     fn handle_event<C: XConnection>(&mut self, event: Self::Event, state: &mut ServerState<C>) {
         if let client::wl_output::Event::Geometry { x, y, .. } = event {
-            debug!("moving output to {x}x{y}");
+            debug!("moving {} to {x}x{y}", self.server.id());
             self.x = x;
             self.y = y;
-            self.surfaces.retain(|surface| {
-                let Some(data) = state.get_object_from_client_object::<SurfaceData, _>(surface)
-                else {
+
+            self.windows.retain(|window| {
+                let Some(data): Option<&mut WindowData> = state.windows.get_mut(window) else {
                     return false;
                 };
 
-                let window = data.window.as_ref().copied().unwrap();
-                let Some(win_data) = state.windows.get(&window) else {
-                    return false;
-                };
-
-                state.connection.as_mut().unwrap().set_window_dims(
-                    window,
-                    PendingSurfaceState {
-                        x: Some(x),
-                        y: Some(y),
-                        width: win_data.attrs.dims.width as _,
-                        height: win_data.attrs.dims.height as _,
+                data.update_output_offset(
+                    self.server.data().copied().unwrap(),
+                    WindowOutputOffset {
+                        x: self.x,
+                        y: self.y,
                     },
+                    state.connection.as_mut().unwrap(),
                 );
-                true
+
+                return true;
             });
         }
 

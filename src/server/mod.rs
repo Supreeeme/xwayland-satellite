@@ -88,6 +88,12 @@ pub struct WindowAttributes {
     pub group: Option<x::Window>,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct WindowOutputOffset {
+    x: i32,
+    y: i32,
+}
+
 #[derive(Debug)]
 struct WindowData {
     window: x::Window,
@@ -95,6 +101,8 @@ struct WindowData {
     surface_key: Option<ObjectKey>,
     mapped: bool,
     attrs: WindowAttributes,
+    output_offset: WindowOutputOffset,
+    output_key: Option<ObjectKey>,
 }
 
 impl WindowData {
@@ -115,7 +123,42 @@ impl WindowData {
                 popup_for: parent,
                 ..Default::default()
             },
+            output_offset: WindowOutputOffset::default(),
+            output_key: None,
         }
+    }
+
+    fn update_output_offset<C: XConnection>(
+        &mut self,
+        output_key: ObjectKey,
+        offset: WindowOutputOffset,
+        connection: &mut C,
+    ) {
+        debug!("offset: {offset:?}");
+        if self.output_key != Some(output_key) {
+            self.output_key = Some(output_key);
+        }
+
+        if offset == self.output_offset {
+            return;
+        }
+
+        let dims = &mut self.attrs.dims;
+        dims.x += (offset.x - self.output_offset.x) as i16;
+        dims.y += (offset.y - self.output_offset.y) as i16;
+        self.output_offset = offset;
+
+        connection.set_window_dims(
+            self.window,
+            PendingSurfaceState {
+                x: dims.x as i32,
+                y: dims.y as i32,
+                width: self.attrs.dims.width as _,
+                height: self.attrs.dims.height as _,
+            },
+        );
+
+        debug!("set {:?} offset to {:?}", self.window, self.output_offset);
     }
 }
 
@@ -950,8 +993,8 @@ impl<C: XConnection> ServerState<C> {
 
 #[derive(Default, Debug)]
 pub struct PendingSurfaceState {
-    pub x: Option<i32>,
-    pub y: Option<i32>,
+    pub x: i32,
+    pub y: i32,
     pub width: i32,
     pub height: i32,
 }

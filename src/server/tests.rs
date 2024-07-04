@@ -193,8 +193,8 @@ impl super::XConnection for FakeXConnection {
     #[track_caller]
     fn set_window_dims(&mut self, window: Window, state: super::PendingSurfaceState) {
         self.window(window).dims = WindowDims {
-            x: state.x.unwrap_or(0) as _,
-            y: state.y.unwrap_or(0) as _,
+            x: state.x as _,
+            y: state.y as _,
             width: state.width as _,
             height: state.height as _,
         };
@@ -732,7 +732,8 @@ fn popup_flow_simple() {
     let (_, toplevel_id) = f.create_toplevel(&compositor, win_toplevel);
 
     let win_popup = unsafe { Window::new(2) };
-    let (popup_surface, popup_id) = f.create_popup(&compositor, win_popup, win_toplevel, toplevel_id, 10, 10);
+    let (popup_surface, popup_id) =
+        f.create_popup(&compositor, win_popup, win_toplevel, toplevel_id, 10, 10);
 
     f.exwayland.unmap_window(win_popup);
     f.exwayland.destroy_window(win_popup);
@@ -1216,25 +1217,95 @@ fn override_redirect_choose_hover_window() {
 }
 
 #[test]
-fn offset_output() {
+fn output_offset() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     let output = f.new_output(500, 100);
-
     let window = unsafe { Window::new(1) };
-    let (_, surface_id) = f.create_toplevel(&comp, window);
-    f.testwl.move_surface_to_output(surface_id, output);
+
+    {
+        let (surface, surface_id) = f.create_toplevel(&comp, window);
+        f.testwl.move_surface_to_output(surface_id, &output);
+        f.run();
+        let data = &f.connection().windows[&window];
+        assert_eq!(data.dims.x, 500);
+        assert_eq!(data.dims.y, 100);
+
+        f.exwayland.unmap_window(window);
+        surface.obj.destroy();
+        f.run();
+    }
+
+    let (t_buffer, t_surface) = comp.create_surface();
+    f.map_window(&comp, window, &t_surface.obj, &t_buffer);
     f.run();
-    let data = &f.connection().windows[&window];
-    assert_eq!(data.dims.x, 500);
-    assert_eq!(data.dims.y, 100);
+    let t_id = f.testwl.last_created_surface_id().unwrap();
+    f.testwl.move_surface_to_output(t_id, &output);
+    f.run();
+    {
+        let data = f.testwl.get_surface_data(t_id).unwrap();
+        assert!(
+            matches!(data.role, Some(testwl::SurfaceRole::Toplevel(_))),
+            "surface role: {:?}",
+            data.role
+        );
+    }
+    f.testwl.configure_toplevel(t_id, 100, 100, vec![xdg_toplevel::State::Activated]);
+    f.run();
+
+    {
+        let data = &f.connection().windows[&window];
+        assert_eq!(data.dims.x, 500);
+        assert_eq!(data.dims.y, 100);
+    }
 
     let popup = unsafe { Window::new(2) };
-    let (_, p_id) = f.create_popup(&comp, popup, window, surface_id, 510, 110);
+    let (p_surface, p_id) = f.create_popup(&comp, popup, window, t_id, 510, 110);
+    f.testwl.move_surface_to_output(p_id, &output);
+    f.run();
     let data = f.testwl.get_surface_data(p_id).unwrap();
     assert_eq!(
         data.popup().positioner_state.offset,
         testwl::Vec2 { x: 10, y: 10 }
     );
+
+    f.exwayland.unmap_window(popup);
+    p_surface.obj.destroy();
+    f.run();
+
+    let (buffer, surface) = comp.create_surface();
+    f.map_window(&comp, popup, &surface.obj, &buffer);
+    f.run();
+    let p_id = f.testwl.last_created_surface_id().unwrap();
+    f.testwl.move_surface_to_output(p_id, &output);
+    f.testwl.configure_popup(p_id);
+    f.run();
+    let data = f.testwl.get_surface_data(p_id).unwrap();
+    assert_eq!(
+        data.popup().positioner_state.offset,
+        testwl::Vec2 { x: 10, y: 10 }
+    );
+}
+
+#[test]
+fn output_offset_change() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let output = f.new_output(500, 100);
+    let window = unsafe { Window::new(1) };
+    let (_, id) = f.create_toplevel(&comp, window);
+    f.testwl.move_surface_to_output(id, &output);
+    f.run();
+
+    let data = &f.connection().windows[&window];
+    assert_eq!(data.dims.x, 500);
+    assert_eq!(data.dims.y, 100);
+
+    f.testwl.move_output(&output, 600, 200);
+    f.run();
+    f.run();
+    let data = &f.connection().windows[&window];
+    assert_eq!(data.dims.x, 600);
+    assert_eq!(data.dims.y, 200);
+
 }
 
 /// See Pointer::handle_event for an explanation.

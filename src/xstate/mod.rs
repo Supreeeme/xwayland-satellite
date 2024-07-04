@@ -422,13 +422,13 @@ impl XState {
         let size_hints = self.get_wm_size_hints(window);
 
         let geometry = self.connection.wait_for_reply(geometry)?;
+        debug!("{window:?} geometry: {geometry:?}");
         let attrs = self.connection.wait_for_reply(attrs)?;
         let mut title = name.resolve()?;
         if title.is_none() {
             title = self.get_wm_name(window).resolve()?;
         }
 
-        debug!("got title: {title:?}");
         let class = class.resolve()?;
         let wm_hints = wm_hints.resolve()?;
         let size_hints = size_hints.resolve()?;
@@ -781,22 +781,15 @@ impl super::XConnection for Arc<xcb::Connection> {
     }
 
     fn set_window_dims(&mut self, window: x::Window, dims: crate::server::PendingSurfaceState) {
-        trace!("reconfiguring window {window:?}");
-        let mut vals = vec![
-            x::ConfigWindow::Width(dims.width as _),
-            x::ConfigWindow::Height(dims.height as _),
-        ];
-        if let Some(x) = dims.x {
-            vals.push(x::ConfigWindow::X(x));
-        }
-        if let Some(y) = dims.y {
-            vals.push(x::ConfigWindow::Y(y));
-        }
-        vals.sort();
-
+        trace!("set window dimensions {window:?} {dims:?}");
         unwrap_or_skip_bad_window!(self.send_and_check_request(&x::ConfigureWindow {
             window,
-            value_list: &vals
+            value_list: &[
+                x::ConfigWindow::X(dims.x),
+                x::ConfigWindow::Y(dims.y),
+                x::ConfigWindow::Width(dims.width as _),
+                x::ConfigWindow::Height(dims.height as _),
+            ]
         }));
     }
 

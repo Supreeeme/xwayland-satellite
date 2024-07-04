@@ -889,7 +889,7 @@ fn different_output_position() {
     f.testwl.new_output(0, 0);
     f.wait_and_dispatch();
     let output = f.testwl.last_created_output();
-    f.testwl.move_surface_to_output(surface, output);
+    f.testwl.move_surface_to_output(surface, &output);
     f.testwl.move_pointer_to(surface, 10.0, 10.0);
     f.wait_and_dispatch();
     let reply = connection.get_reply(&x::QueryPointer { window });
@@ -900,7 +900,7 @@ fn different_output_position() {
     f.testwl.new_output(100, 0);
     f.wait_and_dispatch();
     let output = f.testwl.last_created_output();
-    f.testwl.move_surface_to_output(surface, output);
+    f.testwl.move_surface_to_output(surface, &output);
     f.testwl.move_pointer_to(surface, 150.0, 12.0);
     f.wait_and_dispatch();
     let reply = connection.get_reply(&x::QueryPointer { window });

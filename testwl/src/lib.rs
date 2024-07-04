@@ -502,9 +502,15 @@ impl Server {
         self.display.flush_clients().unwrap();
     }
 
-    pub fn move_surface_to_output(&mut self, surface: SurfaceId, output: WlOutput) {
+    pub fn move_output(&mut self, output: &WlOutput, x: i32, y: i32) {
+        output.geometry(x, y, 0, 0, wl_output::Subpixel::None, "".into(), "".into(), wl_output::Transform::Normal);
+        output.done();
+        self.display.flush_clients().unwrap();
+    }
+
+    pub fn move_surface_to_output(&mut self, surface: SurfaceId, output: &WlOutput) {
         let data = self.state.surfaces.get(&surface).expect("No such surface");
-        data.surface.enter(&output);
+        data.surface.enter(output);
         self.display.flush_clients().unwrap();
     }
 }
