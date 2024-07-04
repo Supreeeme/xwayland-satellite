@@ -40,7 +40,7 @@ use wayland_protocols::{
 };
 use wayland_server::{protocol as s_proto, Display, Resource};
 use wl_drm::client::wl_drm::WlDrm;
-use xcb::x::Window;
+use xcb::x::{self, Window};
 
 use xcb::XidNew;
 
@@ -685,11 +685,6 @@ where
 type Req<'a, T> = <T as Proxy>::Request<'a>;
 type Ev<T> = <T as Proxy>::Event;
 
-// TODO: tests to add
-// - destroy window before surface
-// - reconfigure window (popup) before mapping
-// - associate window after surface is already created
-
 // Matches Xwayland flow.
 #[test]
 fn toplevel_flow() {
@@ -1249,7 +1244,8 @@ fn output_offset() {
             data.role
         );
     }
-    f.testwl.configure_toplevel(t_id, 100, 100, vec![xdg_toplevel::State::Activated]);
+    f.testwl
+        .configure_toplevel(t_id, 100, 100, vec![xdg_toplevel::State::Activated]);
     f.run();
 
     {
@@ -1305,7 +1301,74 @@ fn output_offset_change() {
     let data = &f.connection().windows[&window];
     assert_eq!(data.dims.x, 600);
     assert_eq!(data.dims.y, 200);
+}
 
+#[test]
+fn reposition_popup() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let toplevel = unsafe { Window::new(1) };
+    let (_, t_id) = f.create_toplevel(&comp, toplevel);
+
+    let popup = unsafe { Window::new(2) };
+    let (_, p_id) = f.create_popup(&comp, popup, toplevel, t_id, 20, 40);
+
+    f.exwayland.reconfigure_window(x::ConfigureNotifyEvent::new(
+        popup,
+        popup,
+        x::WINDOW_NONE,
+        40, // x
+        60, // y
+        80, // width
+        100, // height
+        0,
+        true,
+    ));
+    f.run();
+    f.run();
+    let data = f.testwl.get_surface_data(p_id).unwrap();
+    assert_eq!(
+        data.popup().positioner_state.offset,
+        testwl::Vec2 { x: 40, y: 60 }
+    );
+    assert_eq!(
+        data.popup().positioner_state.size,
+        Some(testwl::Vec2 { x: 80, y: 100 })
+    );
+    let win_data = &f.connection().windows[&popup];
+    assert_eq!(win_data.dims, WindowDims {
+        x: 40,
+        y: 60,
+        width: 80,
+        height: 100
+    });
+}
+
+#[test]
+fn ignore_toplevel_reconfigure() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let toplevel = unsafe { Window::new(1) };
+    let _ = f.create_toplevel(&comp, toplevel);
+
+    f.exwayland.reconfigure_window(x::ConfigureNotifyEvent::new(
+        toplevel,
+        toplevel,
+        x::WINDOW_NONE,
+        40, // x
+        60, // y
+        80, // width
+        100, // height
+        0,
+        true,
+    ));
+
+    f.run();
+    let win_data = &f.connection().windows[&toplevel];
+    assert_eq!(win_data.dims, WindowDims {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 100
+    });
 }
 
 /// See Pointer::handle_event for an explanation.

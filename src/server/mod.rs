@@ -486,7 +486,12 @@ impl<C: XConnection> ServerState<C> {
         let xdg_wm_base = clientside
             .global_list
             .bind::<XdgWmBase, _, _>(&qh, 2..=6, ())
-            .expect("Could not bind XdgWmBase");
+            .expect("Could not bind xdg_wm_base");
+
+        if xdg_wm_base.version() < 3 {
+            warn!("xdg_wm_base version 2 detected. Popup repositioning will not work, and some popups may not work correctly.");
+        }
+
         let manager = DataDeviceManagerState::bind(&clientside.global_list, &qh)
             .inspect_err(|e| {
                 warn!("Could not bind data device manager ({e:?}). Clipboard will not work.")
@@ -539,15 +544,6 @@ impl<C: XConnection> ServerState<C> {
     fn handle_new_globals(&mut self) {
         let globals = std::mem::take(&mut self.clientside.globals.new_globals);
         handle_globals::<C>(&self.dh, globals.iter());
-    }
-
-    fn get_object_from_client_object<T, P: Proxy>(&self, proxy: &P) -> Option<&T>
-    where
-        for<'a> &'a T: TryFrom<&'a Object, Error = String>,
-        Globals: wayland_client::Dispatch<P, ObjectKey>,
-    {
-        let key: ObjectKey = proxy.data().copied().unwrap();
-        Some(self.objects.get(key)?.as_ref())
     }
 
     pub fn new_window(
@@ -645,14 +641,61 @@ impl<C: XConnection> ServerState<C> {
         win.surface_serial = Some(serial);
     }
 
+    pub fn can_reconfigure_window(&mut self, window: x::Window) -> bool {
+        let Some(win) = self.windows.get_mut(&window) else {
+            return true;
+        };
+
+        if win.mapped && !win.attrs.override_redirect {
+            false
+        } else {
+            true
+        }
+    }
+
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
         let win = self.windows.get_mut(&event.window()).unwrap();
-        win.attrs.dims = WindowDims {
+        let dims = WindowDims {
             x: event.x(),
             y: event.y(),
             width: event.width(),
             height: event.height(),
         };
+        if dims == win.attrs.dims {
+            return;
+        }
+        debug!("Reconfiguring {win:?} {:?}", dims);
+        if !win.mapped {
+            win.attrs.dims = dims;
+            return;
+        }
+
+        if self.xdg_wm_base.version() < 3 {
+            return;
+        }
+
+        let Some(key) = win.surface_key else {
+            return;
+        };
+
+        let Some(data): Option<&mut SurfaceData> = self.objects.get_mut(key).map(|o| o.as_mut())
+        else {
+            return;
+        };
+
+        match &data.role {
+            Some(SurfaceRole::Popup(Some(popup))) => {
+                popup.positioner.set_offset(
+                    event.x() as i32 - win.output_offset.x,
+                    event.y() as i32 - win.output_offset.y,
+                );
+                popup
+                    .positioner
+                    .set_size(event.width().into(), event.height().into());
+                popup.popup.reposition(&popup.positioner, 0);
+            }
+            other => warn!("Non popup ({other:?}) being reconfigured, behavior may be off."),
+        }
     }
 
     pub fn map_window(&mut self, window: x::Window) {

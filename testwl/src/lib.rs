@@ -220,6 +220,20 @@ impl State {
     }
 
     #[track_caller]
+    pub fn configure_popup(&mut self, surface_id: SurfaceId) {
+        let surface = self.surfaces.get_mut(&surface_id).unwrap();
+        let Some(SurfaceRole::Popup(p)) = &mut surface.role else {
+            panic!("Surface does not have popup role: {:?}", surface.role);
+        };
+        let PositionerState { size, offset, .. } = &p.positioner_state;
+        let size = size.unwrap();
+        p.popup.configure(offset.x, offset.y, size.x, size.y);
+        p.xdg.configure(self.configure_serial);
+        self.configure_serial += 1;
+    }
+
+
+    #[track_caller]
     fn get_toplevel(&mut self, surface_id: SurfaceId) -> &mut Toplevel {
         let surface = self
             .surfaces
@@ -254,7 +268,6 @@ pub struct Server {
     dh: DisplayHandle,
     state: State,
     client: Option<Client>,
-    configure_serial: u32,
 }
 
 impl Server {
@@ -348,7 +361,6 @@ impl Server {
             dh,
             state: State::default(),
             client: None,
-            configure_serial: 1,
         }
     }
 
@@ -415,16 +427,8 @@ impl Server {
 
     #[track_caller]
     pub fn configure_popup(&mut self, surface_id: SurfaceId) {
-        let surface = self.state.surfaces.get_mut(&surface_id).unwrap();
-        let Some(SurfaceRole::Popup(p)) = &mut surface.role else {
-            panic!("Surface does not have popup role: {:?}", surface.role);
-        };
-        let PositionerState { size, offset, .. } = &p.positioner_state;
-        let size = size.unwrap();
-        p.popup.configure(offset.x, offset.y, size.x, size.y);
-        p.xdg.configure(self.configure_serial);
-        self.configure_serial += 1;
-        self.dispatch();
+        self.state.configure_popup(surface_id);
+        self.display.flush_clients().unwrap();
     }
 
     #[track_caller]
@@ -503,7 +507,16 @@ impl Server {
     }
 
     pub fn move_output(&mut self, output: &WlOutput, x: i32, y: i32) {
-        output.geometry(x, y, 0, 0, wl_output::Subpixel::None, "".into(), "".into(), wl_output::Transform::Normal);
+        output.geometry(
+            x,
+            y,
+            0,
+            0,
+            wl_output::Subpixel::None,
+            "".into(),
+            "".into(),
+            wl_output::Transform::Normal,
+        );
         output.done();
         self.display.flush_clients().unwrap();
     }
@@ -800,16 +813,27 @@ impl Dispatch<WlKeyboard, ()> for State {
 
 impl Dispatch<XdgPopup, SurfaceId> for State {
     fn request(
-        _: &mut Self,
+        state: &mut Self,
         _: &Client,
         _: &XdgPopup,
         request: <XdgPopup as Resource>::Request,
-        _: &SurfaceId,
+        surface_id: &SurfaceId,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
         match request {
             xdg_popup::Request::Destroy => {}
+            xdg_popup::Request::Reposition { positioner, token } => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                let Some(SurfaceRole::Popup(p)) = &mut data.role else {
+                    unreachable!();
+                };
+                let positioner_data =
+                    &state.positioners[&PositionerId(positioner.id().protocol_id())];
+                p.positioner_state = positioner_data.clone();
+                p.popup.repositioned(token);
+                state.configure_popup(*surface_id);
+            }
             other => todo!("unhandled request {other:?}"),
         }
     }

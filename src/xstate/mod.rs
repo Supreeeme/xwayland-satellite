@@ -332,7 +332,12 @@ impl XState {
                     self.handle_property_change(e, server_state);
                 }
                 xcb::Event::X(x::Event::ConfigureRequest(e)) => {
+                    if !server_state.can_reconfigure_window(e.window()) {
+                        debug!("ignoring reconfigure request for {:?}", e.window());
+                        continue;
+                    }
                     debug!("{:?} request: {:?}", e.window(), e.value_mask());
+
                     let mut list = Vec::new();
                     let mask = e.value_mask();
 
@@ -670,7 +675,7 @@ xcb::atoms_struct! {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WindowDims {
     pub x: i16,
     pub y: i16,
