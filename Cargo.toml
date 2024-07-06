@@ -34,6 +34,12 @@ slotmap = "1.0.7"
 xcb-util-cursor = "0.3.2"
 smithay-client-toolkit = { version = "0.19.1", default-features = false }
 
+sd-notify = { version = "0.4.2", optional = true }
+
+[features]
+default = []
+systemd = ["dep:sd-notify"]
+
 [dev-dependencies]
 rustix = { workspace = true, features = ["fs"] }
 testwl = { path = "testwl" }
