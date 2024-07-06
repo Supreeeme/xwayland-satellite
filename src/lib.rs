@@ -158,6 +158,9 @@ pub fn main(data: impl RunData) -> Option<()> {
             data.xwayland_ready(display);
             server_state.set_x_connection(xstate.connection.clone());
             server_state.atoms = Some(xstate.atoms.clone());
+
+            #[cfg(feature = "systemd")]
+            let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
         }
 
         if let Some(xstate) = &mut xstate {
