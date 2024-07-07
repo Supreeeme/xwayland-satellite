@@ -213,7 +213,7 @@ impl XState {
                 window: self.wm_window,
                 property: self.atoms.net_wm_name,
                 r#type: x::ATOM_STRING,
-                data: b"exwayland wm",
+                data: b"xwayland-satellite",
             })
             .unwrap();
 

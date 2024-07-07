@@ -221,11 +221,11 @@ type FakeServerState = ServerState<FakeXConnection>;
 
 struct TestFixture {
     testwl: testwl::Server,
-    exwayland: FakeServerState,
-    /// Our connection to exwayland - i.e., where Xwayland sends requests to
-    exwl_connection: Arc<Connection>,
-    /// Exwayland's display - must dispatch this for our server state to advance
-    exwl_display: Display<FakeServerState>,
+    satellite: FakeServerState,
+    /// Our connection to satellite - i.e., where Xwayland sends requests to
+    xwls_connection: Arc<Connection>,
+    /// Satellite's display - must dispatch this for our server state to advance
+    xwls_display: Display<FakeServerState>,
     surface_serial: u64,
     registry: TestObject<WlRegistry>,
 }
@@ -254,13 +254,13 @@ impl TestFixture {
             testwl.dispatch();
             testwl
         });
-        let mut exwayland = FakeServerState::new(display.handle(), Some(client_s));
+        let mut satellite = FakeServerState::new(display.handle(), Some(client_s));
         let testwl = thread.join().unwrap();
 
         let (fake_client, ex_server) = UnixStream::pair().unwrap();
-        exwayland.connect(ex_server);
+        satellite.connect(ex_server);
 
-        exwayland.set_x_connection(FakeXConnection::default());
+        satellite.set_x_connection(FakeXConnection::default());
 
         let exwl_connection = Connection::from_socket(fake_client).unwrap();
         let registry = TestObject::<WlRegistry>::from_request(
@@ -270,9 +270,9 @@ impl TestFixture {
 
         let mut f = TestFixture {
             testwl,
-            exwayland,
-            exwl_connection: exwl_connection.into(),
-            exwl_display: display,
+            satellite,
+            xwls_connection: exwl_connection.into(),
+            xwls_display: display,
             surface_serial: 1,
             registry,
         };
@@ -287,7 +287,7 @@ impl TestFixture {
     }
 
     fn connection(&self) -> &FakeXConnection {
-        self.exwayland.connection.as_ref().unwrap()
+        self.satellite.connection.as_ref().unwrap()
     }
 
     fn compositor(&mut self) -> Compositor {
@@ -340,30 +340,30 @@ impl TestFixture {
         ret.into()
     }
 
-    /// Cascade our requests/events through exwayland and testwl
+    /// Cascade our requests/events through satellite and testwl
     fn run(&mut self) {
-        // Flush our requests to exwayland
-        self.exwl_connection.flush().unwrap();
+        // Flush our requests to satellite
+        self.xwls_connection.flush().unwrap();
 
-        // Have exwayland dispatch our requests
-        self.exwl_display
-            .dispatch_clients(&mut self.exwayland)
+        // Have satellite dispatch our requests
+        self.xwls_display
+            .dispatch_clients(&mut self.satellite)
             .unwrap();
-        self.exwl_display.flush_clients().unwrap();
+        self.xwls_display.flush_clients().unwrap();
 
         // Dispatch any clientside requests
-        self.exwayland.run();
+        self.satellite.run();
 
         // Have testwl dispatch the clientside requests
         self.testwl.dispatch();
 
         // Handle clientside events
-        self.exwayland.handle_clientside_events();
+        self.satellite.handle_clientside_events();
 
         self.testwl.dispatch();
 
         // Get our events
-        let res = self.exwl_connection.prepare_read().unwrap().read();
+        let res = self.xwls_connection.prepare_read().unwrap().read();
         if res.is_err()
             && matches!(res, Err(WaylandError::Io(ref e)) if e.kind() != std::io::ErrorKind::WouldBlock)
         {
@@ -400,7 +400,7 @@ impl TestFixture {
     }
 
     fn register_window(&mut self, window: Window, data: WindowData) {
-        self.exwayland
+        self.satellite
             .connection
             .as_mut()
             .unwrap()
@@ -417,7 +417,7 @@ impl TestFixture {
     ) {
         let dims = data.dims;
         self.register_window(window, data);
-        self.exwayland
+        self.satellite
             .new_window(window, override_redirect, dims, parent);
     }
 
@@ -428,7 +428,7 @@ impl TestFixture {
         surface: &WlSurface,
         buffer: &TestObject<WlBuffer>,
     ) {
-        self.exwayland.map_window(window);
+        self.satellite.map_window(window);
         self.associate_window(comp, window, surface);
         self.run();
         surface
@@ -458,7 +458,7 @@ impl TestFixture {
             serial_hi,
         })
         .unwrap();
-        self.exwayland
+        self.satellite
             .set_window_serial(window, [serial_lo, serial_hi]);
     }
 
@@ -700,7 +700,7 @@ fn toplevel_flow() {
     f.testwl.close_toplevel(testwl_id);
     f.run();
 
-    assert!(!f.exwayland.connection.as_ref().unwrap().windows[&window].mapped);
+    assert!(!f.satellite.connection.as_ref().unwrap().windows[&window].mapped);
 
     assert!(
         f.testwl.get_surface_data(testwl_id).is_some(),
@@ -710,9 +710,9 @@ fn toplevel_flow() {
 
     // For some reason, we can get two UnmapNotify events
     // https://tronche.com/gui/x/icccm/sec-4.html#s-4.1.4
-    f.exwayland.unmap_window(window);
-    f.exwayland.unmap_window(window);
-    f.exwayland.destroy_window(window);
+    f.satellite.unmap_window(window);
+    f.satellite.unmap_window(window);
+    f.satellite.destroy_window(window);
     surface.obj.destroy();
     f.run();
 
@@ -730,8 +730,8 @@ fn popup_flow_simple() {
     let (popup_surface, popup_id) =
         f.create_popup(&compositor, win_popup, win_toplevel, toplevel_id, 10, 10);
 
-    f.exwayland.unmap_window(win_popup);
-    f.exwayland.destroy_window(win_popup);
+    f.satellite.unmap_window(win_popup);
+    f.satellite.destroy_window(win_popup);
     popup_surface.obj.destroy();
     f.run();
 
@@ -844,7 +844,7 @@ fn popup_window_changes_surface() {
     let win = unsafe { Window::new(2) };
     let (surface, old_id) = f.create_popup(&comp, win, t_win, toplevel_id, 0, 0);
 
-    f.exwayland.unmap_window(win);
+    f.satellite.unmap_window(win);
     surface.obj.destroy();
     f.run();
 
@@ -860,7 +860,7 @@ fn popup_window_changes_surface() {
     assert_ne!(old_id, id);
     assert!(f.testwl.get_surface_data(id).is_some());
 
-    f.exwayland.map_window(win);
+    f.satellite.map_window(win);
     f.associate_window(&comp, win, &surface.obj);
     f.run();
 
@@ -882,8 +882,8 @@ fn override_redirect_window_after_toplevel_close() {
     f.testwl.close_toplevel(first);
     f.run();
 
-    f.exwayland.unmap_window(win1);
-    f.exwayland.destroy_window(win1);
+    f.satellite.unmap_window(win1);
+    f.satellite.destroy_window(win1);
     obj.obj.destroy();
     f.run();
 
@@ -908,7 +908,7 @@ fn fullscreen() {
     let win = unsafe { Window::new(1) };
     let (_, id) = f.create_toplevel(&comp, win);
 
-    f.exwayland.set_fullscreen(win, SetState::Add);
+    f.satellite.set_fullscreen(win, SetState::Add);
     f.run();
     f.run();
 
@@ -918,7 +918,7 @@ fn fullscreen() {
         .states
         .contains(&xdg_toplevel::State::Fullscreen));
 
-    f.exwayland.set_fullscreen(win, SetState::Remove);
+    f.satellite.set_fullscreen(win, SetState::Remove);
     f.run();
     f.run();
 
@@ -928,7 +928,7 @@ fn fullscreen() {
         .states
         .contains(&xdg_toplevel::State::Fullscreen));
 
-    f.exwayland.set_fullscreen(win, SetState::Toggle);
+    f.satellite.set_fullscreen(win, SetState::Toggle);
     f.run();
     f.run();
 
@@ -938,7 +938,7 @@ fn fullscreen() {
         .states
         .contains(&xdg_toplevel::State::Fullscreen));
 
-    f.exwayland.set_fullscreen(win, SetState::Toggle);
+    f.satellite.set_fullscreen(win, SetState::Toggle);
     f.run();
     f.run();
 
@@ -955,23 +955,23 @@ fn window_title_and_class() {
     let win = unsafe { Window::new(1) };
     let (_, id) = f.create_toplevel(&comp, win);
 
-    f.exwayland
+    f.satellite
         .set_win_title(win, WmName::WmName("window".into()));
-    f.exwayland.set_win_class(win, "class".into());
+    f.satellite.set_win_class(win, "class".into());
     f.run();
 
     let data = f.testwl.get_surface_data(id).unwrap();
     assert_eq!(data.toplevel().title, Some("window".into()));
     assert_eq!(data.toplevel().app_id, Some("class".into()));
 
-    f.exwayland
+    f.satellite
         .set_win_title(win, WmName::NetWmName("superwindow".into()));
     f.run();
 
     let data = f.testwl.get_surface_data(id).unwrap();
     assert_eq!(data.toplevel().title, Some("superwindow".into()));
 
-    f.exwayland
+    f.satellite
         .set_win_title(win, WmName::WmName("shwindow".into()));
     f.run();
 
@@ -983,7 +983,7 @@ fn window_title_and_class() {
 fn window_group_properties() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     let prop_win = unsafe { Window::new(1) };
-    f.exwayland.new_window(
+    f.satellite.new_window(
         prop_win,
         false,
         super::WindowDims {
@@ -993,9 +993,9 @@ fn window_group_properties() {
         },
         None,
     );
-    f.exwayland
+    f.satellite
         .set_win_title(prop_win, WmName::WmName("window".into()));
-    f.exwayland.set_win_class(prop_win, "class".into());
+    f.satellite.set_win_class(prop_win, "class".into());
 
     let win = unsafe { Window::new(2) };
     let data = WindowData {
@@ -1011,15 +1011,15 @@ fn window_group_properties() {
     let (_, surface) = comp.create_surface();
     let dims = data.dims;
     f.register_window(win, data);
-    f.exwayland.new_window(win, false, dims, None);
-    f.exwayland.set_win_hints(
+    f.satellite.new_window(win, false, dims, None);
+    f.satellite.set_win_hints(
         win,
         super::WmHints {
             window_group: Some(prop_win),
             ..Default::default()
         },
     );
-    f.exwayland.map_window(win);
+    f.satellite.map_window(win);
     f.associate_window(&comp, win, &surface.obj);
     f.run();
 
@@ -1048,7 +1048,7 @@ fn copy_from_x11() {
         },
     ]);
 
-    f.exwayland.set_copy_paste_source(mimes.clone());
+    f.satellite.set_copy_paste_source(mimes.clone());
     f.run();
 
     let server_mimes = f.testwl.data_source_mimes();
@@ -1082,7 +1082,7 @@ fn copy_from_wayland() {
     f.testwl.create_data_offer(mimes.clone());
     f.run();
 
-    let selection = f.exwayland.new_selection().expect("No new selection");
+    let selection = f.satellite.new_selection().expect("No new selection");
     for mime in &mimes {
         let data = std::thread::scope(|s| {
             // receive requires a queue flush - dispatch testwl from another thread
@@ -1097,7 +1097,7 @@ fn copy_from_wayland() {
                     f.testwl.dispatch();
                 }
             });
-            selection.receive(mime.mime_type.clone(), &f.exwayland)
+            selection.receive(mime.mime_type.clone(), &f.satellite)
         });
         f.run();
         assert_eq!(data, mime.data);
@@ -1122,7 +1122,7 @@ fn clipboard_x11_then_wayland() {
         },
     ]);
 
-    f.exwayland.set_copy_paste_source(x11data.clone());
+    f.satellite.set_copy_paste_source(x11data.clone());
     f.run();
 
     let waylanddata = vec![
@@ -1139,7 +1139,7 @@ fn clipboard_x11_then_wayland() {
     f.run();
     f.run();
 
-    let selection = f.exwayland.new_selection().expect("No new selection");
+    let selection = f.satellite.new_selection().expect("No new selection");
     for mime in &waylanddata {
         let data = std::thread::scope(|s| {
             // receive requires a queue flush - dispatch testwl from another thread
@@ -1154,7 +1154,7 @@ fn clipboard_x11_then_wayland() {
                     f.testwl.dispatch();
                 }
             });
-            selection.receive(mime.mime_type.clone(), &f.exwayland)
+            selection.receive(mime.mime_type.clone(), &f.satellite)
         });
         f.run();
         assert_eq!(data, mime.data);
@@ -1176,12 +1176,12 @@ fn raise_window_on_pointer_event() {
     f.testwl.move_pointer_to(id2, 0.0, 0.0);
     f.run();
     assert_eq!(f.connection().focused_window, Some(win2));
-    assert_eq!(f.exwayland.last_hovered, Some(win2));
+    assert_eq!(f.satellite.last_hovered, Some(win2));
 
     f.testwl.move_pointer_to(id1, 0.0, 0.0);
     f.run();
     assert_eq!(f.connection().focused_window, Some(win2));
-    assert_eq!(f.exwayland.last_hovered, Some(win1));
+    assert_eq!(f.satellite.last_hovered, Some(win1));
 }
 
 #[test]
@@ -1198,7 +1198,7 @@ fn override_redirect_choose_hover_window() {
 
     f.testwl.move_pointer_to(id1, 0.0, 0.0);
     f.run();
-    assert_eq!(f.exwayland.last_hovered, Some(win1));
+    assert_eq!(f.satellite.last_hovered, Some(win1));
 
     let win3 = unsafe { Window::new(3) };
     let (buffer, surface) = comp.create_surface();
@@ -1225,7 +1225,7 @@ fn output_offset() {
         assert_eq!(data.dims.x, 500);
         assert_eq!(data.dims.y, 100);
 
-        f.exwayland.unmap_window(window);
+        f.satellite.unmap_window(window);
         surface.obj.destroy();
         f.run();
     }
@@ -1264,7 +1264,7 @@ fn output_offset() {
         testwl::Vec2 { x: 10, y: 10 }
     );
 
-    f.exwayland.unmap_window(popup);
+    f.satellite.unmap_window(popup);
     p_surface.obj.destroy();
     f.run();
 
@@ -1312,7 +1312,7 @@ fn reposition_popup() {
     let popup = unsafe { Window::new(2) };
     let (_, p_id) = f.create_popup(&comp, popup, toplevel, t_id, 20, 40);
 
-    f.exwayland.reconfigure_window(x::ConfigureNotifyEvent::new(
+    f.satellite.reconfigure_window(x::ConfigureNotifyEvent::new(
         popup,
         popup,
         x::WINDOW_NONE,
@@ -1352,7 +1352,7 @@ fn ignore_toplevel_reconfigure() {
     let toplevel = unsafe { Window::new(1) };
     let _ = f.create_toplevel(&comp, toplevel);
 
-    f.exwayland.reconfigure_window(x::ConfigureNotifyEvent::new(
+    f.satellite.reconfigure_window(x::ConfigureNotifyEvent::new(
         toplevel,
         toplevel,
         x::WINDOW_NONE,
