@@ -232,7 +232,6 @@ impl State {
         self.configure_serial += 1;
     }
 
-
     #[track_caller]
     fn get_toplevel(&mut self, surface_id: SurfaceId) -> &mut Toplevel {
         let surface = self

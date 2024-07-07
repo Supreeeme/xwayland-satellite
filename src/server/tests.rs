@@ -1316,9 +1316,9 @@ fn reposition_popup() {
         popup,
         popup,
         x::WINDOW_NONE,
-        40, // x
-        60, // y
-        80, // width
+        40,  // x
+        60,  // y
+        80,  // width
         100, // height
         0,
         true,
@@ -1335,12 +1335,15 @@ fn reposition_popup() {
         Some(testwl::Vec2 { x: 80, y: 100 })
     );
     let win_data = &f.connection().windows[&popup];
-    assert_eq!(win_data.dims, WindowDims {
-        x: 40,
-        y: 60,
-        width: 80,
-        height: 100
-    });
+    assert_eq!(
+        win_data.dims,
+        WindowDims {
+            x: 40,
+            y: 60,
+            width: 80,
+            height: 100
+        }
+    );
 }
 
 #[test]
@@ -1353,9 +1356,9 @@ fn ignore_toplevel_reconfigure() {
         toplevel,
         toplevel,
         x::WINDOW_NONE,
-        40, // x
-        60, // y
-        80, // width
+        40,  // x
+        60,  // y
+        80,  // width
         100, // height
         0,
         true,
@@ -1363,12 +1366,15 @@ fn ignore_toplevel_reconfigure() {
 
     f.run();
     let win_data = &f.connection().windows[&toplevel];
-    assert_eq!(win_data.dims, WindowDims {
-        x: 0,
-        y: 0,
-        width: 100,
-        height: 100
-    });
+    assert_eq!(
+        win_data.dims,
+        WindowDims {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100
+        }
+    );
 }
 
 /// See Pointer::handle_event for an explanation.

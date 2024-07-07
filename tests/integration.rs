@@ -669,8 +669,14 @@ fn copy_from_x11() {
     assert_ne!(window, owner.owner());
 
     let mimes = f.testwl.data_source_mimes();
-    assert!(mimes.contains(&"text/plain".into()), "text/plain not in mimes: {mimes:?}"); // mime1
-    assert!(mimes.contains(&"blah/blah".into()), "blah/blah not in mimes: {mimes:?}"); // mime2
+    assert!(
+        mimes.contains(&"text/plain".into()),
+        "text/plain not in mimes: {mimes:?}"
+    ); // mime1
+    assert!(
+        mimes.contains(&"blah/blah".into()),
+        "blah/blah not in mimes: {mimes:?}"
+    ); // mime2
 
     let data = f.testwl.paste_data();
     f.testwl.dispatch();
