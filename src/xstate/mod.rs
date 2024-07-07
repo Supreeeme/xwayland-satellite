@@ -697,7 +697,6 @@ bitflags! {
 bitflags! {
     /// https://tronche.com/gui/x/icccm/sec-4.html#s-4.1.2.4
     pub struct WmHintsFlags: u32 {
-        const Input = 1;
         const WindowGroup = 64;
     }
 }
@@ -739,7 +738,6 @@ impl From<&[u32]> for WmNormalHints {
 
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct WmHints {
-    pub input: Option<bool>,
     pub window_group: Option<x::Window>,
 }
 
@@ -748,9 +746,6 @@ impl From<&[u32]> for WmHints {
         let mut ret = Self::default();
         let flags = WmHintsFlags::from_bits_truncate(value[0]);
 
-        if flags.contains(WmHintsFlags::Input) {
-            ret.input = Some(value[1] == 1);
-        }
         if flags.contains(WmHintsFlags::WindowGroup) {
             let window = unsafe { x::Window::new(value[8]) };
             ret.window_group = Some(window);
@@ -817,30 +812,11 @@ impl super::XConnection for Arc<xcb::Connection> {
     }
 
     fn focus_window(&mut self, window: x::Window, atoms: Self::ExtraData) {
-        let prop =
-            unwrap_or_skip_bad_window!(self.wait_for_reply(self.send_request(&x::GetProperty {
-                delete: false,
-                window,
-                property: x::ATOM_WM_HINTS,
-                r#type: x::ATOM_WM_HINTS,
-                long_offset: 0,
-                long_length: 9,
-            })));
-
-        let set_focus = if prop.r#type() == x::ATOM_NONE {
-            true
-        } else {
-            WmHints::from(prop.value()).input.unwrap_or(true)
-        };
-
-        if set_focus {
-            // might fail if window is not visible but who cares
-            let _ = self.send_and_check_request(&x::SetInputFocus {
-                focus: window,
-                revert_to: x::InputFocus::None,
-                time: x::CURRENT_TIME,
-            });
-        }
+        unwrap_or_skip_bad_window!(self.send_and_check_request(&x::SetInputFocus {
+            focus: window,
+            revert_to: x::InputFocus::None,
+            time: x::CURRENT_TIME,
+        }));
 
         unwrap_or_skip_bad_window!(self.send_and_check_request(&x::ChangeProperty {
             mode: x::PropMode::Replace,

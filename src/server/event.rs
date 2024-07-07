@@ -255,6 +255,9 @@ impl SurfaceData {
                 let activated = states.contains(&(u32::from(xdg_toplevel::State::Activated) as u8));
 
                 if activated {
+                    // Technically this is wrong - activated doesn't necessarily mean focused
+                    // - but it works and no one's complained yet.
+                    // TODO: base focus on keyboard enter instead.
                     state.to_focus = Some(self.window.unwrap());
                 }
 
