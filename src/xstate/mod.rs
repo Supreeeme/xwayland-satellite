@@ -817,7 +817,7 @@ impl super::XConnection for Arc<xcb::Connection> {
             revert_to: x::InputFocus::None,
             time: x::CURRENT_TIME,
         }) {
-            log::warn!("SetInputFocus {:?}: {:?}", window, e);
+            log::debug!("SetInputFocus failed ({:?}: {:?})", window, e);
             return;
         }
         if let Err(e) = self.send_and_check_request(&x::ChangeProperty {
@@ -827,7 +827,7 @@ impl super::XConnection for Arc<xcb::Connection> {
             r#type: x::ATOM_WINDOW,
             data: &[window],
         }) {
-            log::warn!("ChangeProperty {:?}: {:?}", window, e);
+            log::debug!("ChangeProperty failed ({:?}: {:?})", window, e);
         }
     }
 
