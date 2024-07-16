@@ -812,19 +812,23 @@ impl super::XConnection for Arc<xcb::Connection> {
     }
 
     fn focus_window(&mut self, window: x::Window, atoms: Self::ExtraData) {
-        unwrap_or_skip_bad_window!(self.send_and_check_request(&x::SetInputFocus {
+        if let Err(e) = self.send_and_check_request(&x::SetInputFocus {
             focus: window,
             revert_to: x::InputFocus::None,
             time: x::CURRENT_TIME,
-        }));
-
-        unwrap_or_skip_bad_window!(self.send_and_check_request(&x::ChangeProperty {
+        }) {
+            log::debug!("SetInputFocus failed ({:?}: {:?})", window, e);
+            return;
+        }
+        if let Err(e) = self.send_and_check_request(&x::ChangeProperty {
             mode: x::PropMode::Replace,
             window: self.root_window(),
             property: atoms.active_win,
             r#type: x::ATOM_WINDOW,
             data: &[window],
-        }));
+        }) {
+            log::debug!("ChangeProperty failed ({:?}: {:?})", window, e);
+        }
     }
 
     fn close_window(&mut self, window: x::Window, atoms: Self::ExtraData) {
