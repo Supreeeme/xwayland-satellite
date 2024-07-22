@@ -979,3 +979,38 @@ fn bad_clipboard_data() {
     let e = e.expect("No selection notify event");
     assert_eq!(e.property(), x::ATOM_NONE);
 }
+
+// issue #42
+#[test]
+fn funny_window_title() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    connection.set_property(
+        window,
+        x::ATOM_STRING,
+        x::ATOM_WM_NAME,
+        b"title\0\0\0\0",
+    );
+    connection.map_window(window);
+    f.wait_and_dispatch();
+
+    let surface = f
+        .testwl
+        .last_created_surface_id()
+        .expect("No surface created!");
+    f.configure_and_verify_new_toplevel(&mut connection, window, surface);
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert_eq!(data.toplevel().title, Some("title".into()));
+
+    connection.set_property(
+        window,
+        x::ATOM_STRING,
+        x::ATOM_WM_NAME,
+        b"title\0irrelevantdata\0",
+    );
+    f.wait_and_dispatch();
+
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert_eq!(data.toplevel().title, Some("title".into()));
+}

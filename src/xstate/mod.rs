@@ -4,7 +4,7 @@ use selection::{SelectionData, SelectionTarget};
 use crate::server::WindowAttributes;
 use bitflags::bitflags;
 use log::{debug, trace, warn};
-use std::ffi::CString;
+use std::ffi::{CString, CStr};
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::sync::Arc;
 use xcb::{x, Xid, XidNew};
@@ -526,6 +526,9 @@ impl XState {
         let cookie = self.get_property_cookie(window, x::ATOM_WM_NAME, x::ATOM_STRING, 256);
         let resolver = |reply: x::GetPropertyReply| {
             let data: &[u8] = reply.value();
+            // strip trailing zeros or wayland-rs will lose its mind
+            // https://github.com/Smithay/wayland-rs/issues/748
+            let data = data.split(|byte| *byte == 0).next().unwrap();
             let name = String::from_utf8_lossy(data).to_string();
             WmName::WmName(name)
         };
@@ -545,6 +548,7 @@ impl XState {
             self.get_property_cookie(window, self.atoms.net_wm_name, self.atoms.utf8_string, 256);
         let resolver = |reply: x::GetPropertyReply| {
             let data: &[u8] = reply.value();
+            let data = data.split(|byte| *byte == 0).next().unwrap();
             let name = String::from_utf8_lossy(data).to_string();
             WmName::NetWmName(name)
         };
