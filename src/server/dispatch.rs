@@ -815,9 +815,9 @@ impl<C: XConnection> Dispatch<XdgOutputServer, ObjectKey> for ServerState<C> {
             unreachable!();
         };
 
-        let output: &XdgOutput = state.objects[*key].as_ref();
-        output.client.destroy();
-        state.objects.remove(*key);
+        let output: &mut Output = state.objects[*key].as_mut();
+        let xdg_output = output.xdg.take().unwrap();
+        xdg_output.client.destroy();
     }
 }
 
@@ -836,14 +836,10 @@ impl<C: XConnection> Dispatch<OutputManServer, ClientGlobalWrapper<OutputManClie
         match request {
             s_output_man::Request::GetXdgOutput { id, output } => {
                 let output_key: ObjectKey = output.data().copied().unwrap();
-                state
-                    .objects
-                    .insert_from_other_objects([output_key], |[output_obj], key| {
-                        let output: &Output = output_obj.try_into().unwrap();
-                        let client = client.get_xdg_output(&output.client, &state.qh, key);
-                        let server = data_init.init(id, key);
-                        XdgOutput { server, client }.into()
-                    });
+                let output: &mut Output = state.objects[output_key].as_mut();
+                let client = client.get_xdg_output(&output.client, &state.qh, output_key);
+                let server = data_init.init(id, output_key);
+                output.xdg = Some(XdgOutput { client, server });
             }
             s_output_man::Request::Destroy => {}
             _ => unreachable!(),

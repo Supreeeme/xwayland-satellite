@@ -20,7 +20,10 @@ use wayland_protocols::{
             xdg_toplevel::{self, XdgToplevel},
             xdg_wm_base::{self, XdgWmBase},
         },
-        xdg_output::zv1::server::zxdg_output_manager_v1::ZxdgOutputManagerV1,
+        xdg_output::zv1::server::{
+            zxdg_output_manager_v1::{self, ZxdgOutputManagerV1},
+            zxdg_output_v1::{self, ZxdgOutputV1},
+        },
     },
 };
 use wayland_server::{
@@ -153,13 +156,19 @@ struct DataSourceData {
     mimes: Vec<String>,
 }
 
+struct Output {
+    wl: WlOutput,
+    xdg: Option<ZxdgOutputV1>,
+}
+
 struct State {
     surfaces: HashMap<SurfaceId, SurfaceData>,
-    outputs: Vec<WlOutput>,
+    outputs: HashMap<WlOutput, Output>,
     positioners: HashMap<PositionerId, PositionerState>,
     buffers: HashSet<WlBuffer>,
     begin: Instant,
     last_surface_id: Option<SurfaceId>,
+    last_output: Option<WlOutput>,
     callbacks: Vec<WlCallback>,
     pointer: Option<WlPointer>,
     keyboard: Option<WlKeyboard>,
@@ -178,6 +187,7 @@ impl Default for State {
             positioners: Default::default(),
             begin: Instant::now(),
             last_surface_id: None,
+            last_output: None,
             callbacks: Vec::new(),
             pointer: None,
             keyboard: None,
@@ -302,7 +312,6 @@ impl Server {
         dh.create_global::<State, WlDataDeviceManager, _>(3, ());
         global_noop!(ZwpLinuxDmabufV1);
         global_noop!(ZwpRelativePointerManagerV1);
-        global_noop!(ZxdgOutputManagerV1);
         global_noop!(WpViewporter);
         global_noop!(ZwpPointerConstraintsV1);
 
@@ -397,8 +406,8 @@ impl Server {
     #[track_caller]
     pub fn last_created_output(&self) -> WlOutput {
         self.state
-            .outputs
-            .last()
+            .last_output
+            .as_ref()
             .expect("No outputs created!")
             .clone()
     }
@@ -525,6 +534,22 @@ impl Server {
         data.surface.enter(output);
         self.display.flush_clients().unwrap();
     }
+
+    pub fn enable_xdg_output_manager(&mut self) {
+        self.dh
+            .create_global::<State, ZxdgOutputManagerV1, _>(3, ());
+        self.display.flush_clients().unwrap();
+    }
+
+    pub fn move_xdg_output(&mut self, output: &WlOutput, x: i32, y: i32) {
+        let xdg = self.state.outputs[output]
+            .xdg
+            .as_ref()
+            .expect("Output doesn't have an xdg output");
+        xdg.logical_position(x, y);
+        xdg.done();
+        self.display.flush_clients().unwrap();
+    }
 }
 
 pub struct PasteDataResolver {
@@ -575,6 +600,49 @@ pub struct PasteData {
 simple_global_dispatch!(WlShm);
 simple_global_dispatch!(WlCompositor);
 simple_global_dispatch!(XdgWmBase);
+simple_global_dispatch!(ZxdgOutputManagerV1);
+
+impl Dispatch<ZxdgOutputManagerV1, ()> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &ZxdgOutputManagerV1,
+        request: <ZxdgOutputManagerV1 as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            zxdg_output_manager_v1::Request::GetXdgOutput { id, output } => {
+                let xdg = data_init.init(id, output.clone());
+                xdg.logical_position(0, 0);
+                xdg.logical_size(1000, 1000);
+                xdg.done();
+                state.outputs.get_mut(&output).unwrap().xdg = Some(xdg);
+            }
+            other => todo!("unhandled request: {other:?}"),
+        }
+    }
+}
+
+impl Dispatch<ZxdgOutputV1, WlOutput> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &ZxdgOutputV1,
+        request: <ZxdgOutputV1 as Resource>::Request,
+        output: &WlOutput,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            zxdg_output_v1::Request::Destroy => {
+                state.outputs.get_mut(output).unwrap().xdg = None;
+            }
+            other => todo!("unhandled request: {other:?}"),
+        }
+    }
+}
 
 impl GlobalDispatch<WlOutput, (i32, i32)> for State {
     fn bind(
@@ -598,7 +666,14 @@ impl GlobalDispatch<WlOutput, (i32, i32)> for State {
         );
         output.mode(wl_output::Mode::Current, 1000, 1000, 0);
         output.done();
-        state.outputs.push(output);
+        state.outputs.insert(
+            output.clone(),
+            Output {
+                wl: output.clone(),
+                xdg: None,
+            },
+        );
+        state.last_output = Some(output);
     }
 }
 

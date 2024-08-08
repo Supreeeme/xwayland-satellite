@@ -32,7 +32,10 @@ use wayland_protocols::{
     },
     xdg::{
         shell::server::{xdg_positioner, xdg_toplevel},
-        xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1,
+        xdg_output::zv1::client::{
+            zxdg_output_manager_v1::{self, ZxdgOutputManagerV1},
+            zxdg_output_v1::ZxdgOutputV1,
+        },
     },
     xwayland::shell::v1::client::{
         xwayland_shell_v1::XwaylandShellV1, xwayland_surface_v1::XwaylandSurfaceV1,
@@ -371,7 +374,14 @@ impl TestFixture {
         }
     }
 
-    fn new_output(&mut self, x: i32, y: i32) -> wayland_server::protocol::wl_output::WlOutput {
+    fn new_output(
+        &mut self,
+        x: i32,
+        y: i32,
+    ) -> (
+        TestObject<WlOutput>,
+        wayland_server::protocol::wl_output::WlOutput,
+    ) {
         self.testwl.new_output(x, y);
         self.run();
         self.run();
@@ -388,7 +398,7 @@ impl TestFixture {
         };
 
         assert_eq!(interface, WlOutput::interface().name);
-        TestObject::<WlOutput>::from_request(
+        let output = TestObject::<WlOutput>::from_request(
             &self.registry.obj,
             Req::<WlRegistry>::Bind {
                 name,
@@ -396,7 +406,49 @@ impl TestFixture {
             },
         );
         self.run();
-        self.testwl.last_created_output()
+        (output, self.testwl.last_created_output())
+    }
+
+    fn enable_xdg_output(&mut self) -> TestObject<ZxdgOutputManagerV1> {
+        self.testwl.enable_xdg_output_manager();
+        self.run();
+        self.run();
+
+        let mut events = std::mem::take(&mut *self.registry.data.events.lock().unwrap());
+        assert_eq!(
+            events.len(),
+            1,
+            "Unexpected number of global events after enabling xdg output"
+        );
+        let event = events.pop().unwrap();
+        let Ev::<WlRegistry>::Global {
+            name,
+            interface,
+            version,
+        } = event
+        else {
+            panic!("Unexpected event: {event:?}");
+        };
+
+        assert_eq!(interface, ZxdgOutputManagerV1::interface().name);
+        let man = TestObject::<ZxdgOutputManagerV1>::from_request(
+            &self.registry.obj,
+            Req::<WlRegistry>::Bind {
+                name,
+                id: (ZxdgOutputManagerV1::interface(), version),
+            },
+        );
+        self.run();
+        man
+    }
+
+    fn create_xdg_output(&mut self, man: &TestObject<ZxdgOutputManagerV1>, output: WlOutput) {
+        TestObject::<ZxdgOutputV1>::from_request(
+            &man.obj,
+            zxdg_output_manager_v1::Request::GetXdgOutput { output },
+        );
+        self.run();
+        self.run();
     }
 
     fn register_window(&mut self, window: Window, data: WindowData) {
@@ -744,6 +796,8 @@ fn pass_through_globals() {
 
     let mut f = TestFixture::new();
     f.testwl.new_output(0, 0);
+    f.testwl.enable_xdg_output_manager();
+    f.run();
     f.run();
 
     const fn check<T: Proxy>() {}
@@ -1214,7 +1268,11 @@ fn override_redirect_choose_hover_window() {
 #[test]
 fn output_offset() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    let output = f.new_output(500, 100);
+    let (output_obj, output) = f.new_output(0, 0);
+    let man = f.enable_xdg_output();
+    f.create_xdg_output(&man, output_obj.obj);
+    f.testwl.move_xdg_output(&output, 500, 100);
+    f.run();
     let window = unsafe { Window::new(1) };
 
     {
@@ -1285,22 +1343,38 @@ fn output_offset() {
 #[test]
 fn output_offset_change() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    let output = f.new_output(500, 100);
+
+    let (output_obj, output) = f.new_output(500, 100);
     let window = unsafe { Window::new(1) };
     let (_, id) = f.create_toplevel(&comp, window);
     f.testwl.move_surface_to_output(id, &output);
     f.run();
 
-    let data = &f.connection().windows[&window];
-    assert_eq!(data.dims.x, 500);
-    assert_eq!(data.dims.y, 100);
+    let test_position = |f: &TestFixture, x, y| {
+        let data = &f.connection().windows[&window];
+        assert_eq!(data.dims.x, x);
+        assert_eq!(data.dims.y, y);
+    };
+    test_position(&f, 500, 100);
 
     f.testwl.move_output(&output, 600, 200);
     f.run();
     f.run();
-    let data = &f.connection().windows[&window];
-    assert_eq!(data.dims.x, 600);
-    assert_eq!(data.dims.y, 200);
+    test_position(&f, 600, 200);
+
+    let man = f.enable_xdg_output();
+    f.create_xdg_output(&man, output_obj.obj);
+    // testwl inits xdg output position to 0, and it should take priority over wl_output position
+    test_position(&f, 0, 0);
+
+    f.testwl.move_xdg_output(&output, 1000, 22);
+    f.run();
+    test_position(&f, 1000, 22);
+
+    f.testwl.move_output(&output, 600, 200);
+    f.run();
+    f.run();
+    test_position(&f, 1000, 22);
 }
 
 #[test]

@@ -134,7 +134,7 @@ impl WindowData {
         offset: WindowOutputOffset,
         connection: &mut C,
     ) {
-        debug!("offset: {offset:?}");
+        log::trace!("offset: {offset:?}");
         if self.output_key != Some(output_key) {
             self.output_key = Some(output_key);
         }
@@ -360,7 +360,6 @@ pub(crate) enum Object {
     RelativePointer(RelativePointer),
     DmabufFeedback(DmabufFeedback),
     Drm(Drm),
-    XdgOutput(XdgOutput),
     Touch(Touch),
     ConfinedPointer(ConfinedPointer),
     LockedPointer(LockedPointer)

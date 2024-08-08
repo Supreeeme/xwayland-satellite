@@ -162,12 +162,13 @@ impl SurfaceData {
                     .as_ref()
                     .map(|win| state.windows.get_mut(&win).unwrap())
                 {
+                    let (x, y) = match output.position {
+                        OutputPosition::Xdg { x, y } => (x, y),
+                        OutputPosition::Wl { x, y } => (x, y),
+                    };
                     win_data.update_output_offset(
                         key,
-                        WindowOutputOffset {
-                            x: output.x,
-                            y: output.y,
-                        },
+                        WindowOutputOffset { x, y },
                         state.connection.as_mut().unwrap(),
                     );
                     output.windows.insert(win_data.window);
@@ -323,22 +324,6 @@ impl HandleEvent for Buffer {
     fn handle_event<C: XConnection>(&mut self, _: Self::Event, _: &mut ServerState<C>) {
         // The only event from a buffer would be the release.
         self.server.release();
-    }
-}
-
-pub type XdgOutput = GenericObject<ServerXdgOutput, ClientXdgOutput>;
-impl HandleEvent for XdgOutput {
-    type Event = zxdg_output_v1::Event;
-    fn handle_event<C: XConnection>(&mut self, event: Self::Event, _: &mut ServerState<C>) {
-        simple_event_shunt! {
-            self.server, event: zxdg_output_v1::Event => [
-                LogicalPosition { x, y },
-                LogicalSize { width, height },
-                Done,
-                Name { name },
-                Description { description }
-            ]
-        }
     }
 }
 
@@ -647,12 +632,23 @@ impl HandleEvent for Touch {
     }
 }
 
+pub struct XdgOutput {
+    pub client: ClientXdgOutput,
+    pub server: ServerXdgOutput,
+}
+
+#[derive(Copy, Clone)]
+pub enum OutputPosition {
+    Wl { x: i32, y: i32 },
+    Xdg { x: i32, y: i32 },
+}
+
 pub struct Output {
     pub client: client::wl_output::WlOutput,
     pub server: WlOutput,
-    pub windows: HashSet<x::Window>,
-    pub x: i32,
-    pub y: i32,
+    pub xdg: Option<XdgOutput>,
+    windows: HashSet<x::Window>,
+    position: OutputPosition,
 }
 
 impl Output {
@@ -660,37 +656,81 @@ impl Output {
         Self {
             client,
             server,
+            xdg: None,
             windows: HashSet::new(),
-            x: 0,
-            y: 0,
+            position: OutputPosition::Wl { x: 0, y: 0 },
         }
     }
 }
+
+#[derive(Debug)]
+pub enum OutputEvent {
+    Wl(client::wl_output::Event),
+    Xdg(zxdg_output_v1::Event),
+}
+
+impl From<client::wl_output::Event> for ObjectEvent {
+    fn from(value: client::wl_output::Event) -> Self {
+        Self::Output(OutputEvent::Wl(value))
+    }
+}
+
+impl From<zxdg_output_v1::Event> for ObjectEvent {
+    fn from(value: zxdg_output_v1::Event) -> Self {
+        Self::Output(OutputEvent::Xdg(value))
+    }
+}
+
 impl HandleEvent for Output {
-    type Event = client::wl_output::Event;
+    type Event = OutputEvent;
 
     fn handle_event<C: XConnection>(&mut self, event: Self::Event, state: &mut ServerState<C>) {
+        match event {
+            OutputEvent::Xdg(event) => self.xdg_event(event, state),
+            OutputEvent::Wl(event) => self.wl_event(event, state),
+        }
+    }
+}
+
+impl Output {
+    fn update_offset<C: XConnection>(
+        &mut self,
+        offset: OutputPosition,
+        state: &mut ServerState<C>,
+    ) {
+        if matches!(offset, OutputPosition::Wl { .. })
+            && matches!(self.position, OutputPosition::Xdg { .. })
+        {
+            return;
+        }
+
+        self.position = offset;
+        let (x, y, id) = match offset {
+            OutputPosition::Xdg { x, y } => (x, y, self.xdg.as_ref().unwrap().server.id()),
+            OutputPosition::Wl { x, y } => (x, y, self.server.id()),
+        };
+        debug!("moving {id} to {x}x{y}");
+        self.windows.retain(|window| {
+            let Some(data): Option<&mut WindowData> = state.windows.get_mut(window) else {
+                return false;
+            };
+
+            data.update_output_offset(
+                self.server.data().copied().unwrap(),
+                WindowOutputOffset { x, y },
+                state.connection.as_mut().unwrap(),
+            );
+
+            return true;
+        });
+    }
+    fn wl_event<C: XConnection>(
+        &mut self,
+        event: client::wl_output::Event,
+        state: &mut ServerState<C>,
+    ) {
         if let client::wl_output::Event::Geometry { x, y, .. } = event {
-            debug!("moving {} to {x}x{y}", self.server.id());
-            self.x = x;
-            self.y = y;
-
-            self.windows.retain(|window| {
-                let Some(data): Option<&mut WindowData> = state.windows.get_mut(window) else {
-                    return false;
-                };
-
-                data.update_output_offset(
-                    self.server.data().copied().unwrap(),
-                    WindowOutputOffset {
-                        x: self.x,
-                        y: self.y,
-                    },
-                    state.connection.as_mut().unwrap(),
-                );
-
-                return true;
-            });
+            self.update_offset(OutputPosition::Wl { x, y }, state);
         }
 
         simple_event_shunt! {
@@ -715,6 +755,26 @@ impl HandleEvent for Output {
                     |transform| convert_wenum(transform)
                 },
                 Done
+            ]
+        }
+    }
+
+    fn xdg_event<C: XConnection>(
+        &mut self,
+        event: zxdg_output_v1::Event,
+        state: &mut ServerState<C>,
+    ) {
+        if let zxdg_output_v1::Event::LogicalPosition { x, y } = event {
+            self.update_offset(OutputPosition::Xdg { x, y }, state);
+        }
+        let xdg = &self.xdg.as_ref().unwrap().server;
+        simple_event_shunt! {
+            xdg, event: zxdg_output_v1::Event => [
+                LogicalPosition { x, y },
+                LogicalSize { width, height },
+                Done,
+                Name { name },
+                Description { description }
             ]
         }
     }
