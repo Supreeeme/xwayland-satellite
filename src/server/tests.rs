@@ -260,21 +260,21 @@ impl TestFixture {
         let mut satellite = FakeServerState::new(display.handle(), Some(client_s));
         let testwl = thread.join().unwrap();
 
-        let (fake_client, ex_server) = UnixStream::pair().unwrap();
-        satellite.connect(ex_server);
+        let (fake_client, xwls_server) = UnixStream::pair().unwrap();
+        satellite.connect(xwls_server);
 
         satellite.set_x_connection(FakeXConnection::default());
 
-        let exwl_connection = Connection::from_socket(fake_client).unwrap();
+        let xwls_connection = Connection::from_socket(fake_client).unwrap();
         let registry = TestObject::<WlRegistry>::from_request(
-            &exwl_connection.display(),
+            &xwls_connection.display(),
             Req::<WlDisplay>::GetRegistry {},
         );
 
         let mut f = TestFixture {
             testwl,
             satellite,
-            xwls_connection: exwl_connection.into(),
+            xwls_connection: xwls_connection.into(),
             xwls_display: display,
             surface_serial: 1,
             registry,
