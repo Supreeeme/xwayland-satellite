@@ -33,7 +33,7 @@
         };
 
         packages = rec {
-          xwayland-satelite = naersk'.buildPackage {
+          xwayland-satellite = naersk'.buildPackage {
             src = ./.;
 
             nativeBuildInputs = with pkgs; [
@@ -47,7 +47,7 @@
             buildInputs = [ pkgs.xwayland ];
           };
 
-          default = xwayland-satelite;
+          default = xwayland-satellite;
         };
       });
 }
