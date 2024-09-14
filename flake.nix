@@ -43,8 +43,15 @@
 
               xcb-util-cursor
               xorg.libxcb
+
+              makeWrapper
             ];
             buildInputs = [ pkgs.xwayland ];
+
+            postInstall = ''
+              wrapProgram $out/bin/xwayland-satellite \
+                --prefix PATH : ${pkgs.xwayland}/bin
+            '';
           };
 
           default = xwayland-satellite;
