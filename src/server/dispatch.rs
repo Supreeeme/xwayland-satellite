@@ -274,6 +274,9 @@ impl<C: XConnection> Dispatch<WlShmPool, client::wl_shm_pool::WlShmPool> for Ser
                     Buffer { server, client }.into()
                 });
             }
+            Request::<WlShmPool>::Resize { size } => {
+                c_pool.resize(size);
+            }
             Request::<WlShmPool>::Destroy => {
                 c_pool.destroy();
                 state.clientside.queue.flush().unwrap();
