@@ -575,7 +575,7 @@ fn copy_from_x11() {
         .unwrap();
     assert_eq!(window, owner.owner());
 
-    // wait for request to come through
+    // wait for requests to come through
     std::thread::sleep(std::time::Duration::from_millis(100));
     let request = match connection.poll_for_event().unwrap() {
         Some(xcb::Event::X(x::Event::SelectionRequest(r))) => r,
@@ -604,61 +604,50 @@ fn copy_from_x11() {
         })
         .unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    let request = match connection.poll_for_event().unwrap() {
-        Some(xcb::Event::X(x::Event::SelectionRequest(r))) => r,
-        other => panic!("Didn't get selection request event, instead got {other:?}"),
-    };
+    connection.await_event();
+    let mut mime_data = vec![
+        (
+            connection.atoms.mime1,
+            x::ATOM_STRING,
+            b"hello world".as_slice(),
+        ),
+        (connection.atoms.mime2, x::ATOM_INTEGER, &[1u8, 2, 3, 4]),
+    ];
 
-    assert_eq!(request.target(), connection.atoms.multiple);
-    let pairs = connection
-        .wait_for_reply(connection.send_request(&x::GetProperty {
-            delete: true,
-            window: request.requestor(),
-            property: request.property(),
-            r#type: x::ATOM_ATOM,
-            long_offset: 0,
-            long_length: 4,
-        }))
-        .unwrap();
+    while let Some(request) = connection.poll_for_event().unwrap() {
+        let xcb::Event::X(x::Event::SelectionRequest(request)) = request else {
+            continue;
+        };
 
-    let pairs: &[x::Atom] = pairs.value();
-    assert_eq!(pairs.len(), 4);
-    assert!(pairs.contains(&connection.atoms.mime1));
-    assert!(pairs.contains(&connection.atoms.mime2));
+        let target = request.target();
+        let Some(idx) = mime_data.iter().position(|(atom, _, _)| *atom == target) else {
+            panic!("Expected atom in {mime_data:?}, got {target:?}");
+        };
 
-    let mime1data = b"hello world";
-    let mime2data = &[1u8, 2, 3, 4];
-    for [target, property] in pairs
-        .chunks_exact(2)
-        .map(|pair| <[x::Atom; 2]>::try_from(pair).unwrap())
-    {
-        match target {
-            x if x == connection.atoms.mime1 => {
-                connection.set_property(request.requestor(), x::ATOM_STRING, property, mime1data);
-            }
-            x if x == connection.atoms.mime2 => {
-                connection.set_property(request.requestor(), x::ATOM_INTEGER, property, mime2data);
-            }
-            _ => panic!("unexpected target: {target:?}"),
-        }
+        let (_, ty, data) = mime_data.swap_remove(idx);
+        connection.set_property(request.requestor(), ty, request.property(), data);
+
+        connection
+            .send_and_check_request(&x::SendEvent {
+                propagate: false,
+                destination: x::SendEventDest::Window(request.requestor()),
+                event_mask: x::EventMask::empty(),
+                event: &x::SelectionNotifyEvent::new(
+                    request.time(),
+                    request.requestor(),
+                    request.selection(),
+                    request.target(),
+                    request.property(),
+                ),
+            })
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    connection
-        .send_and_check_request(&x::SendEvent {
-            propagate: false,
-            destination: x::SendEventDest::Window(request.requestor()),
-            event_mask: x::EventMask::empty(),
-            event: &x::SelectionNotifyEvent::new(
-                request.time(),
-                request.requestor(),
-                request.selection(),
-                request.target(),
-                request.property(),
-            ),
-        })
-        .unwrap();
-
+    assert!(
+        mime_data.is_empty(),
+        "Didn't get all mime types: {mime_data:?}"
+    );
     f.wait_and_dispatch();
 
     let owner = connection
@@ -684,10 +673,10 @@ fn copy_from_x11() {
     for testwl::PasteData { mime_type, data } in data {
         match mime_type {
             x if x == "text/plain" => {
-                assert_eq!(&data, mime1data);
+                assert_eq!(&data, b"hello world");
             }
             x if x == "blah/blah" => {
-                assert_eq!(&data, mime2data);
+                assert_eq!(&data, &[1, 2, 3, 4]);
             }
             other => panic!("unexpected mime type: {other} ({data:?})"),
         }
@@ -755,7 +744,7 @@ fn copy_from_wayland() {
         })
         .unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    connection.await_event();
     let request = match connection.poll_for_event().unwrap() {
         Some(xcb::Event::X(x::Event::SelectionNotify(r))) => r,
         other => panic!("Didn't get selection notify event, instead got {other:?}"),
@@ -887,8 +876,7 @@ fn bad_clipboard_data() {
         })
         .unwrap();
 
-    // wait for request to come through
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    connection.await_event();
     let request = match connection.poll_for_event().unwrap() {
         Some(xcb::Event::X(x::Event::SelectionRequest(r))) => r,
         other => panic!("Didn't get selection request event, instead got {other:?}"),
@@ -915,26 +903,14 @@ fn bad_clipboard_data() {
         })
         .unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    connection.await_event();
     let request = match connection.poll_for_event().unwrap() {
         Some(xcb::Event::X(x::Event::SelectionRequest(r))) => r,
         other => panic!("Didn't get selection request event, instead got {other:?}"),
     };
-    assert_eq!(request.target(), connection.atoms.multiple);
-    let pairs = connection
-        .wait_for_reply(connection.send_request(&x::GetProperty {
-            delete: true,
-            window: request.requestor(),
-            property: request.property(),
-            r#type: x::ATOM_ATOM,
-            long_offset: 0,
-            long_length: 4,
-        }))
-        .unwrap();
+    assert_eq!(request.target(), connection.atoms.mime2);
 
-    let pairs: &[x::Atom] = pairs.value();
-    assert_eq!(pairs.len(), 2);
-    assert!(pairs.contains(&connection.atoms.mime2));
+    // Don't actually set any data as requested - just report success
 
     connection
         .send_and_check_request(&x::SendEvent {
@@ -951,7 +927,7 @@ fn bad_clipboard_data() {
         })
         .unwrap();
 
-    f.wait_and_dispatch();
+    std::thread::sleep(std::time::Duration::from_millis(50));
     let owner = connection
         .wait_for_reply(connection.send_request(&x::GetSelectionOwner {
             selection: connection.atoms.clipboard,
@@ -969,8 +945,7 @@ fn bad_clipboard_data() {
         })
         .unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
+    connection.await_event();
     let mut e = None;
     while let Some(event) = connection.poll_for_event().unwrap() {
         if let xcb::Event::X(x::Event::SelectionNotify(event)) = event {

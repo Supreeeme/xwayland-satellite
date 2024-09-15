@@ -4,7 +4,7 @@ use selection::{SelectionData, SelectionTarget};
 use crate::server::WindowAttributes;
 use bitflags::bitflags;
 use log::{debug, trace, warn};
-use std::ffi::{CString, CStr};
+use std::ffi::CString;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::sync::Arc;
 use xcb::{x, Xid, XidNew};
@@ -405,16 +405,6 @@ impl XState {
         }
     }
 
-    fn get_atom_name(&self, atom: x::Atom) -> String {
-        match self
-            .connection
-            .wait_for_reply(self.connection.send_request(&x::GetAtomName { atom }))
-        {
-            Ok(reply) => reply.name().to_string(),
-            Err(err) => format!("<error getting atom name: {err:?}> {atom:?}"),
-        }
-    }
-
     fn get_window_attributes(&self, window: x::Window) -> XResult<WindowAttributes> {
         let geometry = self.connection.send_request(&x::GetGeometry {
             drawable: x::Drawable::Window(window),
@@ -637,7 +627,7 @@ impl XState {
                 if log::log_enabled!(log::Level::Debug) {
                     debug!(
                         "changed property {:?} for {:?}",
-                        self.get_atom_name(event.atom()),
+                        get_atom_name(&self.connection, event.atom()),
                         window
                     );
                 }
@@ -665,6 +655,7 @@ xcb::atoms_struct! {
         pub utf8_string => b"UTF8_STRING" only_if_exists = false,
         pub clipboard => b"CLIPBOARD" only_if_exists = false,
         pub targets => b"TARGETS" only_if_exists = false,
+        pub save_targets => b"SAVE_TARGETS" only_if_exists = false,
         pub multiple => b"MULTIPLE" only_if_exists = false,
         pub timestamp => b"TIMESTAMP" only_if_exists = false,
         pub selection_reply => b"_selection_reply" only_if_exists = false,
@@ -862,5 +853,12 @@ impl super::XConnection for Arc<xcb::Connection> {
 impl super::FromServerState<Arc<xcb::Connection>> for Atoms {
     fn create(state: &super::RealServerState) -> Self {
         state.atoms.as_ref().unwrap().clone()
+    }
+}
+
+fn get_atom_name(connection: &xcb::Connection, atom: x::Atom) -> String {
+    match connection.wait_for_reply(connection.send_request(&x::GetAtomName { atom })) {
+        Ok(reply) => reply.name().to_string(),
+        Err(err) => format!("<error getting atom name: {err:?}> {atom:?}"),
     }
 }
