@@ -1,5 +1,6 @@
 use super::*;
 use log::{debug, error, trace, warn};
+use macros::simple_event_shunt;
 use std::sync::{Arc, OnceLock};
 use wayland_client::globals::Global;
 use wayland_protocols::{

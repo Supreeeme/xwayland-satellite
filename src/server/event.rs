@@ -1,5 +1,6 @@
 use super::*;
 use log::{debug, trace, warn};
+use macros::simple_event_shunt;
 use std::collections::HashSet;
 use std::os::fd::AsFd;
 use wayland_client::{protocol as client, Proxy};
@@ -34,79 +35,6 @@ use wayland_server::protocol::{
     wl_buffer::WlBuffer, wl_keyboard::WlKeyboard, wl_output::WlOutput, wl_pointer::WlPointer,
     wl_seat::WlSeat, wl_touch::WlTouch,
 };
-
-/// Lord forgive me, I am a sinner, who's probably gonna sin again
-/// This macro takes an enum variant name and a list of the field names of the enum
-/// and/or closures that take an argument that must be named the same as the field name,
-/// and converts that into a destructured enum
-/// shunt_helper_enum!(Foo [a, |b| b.do_thing(), c]) -> Foo {a, b, c}
-macro_rules! shunt_helper_enum {
-    // No fields
-    ($variant:ident) => { $variant };
-    // Starting state: variant destructure
-    ($variant:ident $([$($body:tt)+])?) => {
-        shunt_helper_enum!($variant [$($($body)+)?] -> [])
-    };
-    // Add field to list
-    ($variant:ident [$field:ident $(, $($rest:tt)+)?] -> [$($body:tt)*]) => {
-        shunt_helper_enum!($variant [$($($rest)+)?] -> [$($body)*, $field])
-    };
-    // Add closure field to list
-    ($variant:ident [|$field:ident| $conv:expr $(, $($rest:tt)+)?] -> [$($body:tt)*]) => {
-        shunt_helper_enum!($variant [$($($rest)+)?] -> [$($body)*, $field])
-    };
-    // Finalize into enum variant
-    ($variant:ident [] -> [,$($body:tt)+]) => { $variant { $($body)+ } };
-}
-
-/// This does the same thing as shunt_helper_enum, except it transforms the fields into the given
-/// function/method call.
-/// shunt_helper_fn!({obj.foo} [a, |b| b.do_thing(), c]) -> obj.foo(a, b.do_thing(), c)
-macro_rules! shunt_helper_fn {
-    // No fields
-    ({$($fn:tt)+}) => { $($fn)+() };
-    // Starting state
-    ($fn:tt [$($body:tt)+]) => {
-        shunt_helper_fn!($fn [$($body)+] -> [])
-    };
-    // Add field to list
-    ($fn:tt [$field:ident $(, $($rest:tt)+)?] -> [$($body:tt)*]) => {
-        shunt_helper_fn!($fn [$($($rest)+)?] -> [$($body)*, $field])
-    };
-    // Add closure expression to list
-    ($fn:tt [|$field:ident| $conv:expr $(, $($rest:tt)+)?] -> [$($body:tt)*]) => {
-        shunt_helper_fn!($fn [$($($rest)+)?] -> [$($body)*, $conv])
-    };
-    // Finalize into function call
-    ({$($fn:tt)+} [] -> [,$($body:tt)+]) => { $($fn)+($($body)+) };
-}
-
-/// Takes an object, the name of a variable holding an event, the event type, and a list of the
-/// variants with their fields, and converts them into function calls on their arguments
-/// Event { field1, field2 } => obj.event(field1, field2)
-macro_rules! simple_event_shunt {
-    ($obj:expr, $event:ident: $event_type:path => [
-        $( $variant:ident $({ $($fields:tt)* })? ),+
-    ]) => {
-        {
-        use $event_type::*;
-        match $event {
-            $(
-                shunt_helper_enum!( $variant $( [ $($fields)* ] )? ) => {
-                    paste::paste! {
-                        shunt_helper_fn!( { $obj.[<$variant:snake>] } $( [ $($fields)* ] )? )
-                    }
-                }
-            )+
-            _ => log::warn!(concat!("unhandled ", stringify!($event_type), ": {:?}"), $event)
-        }
-        }
-    }
-}
-
-pub(crate) use shunt_helper_enum;
-pub(crate) use shunt_helper_fn;
-pub(crate) use simple_event_shunt;
 
 #[derive(Debug)]
 pub(crate) enum SurfaceEvents {
