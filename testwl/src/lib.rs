@@ -10,6 +10,16 @@ use wayland_protocols::{
         linux_dmabuf::zv1::server::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
         pointer_constraints::zv1::server::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
         relative_pointer::zv1::server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+        tablet::zv2::server::{
+            zwp_tablet_manager_v2::ZwpTabletManagerV2,
+            zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2,
+            zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2,
+            zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2,
+            zwp_tablet_pad_v2::ZwpTabletPadV2,
+            zwp_tablet_seat_v2::ZwpTabletSeatV2,
+            zwp_tablet_tool_v2::{self, ZwpTabletToolV2},
+            zwp_tablet_v2::ZwpTabletV2,
+        },
         viewporter::server::wp_viewporter::WpViewporter,
     },
     xdg::{
@@ -338,6 +348,7 @@ impl Server {
         dh.create_global::<State, XdgWmBase, _>(6, ());
         dh.create_global::<State, WlSeat, _>(5, ());
         dh.create_global::<State, WlDataDeviceManager, _>(3, ());
+        dh.create_global::<State, ZwpTabletManagerV2, _>(1, ());
         global_noop!(ZwpLinuxDmabufV1);
         global_noop!(ZwpRelativePointerManagerV1);
         global_noop!(WpViewporter);
@@ -641,6 +652,77 @@ simple_global_dispatch!(WlShm);
 simple_global_dispatch!(WlCompositor);
 simple_global_dispatch!(XdgWmBase);
 simple_global_dispatch!(ZxdgOutputManagerV1);
+simple_global_dispatch!(ZwpTabletManagerV2);
+
+impl Dispatch<ZwpTabletManagerV2, ()> for State {
+    fn request(
+        _: &mut Self,
+        client: &Client,
+        _: &ZwpTabletManagerV2,
+        request: <ZwpTabletManagerV2 as Resource>::Request,
+        _: &(),
+        dhandle: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            wayland_protocols::wp::tablet::zv2::server::zwp_tablet_manager_v2::Request::GetTabletSeat { tablet_seat, seat: _ } => {
+                let seat = data_init.init(tablet_seat, ());
+                let tablet = client.create_resource::<_, _, State>(dhandle, 1, ()).unwrap();
+                seat.tablet_added(&tablet);
+                tablet.name("tabby".to_owned());
+                tablet.done();
+
+                let tool = client.create_resource::<_, _, State>(dhandle, 1, ()).unwrap();
+                seat.tool_added(&tool);
+                tool._type(zwp_tablet_tool_v2::Type::Finger);
+                tool.done();
+
+                let pad = client.create_resource::<_, _, State>(dhandle, 1, ()).unwrap();
+                let group = client.create_resource::<_, _, State>(dhandle, 1, ()).unwrap();
+                let ring = client.create_resource::<_, _, State>(dhandle, 1, ()).unwrap();
+                let strip = client.create_resource::<_, _, State>(dhandle, 1, ()).unwrap();
+
+                seat.pad_added(&pad);
+                pad.buttons(5);
+                pad.group(&group);
+                pad.done();
+
+                group.buttons(vec![]);
+                group.ring(&ring);
+                group.strip(&strip);
+                group.done();
+            }
+            wayland_protocols::wp::tablet::zv2::server::zwp_tablet_manager_v2::Request::Destroy => {}
+            other => todo!("unhandled tablet manager request: {other:?}")
+        }
+    }
+}
+
+macro_rules! unhandled {
+    ($type:ty) => {
+        impl Dispatch<$type, ()> for State {
+            fn request(
+                _: &mut Self,
+                _: &Client,
+                _: &$type,
+                _: <$type as Resource>::Request,
+                _: &(),
+                _: &DisplayHandle,
+                _: &mut wayland_server::DataInit<'_, Self>,
+            ) {
+                todo!(concat!(stringify!($type), " unhandled"));
+            }
+        }
+    };
+}
+
+unhandled!(ZwpTabletSeatV2);
+unhandled!(ZwpTabletV2);
+unhandled!(ZwpTabletToolV2);
+unhandled!(ZwpTabletPadV2);
+unhandled!(ZwpTabletPadGroupV2);
+unhandled!(ZwpTabletPadRingV2);
+unhandled!(ZwpTabletPadStripV2);
 
 impl Dispatch<ZxdgOutputManagerV1, ()> for State {
     fn request(

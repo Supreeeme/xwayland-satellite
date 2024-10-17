@@ -23,11 +23,27 @@ use wayland_client::{
     },
     Connection, Proxy, WEnum,
 };
+
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::client::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
         pointer_constraints::zv1::client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
         relative_pointer::zv1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+        tablet::zv2::client::{
+            zwp_tablet_manager_v2::{self, ZwpTabletManagerV2},
+            zwp_tablet_pad_group_v2::{
+                self, ZwpTabletPadGroupV2, EVT_RING_OPCODE, EVT_STRIP_OPCODE,
+            },
+            zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2,
+            zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2,
+            zwp_tablet_pad_v2::{self, ZwpTabletPadV2, EVT_GROUP_OPCODE},
+            zwp_tablet_seat_v2::{
+                self, ZwpTabletSeatV2, EVT_PAD_ADDED_OPCODE, EVT_TABLET_ADDED_OPCODE,
+                EVT_TOOL_ADDED_OPCODE,
+            },
+            zwp_tablet_tool_v2::{self, ZwpTabletToolV2},
+            zwp_tablet_v2::{self, ZwpTabletV2},
+        },
         viewporter::client::wp_viewporter::WpViewporter,
     },
     xdg::{
@@ -93,6 +109,7 @@ struct Compositor {
     shm: TestObject<WlShm>,
     shell: TestObject<XwaylandShellV1>,
     seat: TestObject<WlSeat>,
+    tablet_man: TestObject<ZwpTabletManagerV2>
 }
 
 }
@@ -298,6 +315,23 @@ impl TestFixture {
         let events = std::mem::take(&mut *self.registry.data.events.lock().unwrap());
         assert!(!events.is_empty());
 
+        fn bind<T: Proxy + Sync + Send + 'static>(
+            registry: &TestObject<WlRegistry>,
+            name: u32,
+            version: u32,
+        ) -> TestObject<T>
+        where
+            T::Event: Sync + Send + std::fmt::Debug,
+        {
+            TestObject::from_request(
+                &registry.obj,
+                Req::<WlRegistry>::Bind {
+                    name,
+                    id: (T::interface(), version),
+                },
+            )
+        }
+
         for event in events {
             if let Ev::<WlRegistry>::Global {
                 name,
@@ -305,36 +339,18 @@ impl TestFixture {
                 version,
             } = event
             {
-                let bind_req = |interface| Req::<WlRegistry>::Bind {
-                    name,
-                    id: (interface, version),
-                };
+                macro_rules! bind {
+                    ($field:ident) => {
+                        ret.$field = Some(bind(&self.registry, name, version))
+                    };
+                }
 
                 match interface {
-                    x if x == WlCompositor::interface().name => {
-                        ret.compositor = Some(TestObject::from_request(
-                            &self.registry.obj,
-                            bind_req(WlCompositor::interface()),
-                        ));
-                    }
-                    x if x == WlShm::interface().name => {
-                        ret.shm = Some(TestObject::from_request(
-                            &self.registry.obj,
-                            bind_req(WlShm::interface()),
-                        ));
-                    }
-                    x if x == XwaylandShellV1::interface().name => {
-                        ret.shell = Some(TestObject::from_request(
-                            &self.registry.obj,
-                            bind_req(XwaylandShellV1::interface()),
-                        ));
-                    }
-                    x if x == WlSeat::interface().name => {
-                        ret.seat = Some(TestObject::from_request(
-                            &self.registry.obj,
-                            bind_req(WlSeat::interface()),
-                        ));
-                    }
+                    x if x == WlCompositor::interface().name => bind!(compositor),
+                    x if x == WlShm::interface().name => bind!(shm),
+                    x if x == XwaylandShellV1::interface().name => bind!(shell),
+                    x if x == WlSeat::interface().name => bind!(seat),
+                    x if x == ZwpTabletManagerV2::interface().name => bind!(tablet_man),
                     _ => {}
                 }
             }
@@ -347,6 +363,18 @@ impl TestFixture {
         );
 
         ret.into()
+    }
+
+    fn object_data<P>(&self, obj: &P) -> Arc<TestObjectData<P>>
+    where
+        P: Proxy + Send + Sync + 'static,
+        P::Event: Send + Sync + std::fmt::Debug,
+    {
+        self.xwls_connection
+            .get_object_data(obj.id())
+            .unwrap()
+            .downcast_arc::<TestObjectData<P>>()
+            .unwrap()
     }
 
     /// Cascade our requests/events through satellite and testwl
@@ -709,10 +737,35 @@ where
         backend: &Backend,
         msg: Message<ObjectId, std::os::fd::OwnedFd>,
     ) -> Option<Arc<dyn ObjectData>> {
+        fn obj_data<T: Proxy>() -> Arc<dyn ObjectData>
+        where
+            T: Send + Sync + 'static,
+            T::Event: Send + Sync + std::fmt::Debug,
+        {
+            Arc::new(TestObjectData::<T>::default())
+        }
+
+        let new_data = match (msg.sender_id.interface().name, msg.opcode) {
+            (x, opcode) if x == ZwpTabletSeatV2::interface().name => match opcode {
+                EVT_TABLET_ADDED_OPCODE => Some(obj_data::<ZwpTabletV2>()),
+                EVT_TOOL_ADDED_OPCODE => Some(obj_data::<ZwpTabletToolV2>()),
+                EVT_PAD_ADDED_OPCODE => Some(obj_data::<ZwpTabletPadV2>()),
+                _ => None,
+            },
+            (x, EVT_GROUP_OPCODE) if x == ZwpTabletPadV2::interface().name => {
+                Some(obj_data::<ZwpTabletPadGroupV2>())
+            }
+            (x, opcode) if x == ZwpTabletPadGroupV2::interface().name => match opcode {
+                EVT_RING_OPCODE => Some(obj_data::<ZwpTabletPadRingV2>()),
+                EVT_STRIP_OPCODE => Some(obj_data::<ZwpTabletPadStripV2>()),
+                _ => None,
+            },
+            _ => None,
+        };
         let connection = Connection::from_backend(backend.clone());
         let event = T::parse_event(&connection, msg).unwrap().1;
         self.events.lock().unwrap().push(event);
-        None
+        new_data
     }
 
     fn destroyed(&self, _: ObjectId) {}
@@ -849,7 +902,8 @@ fn pass_through_globals() {
         WpViewporter,
         WlDrm,
         ZwpPointerConstraintsV1,
-        XwaylandShellV1
+        XwaylandShellV1,
+        ZwpTabletManagerV2
     }
 
     let mut globals = SupportedGlobals::default();
@@ -1457,6 +1511,136 @@ fn ignore_toplevel_reconfigure() {
     );
 }
 
+#[track_caller]
+fn events_check<'a, Event: std::fmt::Debug, const N: usize>(
+    mut it: impl Iterator<Item = Event>,
+    mut matchers: [Box<dyn FnMut(&Event) -> bool + 'a>; N],
+) {
+    for (idx, matcher) in matchers.iter_mut().enumerate() {
+        let item = it.next();
+        if item.is_none() {
+            panic!("event {idx} does not exist");
+        }
+        if !matcher(item.as_ref().unwrap()) {
+            panic!("event {idx} was wrong ({item:?})");
+        }
+    }
+
+    let mut remaining = it.peekable();
+    if remaining.peek().is_some() {
+        panic!("remaining events: {:?}", remaining.collect::<Vec<_>>());
+    }
+}
+
+#[test]
+fn tablet_smoke_test() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let seat = TestObject::<ZwpTabletSeatV2>::from_request(
+        &comp.tablet_man.obj,
+        zwp_tablet_manager_v2::Request::GetTabletSeat {
+            seat: comp.seat.obj,
+        },
+    );
+    // Not sure why exactly this requires 4 runs but it works so idk
+    for _ in 0..4 {
+        f.run();
+    }
+
+    let events = std::mem::take(&mut *seat.data.events.lock().unwrap()).into_iter();
+    let (mut tab_id, mut tool_id, mut pad_id) = (None, None, None);
+    events_check(
+        events,
+        [
+            Box::new(|e| match e {
+                zwp_tablet_seat_v2::Event::TabletAdded { id } => {
+                    tab_id = Some(id.clone());
+                    true
+                }
+                _ => false,
+            }),
+            Box::new(|e| match e {
+                zwp_tablet_seat_v2::Event::ToolAdded { id } => {
+                    tool_id = Some(id.clone());
+                    true
+                }
+                _ => false,
+            }),
+            Box::new(|e| match e {
+                zwp_tablet_seat_v2::Event::PadAdded { id } => {
+                    pad_id = Some(id.clone());
+                    true
+                }
+                _ => false,
+            }),
+        ],
+    );
+    let (tab_id, tool_id, pad_id) = (tab_id.unwrap(), tool_id.unwrap(), pad_id.unwrap());
+
+    // For reasons beyond my mortal understanding, `id.object_data()` does not work properly.
+    let tab_data = f.object_data(&tab_id);
+    let tab_events = std::mem::take(&mut *tab_data.events.lock().unwrap()).into_iter();
+    events_check(
+        tab_events,
+        [
+            Box::new(|e| match e {
+                zwp_tablet_v2::Event::Name { name } if name == "tabby" => true,
+                _ => false,
+            }),
+            Box::new(|e| matches!(e, zwp_tablet_v2::Event::Done)),
+        ],
+    );
+
+    let tool_data = f.object_data(&tool_id);
+    let tool_events = std::mem::take(&mut *tool_data.events.lock().unwrap()).into_iter();
+    events_check(
+        tool_events,
+        [
+            Box::new(|e| {
+                matches!(
+                    e,
+                    zwp_tablet_tool_v2::Event::Type {
+                        tool_type: WEnum::Value(zwp_tablet_tool_v2::Type::Finger)
+                    }
+                )
+            }),
+            Box::new(|e| matches!(e, zwp_tablet_tool_v2::Event::Done)),
+        ],
+    );
+
+    let pad_data = f.object_data(&pad_id);
+    let pad_events = std::mem::take(&mut *pad_data.events.lock().unwrap()).into_iter();
+    let mut group = None;
+    events_check(
+        pad_events,
+        [
+            Box::new(|e| matches!(e, zwp_tablet_pad_v2::Event::Buttons { buttons: 5 })),
+            Box::new(|e| match e {
+                zwp_tablet_pad_v2::Event::Group { pad_group } => {
+                    group = Some(pad_group.clone());
+                    true
+                }
+                _ => false,
+            }),
+            Box::new(|e| matches!(e, zwp_tablet_pad_v2::Event::Done)),
+        ],
+    );
+
+    let group = group.unwrap();
+    let g_data = f.object_data(&group);
+    let g_events = std::mem::take(&mut *g_data.events.lock().unwrap()).into_iter();
+    events_check(
+        g_events,
+        [
+            Box::new(|e| match e {
+                zwp_tablet_pad_group_v2::Event::Buttons { buttons } if buttons.is_empty() => true,
+                _ => false,
+            }),
+            Box::new(|e| matches!(e, zwp_tablet_pad_group_v2::Event::Ring { .. })),
+            Box::new(|e| matches!(e, zwp_tablet_pad_group_v2::Event::Strip { .. })),
+            Box::new(|e| matches!(e, zwp_tablet_pad_group_v2::Event::Done)),
+        ],
+    )
+}
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}
