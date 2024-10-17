@@ -1,4 +1,5 @@
 use super::*;
+use crate::clientside::LateInitObjectKey;
 use log::{debug, trace, warn};
 use macros::simple_event_shunt;
 use std::collections::HashSet;
@@ -21,6 +22,26 @@ use wayland_protocols::{
                 self, ZwpRelativePointerV1 as RelativePointerClient,
             },
             server::zwp_relative_pointer_v1::ZwpRelativePointerV1 as RelativePointerServer,
+        },
+        tablet::zv2::{
+            client::{
+                zwp_tablet_pad_group_v2::{self, ZwpTabletPadGroupV2 as TabletPadGroupClient},
+                zwp_tablet_pad_ring_v2::{self, ZwpTabletPadRingV2 as TabletPadRingClient},
+                zwp_tablet_pad_strip_v2::{self, ZwpTabletPadStripV2 as TabletPadStripClient},
+                zwp_tablet_pad_v2::{self, ZwpTabletPadV2 as TabletPadClient},
+                zwp_tablet_seat_v2::{self, ZwpTabletSeatV2 as TabletSeatClient},
+                zwp_tablet_tool_v2::{self, ZwpTabletToolV2 as TabletToolClient},
+                zwp_tablet_v2::{self, ZwpTabletV2 as TabletClient},
+            },
+            server::{
+                zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2 as TabletPadGroupServer,
+                zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2 as TabletPadRingServer,
+                zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2 as TabletPadStripServer,
+                zwp_tablet_pad_v2::ZwpTabletPadV2 as TabletPadServer,
+                zwp_tablet_seat_v2::ZwpTabletSeatV2 as TabletSeatServer,
+                zwp_tablet_tool_v2::ZwpTabletToolV2 as TabletToolServer,
+                zwp_tablet_v2::ZwpTabletV2 as TabletServer,
+            },
         },
     },
     xdg::{
@@ -235,6 +256,41 @@ impl SurfaceData {
 pub struct GenericObject<Server: Resource, Client: Proxy> {
     pub server: Server,
     pub client: Client,
+}
+
+impl<S: Resource + 'static, C: Proxy + 'static> GenericObject<S, C> {
+    fn from_client<XC: XConnection>(client: C, state: &mut ServerState<XC>) -> &Self
+    where
+        Self: Into<WrappedObject>,
+        for<'a> &'a Self: TryFrom<&'a Object, Error = String>,
+        ServerState<XC>: wayland_server::Dispatch<S, ObjectKey>,
+        C::Event: Send + Into<ObjectEvent>,
+    {
+        let key = state.objects.insert_with_key(|key| {
+            let server = state
+                .client
+                .as_ref()
+                .unwrap()
+                .create_resource::<_, _, ServerState<XC>>(&state.dh, 1, key)
+                .unwrap();
+            let obj_key: &LateInitObjectKey<C> = client.data().unwrap();
+            obj_key.init(key);
+
+            Self { client, server }.into()
+        });
+
+        state.objects[key].as_ref()
+    }
+}
+
+pub trait GenericObjectExt {
+    type Server: Resource;
+    type Client: Proxy;
+}
+
+impl<S: Resource, C: Proxy> GenericObjectExt for GenericObject<S, C> {
+    type Server = S;
+    type Client = C;
 }
 
 pub type Buffer = GenericObject<WlBuffer, client::wl_buffer::WlBuffer>;
@@ -786,6 +842,186 @@ impl HandleEvent for ConfinedPointer {
             self.server, event: zwp_confined_pointer_v1::Event => [
                 Confined,
                 Unconfined
+            ]
+        }
+    }
+}
+
+pub type TabletSeat = GenericObject<TabletSeatServer, TabletSeatClient>;
+impl HandleEvent for TabletSeat {
+    type Event = zwp_tablet_seat_v2::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, state: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_tablet_seat_v2::Event => [
+                TabletAdded {
+                    |id| &Tablet::from_client(id, state).server
+                },
+                ToolAdded {
+                    |id| &TabletTool::from_client(id, state).server
+                },
+                PadAdded {
+                    |id| &TabletPad::from_client(id, state).server
+                }
+            ]
+        }
+    }
+}
+
+pub type Tablet = GenericObject<TabletServer, TabletClient>;
+impl HandleEvent for Tablet {
+    type Event = zwp_tablet_v2::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, _: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_tablet_v2::Event => [
+                Name { name },
+                Id { vid, pid },
+                Path { path },
+                Done,
+                Removed
+            ]
+        }
+    }
+}
+
+pub type TabletPad = GenericObject<TabletPadServer, TabletPadClient>;
+impl HandleEvent for TabletPad {
+    type Event = zwp_tablet_pad_v2::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, state: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_tablet_pad_v2::Event => [
+                Group { |pad_group| &TabletPadGroup::from_client(pad_group, state).server },
+                Path { path },
+                Buttons { buttons },
+                Done,
+                Button {
+                    time,
+                    button,
+                    |state| convert_wenum(state)
+                },
+                Enter {
+                    serial,
+                    |tablet| {
+                        let key: &LateInitObjectKey<TabletClient> = tablet.data().unwrap();
+                        let Some(tablet): Option<&Tablet> = state.objects.get(**key).map(|o| o.as_ref()) else {
+                            return;
+                        };
+                        &tablet.server
+                    },
+                    |surface| {
+                        let Some(surface_data) = state.get_server_surface_from_client(surface) else {
+                            return;
+                        };
+                        surface_data
+                    }
+                },
+                Leave {
+                    serial,
+                    |surface| {
+                        let Some(surface_data) = state.get_server_surface_from_client(surface) else {
+                            return;
+                        };
+                        surface_data
+                    }
+                },
+                Removed
+            ]
+        }
+    }
+}
+
+pub type TabletTool = GenericObject<TabletToolServer, TabletToolClient>;
+impl HandleEvent for TabletTool {
+    type Event = zwp_tablet_tool_v2::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, state: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_tablet_tool_v2::Event => [
+                Type { |tool_type| convert_wenum(tool_type) },
+                HardwareSerial { hardware_serial_hi, hardware_serial_lo },
+                HardwareIdWacom { hardware_id_hi, hardware_id_lo },
+                Capability { |capability| convert_wenum(capability) },
+                Done,
+                Removed,
+                ProximityIn {
+                    serial,
+                    |tablet| {
+                        let key: &LateInitObjectKey<TabletClient> = tablet.data().unwrap();
+                        let Some(tablet): Option<&Tablet> = state.objects.get(**key).map(|o| o.as_ref()) else {
+                            return;
+                        };
+                        &tablet.server
+                    },
+                    |surface| {
+                        let Some(surface_data) = state.get_server_surface_from_client(surface) else {
+                            return;
+                        };
+                        surface_data
+                    }
+                },
+                ProximityOut,
+                Down { serial },
+                Up,
+                Motion { x, y },
+                Pressure { pressure },
+                Tilt { tilt_x, tilt_y },
+                Rotation { degrees },
+                Slider { position },
+                Wheel { degrees, clicks },
+                Button { serial, button, |state| convert_wenum(state) },
+                Frame { time },
+            ]
+        }
+    }
+}
+
+pub type TabletPadGroup = GenericObject<TabletPadGroupServer, TabletPadGroupClient>;
+impl HandleEvent for TabletPadGroup {
+    type Event = zwp_tablet_pad_group_v2::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, state: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_tablet_pad_group_v2::Event => [
+                Buttons { buttons },
+                Ring { |ring| &TabletPadRing::from_client(ring, state).server },
+                Strip { |strip| &TabletPadStrip::from_client(strip, state).server },
+                Modes { modes },
+                Done,
+                ModeSwitch { time, serial, mode }
+            ]
+        }
+    }
+}
+
+pub type TabletPadRing = GenericObject<TabletPadRingServer, TabletPadRingClient>;
+impl HandleEvent for TabletPadRing {
+    type Event = zwp_tablet_pad_ring_v2::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, _: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_tablet_pad_ring_v2::Event => [
+                Source { |source| convert_wenum(source) },
+                Angle { degrees },
+                Stop,
+                Frame { time }
+            ]
+        }
+    }
+}
+
+pub type TabletPadStrip = GenericObject<TabletPadStripServer, TabletPadStripClient>;
+impl HandleEvent for TabletPadStrip {
+    type Event = zwp_tablet_pad_strip_v2::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, _: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_tablet_pad_strip_v2::Event => [
+                Source { |source| convert_wenum(source) },
+                Position { position },
+                Stop,
+                Frame { time }
             ]
         }
     }

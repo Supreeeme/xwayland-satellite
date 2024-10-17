@@ -20,11 +20,9 @@ use wayland_protocols::{
         },
         relative_pointer::zv1::{
             client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1 as RelativePointerManClient,
-            server::{
-                zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1 as RelativePointerManServer,
-                zwp_relative_pointer_v1::ZwpRelativePointerV1 as RelativePointerServer,
-            },
+            server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1 as RelativePointerManServer,
         },
+        tablet::zv2::{client as c_tablet, server as s_tablet},
         viewporter::{client as c_vp, server as s_vp},
     },
     xdg::xdg_output::zv1::{
@@ -58,6 +56,40 @@ use wayland_server::{
     },
     Dispatch, DisplayHandle, GlobalDispatch, Resource,
 };
+
+macro_rules! only_destroy_request_impl {
+    ($object_type:ty) => {
+        impl<C: XConnection> Dispatch<<$object_type as GenericObjectExt>::Server, ObjectKey>
+            for ServerState<C>
+        {
+            fn request(
+                state: &mut Self,
+                _: &Client,
+                _: &<$object_type as GenericObjectExt>::Server,
+                request: <<$object_type as GenericObjectExt>::Server as Resource>::Request,
+                key: &ObjectKey,
+                _: &DisplayHandle,
+                _: &mut wayland_server::DataInit<'_, Self>,
+            ) {
+                if !matches!(
+                    request,
+                    <<$object_type as GenericObjectExt>::Server as Resource>::Request::Destroy
+                ) {
+                    warn!(
+                        "unrecognized {} request: {:?}",
+                        stringify!($object_type),
+                        request
+                    );
+                    return;
+                }
+
+                let obj: &$object_type = state.objects[*key].as_ref();
+                obj.client.destroy();
+                state.objects.remove(*key);
+            }
+        }
+    };
+}
 
 // noop
 impl<C: XConnection> Dispatch<WlCallback, ()> for ServerState<C> {
@@ -166,7 +198,7 @@ impl<C: XConnection> Dispatch<WlRegion, client::wl_region::WlRegion> for ServerS
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        simple_event_shunt! {
+        macros::simple_event_shunt! {
             client, request: wl_region::Request => [
                 Add { x, y, width, height },
                 Subtract { x, y, width, height },
@@ -432,24 +464,7 @@ impl<C: XConnection> Dispatch<WlSeat, ObjectKey> for ServerState<C> {
         }
     }
 }
-
-impl<C: XConnection> Dispatch<RelativePointerServer, ObjectKey> for ServerState<C> {
-    fn request(
-        state: &mut Self,
-        _: &wayland_server::Client,
-        _: &RelativePointerServer,
-        request: <RelativePointerServer as Resource>::Request,
-        key: &ObjectKey,
-        _: &DisplayHandle,
-        _: &mut wayland_server::DataInit<'_, Self>,
-    ) {
-        if let Request::<RelativePointerServer>::Destroy = request {
-            let obj: &RelativePointer = state.objects[*key].as_ref();
-            obj.client.destroy();
-            state.objects.remove(*key);
-        }
-    }
-}
+only_destroy_request_impl!(RelativePointer);
 
 impl<C: XConnection>
     Dispatch<RelativePointerManServer, ClientGlobalWrapper<RelativePointerManClient>>
@@ -980,6 +995,170 @@ impl<C: XConnection>
     }
 }
 
+impl<C: XConnection>
+    Dispatch<
+        s_tablet::zwp_tablet_manager_v2::ZwpTabletManagerV2,
+        ClientGlobalWrapper<c_tablet::zwp_tablet_manager_v2::ZwpTabletManagerV2>,
+    > for ServerState<C>
+{
+    fn request(
+        state: &mut Self,
+        _: &wayland_server::Client,
+        _: &s_tablet::zwp_tablet_manager_v2::ZwpTabletManagerV2,
+        request: <s_tablet::zwp_tablet_manager_v2::ZwpTabletManagerV2 as Resource>::Request,
+        client: &ClientGlobalWrapper<c_tablet::zwp_tablet_manager_v2::ZwpTabletManagerV2>,
+        _: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        use s_tablet::zwp_tablet_manager_v2::Request::*;
+        match request {
+            GetTabletSeat { tablet_seat, seat } => {
+                let seat_key: ObjectKey = seat.data().copied().unwrap();
+                state
+                    .objects
+                    .insert_from_other_objects([seat_key], |[seat_obj], key| {
+                        let Seat { client: c_seat, .. }: &Seat = seat_obj.try_into().unwrap();
+                        let client = client.get_tablet_seat(c_seat, &state.qh, key);
+                        let server = data_init.init(tablet_seat, key);
+                        TabletSeat { client, server }.into()
+                    });
+            }
+            other => {
+                warn!("unhandled tablet request: {other:?}");
+            }
+        }
+    }
+}
+
+only_destroy_request_impl!(TabletSeat);
+only_destroy_request_impl!(Tablet);
+only_destroy_request_impl!(TabletPadGroup);
+
+impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_v2::ZwpTabletPadV2, ObjectKey>
+    for ServerState<C>
+{
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &s_tablet::zwp_tablet_pad_v2::ZwpTabletPadV2,
+        request: <s_tablet::zwp_tablet_pad_v2::ZwpTabletPadV2 as Resource>::Request,
+        key: &ObjectKey,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        let pad: &TabletPad = state.objects[*key].as_ref();
+        match request {
+            s_tablet::zwp_tablet_pad_v2::Request::SetFeedback {
+                button,
+                description,
+                serial,
+            } => {
+                pad.client.set_feedback(button, description, serial);
+            }
+            s_tablet::zwp_tablet_pad_v2::Request::Destroy => {
+                pad.client.destroy();
+                state.objects.remove(*key);
+            }
+            other => warn!("unhandled tablet pad request: {other:?}"),
+        }
+    }
+}
+
+impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2, ObjectKey>
+    for ServerState<C>
+{
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &s_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2,
+        request: <s_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2 as Resource>::Request,
+        key: &ObjectKey,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        let tool: &TabletTool = state.objects[*key].as_ref();
+        match request {
+            s_tablet::zwp_tablet_tool_v2::Request::SetCursor {
+                serial,
+                surface,
+                hotspot_x,
+                hotspot_y,
+            } => {
+                let surf_key: Option<ObjectKey> = surface.map(|s| s.data().copied().unwrap());
+                let c_surface = surf_key.map(|key| {
+                    let d: &SurfaceData = state.objects[key].as_ref();
+                    &d.client
+                });
+                tool.client
+                    .set_cursor(serial, c_surface, hotspot_x, hotspot_y);
+            }
+            s_tablet::zwp_tablet_tool_v2::Request::Destroy => {
+                tool.client.destroy();
+                state.objects.remove(*key);
+            }
+            other => warn!("unhandled tablet tool request: {other:?}"),
+        }
+    }
+}
+
+impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2, ObjectKey>
+    for ServerState<C>
+{
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &s_tablet::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2,
+        request: <s_tablet::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2 as Resource>::Request,
+        key: &ObjectKey,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        let ring: &TabletPadRing = state.objects[*key].as_ref();
+        match request {
+            s_tablet::zwp_tablet_pad_ring_v2::Request::SetFeedback {
+                description,
+                serial,
+            } => {
+                ring.client.set_feedback(description, serial);
+            }
+            s_tablet::zwp_tablet_pad_ring_v2::Request::Destroy => {
+                ring.client.destroy();
+                state.objects.remove(*key);
+            }
+            other => warn!("unhandled tablet pad ring requst: {other:?}"),
+        }
+    }
+}
+
+impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2, ObjectKey>
+    for ServerState<C>
+{
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &s_tablet::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2,
+        request: <s_tablet::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2 as Resource>::Request,
+        key: &ObjectKey,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        let strip: &TabletPadStrip = state.objects[*key].as_ref();
+        match request {
+            s_tablet::zwp_tablet_pad_strip_v2::Request::SetFeedback {
+                description,
+                serial,
+            } => {
+                strip.client.set_feedback(description, serial);
+            }
+            s_tablet::zwp_tablet_pad_strip_v2::Request::Destroy => {
+                strip.client.destroy();
+                state.objects.remove(*key);
+            }
+            other => warn!("unhandled tablet pad strip requst: {other:?}"),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ClientGlobalWrapper<T: Proxy>(Arc<OnceLock<T>>);
 impl<T: Proxy> std::ops::Deref for ClientGlobalWrapper<T> {
@@ -1072,6 +1251,10 @@ global_dispatch_no_events!(
     c_vp::wp_viewporter::WpViewporter
 );
 global_dispatch_no_events!(PointerConstraintsServer, PointerConstraintsClient);
+global_dispatch_no_events!(
+    s_tablet::zwp_tablet_manager_v2::ZwpTabletManagerV2,
+    c_tablet::zwp_tablet_manager_v2::ZwpTabletManagerV2
+);
 
 impl<C: XConnection> GlobalDispatch<WlSeat, Global> for ServerState<C>
 where
