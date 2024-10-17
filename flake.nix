@@ -45,8 +45,13 @@
               xorg.libxcb
 
               makeWrapper
+
+              systemd
             ];
+
             buildInputs = [ pkgs.xwayland ];
+
+            cargoBuildOptions = opts: opts ++ [ "--features" "systemd" ];
 
             postInstall = ''
               wrapProgram $out/bin/xwayland-satellite \
