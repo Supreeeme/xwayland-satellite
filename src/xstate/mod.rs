@@ -363,7 +363,10 @@ impl XState {
                 }
                 xcb::Event::X(x::Event::ClientMessage(e)) => match e.r#type() {
                     x if x == self.atoms.wl_surface_id => {
-                        panic!("Xserver should be using WL_SURFACE_SERIAL, not WL_SURFACE_ID");
+                        panic!(concat!(
+                            "Xserver should be using WL_SURFACE_SERIAL, not WL_SURFACE_ID\n",
+                            "Your Xwayland is likely too old, it should be version 23.1 or greater."
+                        ));
                     }
                     x if x == self.atoms.wl_surface_serial => {
                         let x::ClientMessageData::Data32(data) = e.data() else {
