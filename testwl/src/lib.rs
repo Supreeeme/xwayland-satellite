@@ -11,6 +11,7 @@ use wayland_protocols::{
         pointer_constraints::zv1::server::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
         relative_pointer::zv1::server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
         viewporter::server::wp_viewporter::WpViewporter,
+        tablet::zv2::server::zwp_tablet_manager_v2::ZwpTabletManagerV2
     },
     xdg::{
         shell::server::{
@@ -314,6 +315,7 @@ impl Server {
         global_noop!(ZwpRelativePointerManagerV1);
         global_noop!(WpViewporter);
         global_noop!(ZwpPointerConstraintsV1);
+        global_noop!(ZwpTabletManagerV2);
 
         struct HandlerData;
         impl ObjectData<State> for HandlerData {
