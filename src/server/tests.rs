@@ -23,11 +23,14 @@ use wayland_client::{
     },
     Connection, Proxy, WEnum,
 };
+
+
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::client::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
         pointer_constraints::zv1::client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
         relative_pointer::zv1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+        tablet::zv2::client::zwp_tablet_manager_v2::ZwpTabletManagerV2,
         viewporter::client::wp_viewporter::WpViewporter,
     },
     xdg::{
@@ -842,7 +845,8 @@ fn pass_through_globals() {
         WpViewporter,
         WlDrm,
         ZwpPointerConstraintsV1,
-        XwaylandShellV1
+        XwaylandShellV1,
+        ZwpTabletManagerV2
     }
 
     let mut globals = SupportedGlobals::default();

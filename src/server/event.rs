@@ -1,5 +1,7 @@
 use super::*;
+use crate::clientside::LateInitObjectKey;
 use log::{debug, trace, warn};
+use macros::simple_event_shunt;
 use std::collections::HashSet;
 use std::os::fd::AsFd;
 use wayland_client::{protocol as client, Proxy};
@@ -21,6 +23,26 @@ use wayland_protocols::{
             },
             server::zwp_relative_pointer_v1::ZwpRelativePointerV1 as RelativePointerServer,
         },
+        tablet::zv2::{
+            client::{
+                zwp_tablet_pad_group_v2::{self, ZwpTabletPadGroupV2 as TabletPadGroupClient},
+                zwp_tablet_pad_ring_v2::{self, ZwpTabletPadRingV2 as TabletPadRingClient},
+                zwp_tablet_pad_strip_v2::{self, ZwpTabletPadStripV2 as TabletPadStripClient},
+                zwp_tablet_pad_v2::{self, ZwpTabletPadV2 as TabletPadClient},
+                zwp_tablet_seat_v2::{self, ZwpTabletSeatV2 as TabletSeatClient},
+                zwp_tablet_tool_v2::{self, ZwpTabletToolV2 as TabletToolClient},
+                zwp_tablet_v2::{self, ZwpTabletV2 as TabletClient},
+            },
+            server::{
+                zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2 as TabletPadGroupServer,
+                zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2 as TabletPadRingServer,
+                zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2 as TabletPadStripServer,
+                zwp_tablet_pad_v2::ZwpTabletPadV2 as TabletPadServer,
+                zwp_tablet_seat_v2::ZwpTabletSeatV2 as TabletSeatServer,
+                zwp_tablet_tool_v2::ZwpTabletToolV2 as TabletToolServer,
+                zwp_tablet_v2::ZwpTabletV2 as TabletServer,
+            },
+        },
     },
     xdg::{
         shell::client::{xdg_popup, xdg_surface, xdg_toplevel},
@@ -34,79 +56,6 @@ use wayland_server::protocol::{
     wl_buffer::WlBuffer, wl_keyboard::WlKeyboard, wl_output::WlOutput, wl_pointer::WlPointer,
     wl_seat::WlSeat, wl_touch::WlTouch,
 };
-
-/// Lord forgive me, I am a sinner, who's probably gonna sin again
-/// This macro takes an enum variant name and a list of the field names of the enum
-/// and/or closures that take an argument that must be named the same as the field name,
-/// and converts that into a destructured enum
-/// shunt_helper_enum!(Foo [a, |b| b.do_thing(), c]) -> Foo {a, b, c}
-macro_rules! shunt_helper_enum {
-    // No fields
-    ($variant:ident) => { $variant };
-    // Starting state: variant destructure
-    ($variant:ident $([$($body:tt)+])?) => {
-        shunt_helper_enum!($variant [$($($body)+)?] -> [])
-    };
-    // Add field to list
-    ($variant:ident [$field:ident $(, $($rest:tt)+)?] -> [$($body:tt)*]) => {
-        shunt_helper_enum!($variant [$($($rest)+)?] -> [$($body)*, $field])
-    };
-    // Add closure field to list
-    ($variant:ident [|$field:ident| $conv:expr $(, $($rest:tt)+)?] -> [$($body:tt)*]) => {
-        shunt_helper_enum!($variant [$($($rest)+)?] -> [$($body)*, $field])
-    };
-    // Finalize into enum variant
-    ($variant:ident [] -> [,$($body:tt)+]) => { $variant { $($body)+ } };
-}
-
-/// This does the same thing as shunt_helper_enum, except it transforms the fields into the given
-/// function/method call.
-/// shunt_helper_fn!({obj.foo} [a, |b| b.do_thing(), c]) -> obj.foo(a, b.do_thing(), c)
-macro_rules! shunt_helper_fn {
-    // No fields
-    ({$($fn:tt)+}) => { $($fn)+() };
-    // Starting state
-    ($fn:tt [$($body:tt)+]) => {
-        shunt_helper_fn!($fn [$($body)+] -> [])
-    };
-    // Add field to list
-    ($fn:tt [$field:ident $(, $($rest:tt)+)?] -> [$($body:tt)*]) => {
-        shunt_helper_fn!($fn [$($($rest)+)?] -> [$($body)*, $field])
-    };
-    // Add closure expression to list
-    ($fn:tt [|$field:ident| $conv:expr $(, $($rest:tt)+)?] -> [$($body:tt)*]) => {
-        shunt_helper_fn!($fn [$($($rest)+)?] -> [$($body)*, $conv])
-    };
-    // Finalize into function call
-    ({$($fn:tt)+} [] -> [,$($body:tt)+]) => { $($fn)+($($body)+) };
-}
-
-/// Takes an object, the name of a variable holding an event, the event type, and a list of the
-/// variants with their fields, and converts them into function calls on their arguments
-/// Event { field1, field2 } => obj.event(field1, field2)
-macro_rules! simple_event_shunt {
-    ($obj:expr, $event:ident: $event_type:path => [
-        $( $variant:ident $({ $($fields:tt)* })? ),+
-    ]) => {
-        {
-        use $event_type::*;
-        match $event {
-            $(
-                shunt_helper_enum!( $variant $( [ $($fields)* ] )? ) => {
-                    paste::paste! {
-                        shunt_helper_fn!( { $obj.[<$variant:snake>] } $( [ $($fields)* ] )? )
-                    }
-                }
-            )+
-            _ => log::warn!(concat!("unhandled ", stringify!($event_type), ": {:?}"), $event)
-        }
-        }
-    }
-}
-
-pub(crate) use shunt_helper_enum;
-pub(crate) use shunt_helper_fn;
-pub(crate) use simple_event_shunt;
 
 #[derive(Debug)]
 pub(crate) enum SurfaceEvents {
@@ -316,6 +265,41 @@ impl SurfaceData {
 pub struct GenericObject<Server: Resource, Client: Proxy> {
     pub server: Server,
     pub client: Client,
+}
+
+impl<S: Resource + 'static, C: Proxy + 'static> GenericObject<S, C> {
+    fn from_client<XC: XConnection>(client: C, state: &mut ServerState<XC>) -> &Self
+    where
+        Self: Into<WrappedObject>,
+        for<'a> &'a Self: TryFrom<&'a Object, Error = String>,
+        ServerState<XC>: wayland_server::Dispatch<S, ObjectKey>,
+        C::Event: Send + Into<ObjectEvent>,
+    {
+        let key = state.objects.insert_with_key(|key| {
+            let server = state
+                .client
+                .as_ref()
+                .unwrap()
+                .create_resource::<_, _, ServerState<XC>>(&state.dh, 1, key)
+                .unwrap();
+            let obj_key: &LateInitObjectKey<C> = client.data().unwrap();
+            obj_key.init(key);
+
+            Self { client, server }.into()
+        });
+
+        state.objects[key].as_ref()
+    }
+}
+
+pub trait GenericObjectExt {
+    type Server: Resource;
+    type Client: Proxy;
+}
+
+impl<S: Resource, C: Proxy> GenericObjectExt for GenericObject<S, C> {
+    type Server = S;
+    type Client = C;
 }
 
 pub type Buffer = GenericObject<WlBuffer, client::wl_buffer::WlBuffer>;
@@ -861,6 +845,186 @@ impl HandleEvent for ConfinedPointer {
             self.server, event: zwp_confined_pointer_v1::Event => [
                 Confined,
                 Unconfined
+            ]
+        }
+    }
+}
+
+pub type TabletSeat = GenericObject<TabletSeatServer, TabletSeatClient>;
+impl HandleEvent for TabletSeat {
+    type Event = zwp_tablet_seat_v2::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, state: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_tablet_seat_v2::Event => [
+                TabletAdded {
+                    |id| &GenericObject::from_client(id, state).server
+                },
+                ToolAdded {
+                    |id| &GenericObject::from_client(id, state).server
+                },
+                PadAdded {
+                    |id| &GenericObject::from_client(id, state).server
+                }
+            ]
+        }
+    }
+}
+
+pub type Tablet = GenericObject<TabletServer, TabletClient>;
+impl HandleEvent for Tablet {
+    type Event = zwp_tablet_v2::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, _: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_tablet_v2::Event => [
+                Name { name },
+                Id { vid, pid },
+                Path { path },
+                Done,
+                Removed
+            ]
+        }
+    }
+}
+
+pub type TabletPad = GenericObject<TabletPadServer, TabletPadClient>;
+impl HandleEvent for TabletPad {
+    type Event = zwp_tablet_pad_v2::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, state: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_tablet_pad_v2::Event => [
+                Group { |pad_group| &GenericObject::from_client(pad_group, state).server },
+                Path { path },
+                Buttons { buttons },
+                Done,
+                Button {
+                    time,
+                    button,
+                    |state| convert_wenum(state)
+                },
+                Enter {
+                    serial,
+                    |tablet| {
+                        let key: &LateInitObjectKey<TabletClient> = tablet.data().unwrap();
+                        let Some(tablet): Option<&Tablet> = state.objects.get(**key).map(|o| o.as_ref()) else {
+                            return;
+                        };
+                        &tablet.server
+                    },
+                    |surface| {
+                        let Some(surface_data) = state.get_server_surface_from_client(surface) else {
+                            return;
+                        };
+                        surface_data
+                    }
+                },
+                Leave {
+                    serial,
+                    |surface| {
+                        let Some(surface_data) = state.get_server_surface_from_client(surface) else {
+                            return;
+                        };
+                        surface_data
+                    }
+                },
+                Removed
+            ]
+        }
+    }
+}
+
+pub type TabletTool = GenericObject<TabletToolServer, TabletToolClient>;
+impl HandleEvent for TabletTool {
+    type Event = zwp_tablet_tool_v2::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, state: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_tablet_tool_v2::Event => [
+                Type { |tool_type| convert_wenum(tool_type) },
+                HardwareSerial { hardware_serial_hi, hardware_serial_lo },
+                HardwareIdWacom { hardware_id_hi, hardware_id_lo },
+                Capability { |capability| convert_wenum(capability) },
+                Done,
+                Removed,
+                ProximityIn {
+                    serial,
+                    |tablet| {
+                        let key: &LateInitObjectKey<TabletClient> = tablet.data().unwrap();
+                        let Some(tablet): Option<&Tablet> = state.objects.get(**key).map(|o| o.as_ref()) else {
+                            return;
+                        };
+                        &tablet.server
+                    },
+                    |surface| {
+                        let Some(surface_data) = state.get_server_surface_from_client(surface) else {
+                            return;
+                        };
+                        surface_data
+                    }
+                },
+                ProximityOut,
+                Down { serial },
+                Up,
+                Motion { x, y },
+                Pressure { pressure },
+                Tilt { tilt_x, tilt_y },
+                Rotation { degrees },
+                Slider { position },
+                Wheel { degrees, clicks },
+                Button { serial, button, |state| convert_wenum(state) },
+                Frame { time },
+            ]
+        }
+    }
+}
+
+pub type TabletPadGroup = GenericObject<TabletPadGroupServer, TabletPadGroupClient>;
+impl HandleEvent for TabletPadGroup {
+    type Event = zwp_tablet_pad_group_v2::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, state: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_tablet_pad_group_v2::Event => [
+                Buttons { buttons },
+                Ring { |ring| &GenericObject::from_client(ring, state).server },
+                Strip { |strip| &GenericObject::from_client(strip, state).server },
+                Modes { modes },
+                Done,
+                ModeSwitch { time, serial, mode }
+            ]
+        }
+    }
+}
+
+pub type TabletPadRing = GenericObject<TabletPadRingServer, TabletPadRingClient>;
+impl HandleEvent for TabletPadRing {
+    type Event = zwp_tablet_pad_ring_v2::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, _: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_tablet_pad_ring_v2::Event => [
+                Source { |source| convert_wenum(source) },
+                Angle { degrees },
+                Stop,
+                Frame { time }
+            ]
+        }
+    }
+}
+
+pub type TabletPadStrip = GenericObject<TabletPadStripServer, TabletPadStripClient>;
+impl HandleEvent for TabletPadStrip {
+    type Event = zwp_tablet_pad_strip_v2::Event;
+
+    fn handle_event<C: XConnection>(&mut self, event: Self::Event, _: &mut ServerState<C>) {
+        simple_event_shunt! {
+            self.server, event: zwp_tablet_pad_strip_v2::Event => [
+                Source { |source| convert_wenum(source) },
+                Position { position },
+                Stop,
+                Frame { time }
             ]
         }
     }

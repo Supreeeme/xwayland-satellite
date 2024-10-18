@@ -28,6 +28,7 @@ use wayland_protocols::{
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
         pointer_constraints::zv1::server::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
         relative_pointer::zv1::server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+        tablet::zv2::server::zwp_tablet_manager_v2::ZwpTabletManagerV2,
         viewporter::server as s_vp,
     },
     xdg::{
@@ -49,7 +50,7 @@ use wayland_server::{
         wl_callback::WlCallback, wl_compositor::WlCompositor, wl_output::WlOutput, wl_seat::WlSeat,
         wl_shm::WlShm, wl_surface::WlSurface,
     },
-    DisplayHandle, Resource, WEnum,
+    Client, DisplayHandle, Resource, WEnum,
 };
 use wl_drm::{client::wl_drm::WlDrm as WlDrmClient, server::wl_drm::WlDrm as WlDrmServer};
 use xcb::x;
@@ -362,12 +363,20 @@ pub(crate) enum Object {
     Drm(Drm),
     Touch(Touch),
     ConfinedPointer(ConfinedPointer),
-    LockedPointer(LockedPointer)
+    LockedPointer(LockedPointer),
+    TabletSeat(TabletSeat),
+    Tablet(Tablet),
+    TabletTool(TabletTool),
+    TabletPad(TabletPad),
+    TabletPadGroup(TabletPadGroup),
+    TabletPadRing(TabletPadRing),
+    TabletPadStrip(TabletPadStrip)
 }
 
 }
 
-struct WrappedObject(Option<Object>);
+#[derive(Default)]
+pub(crate) struct WrappedObject(Option<Object>);
 
 impl<T> From<T> for WrappedObject
 where
@@ -450,7 +459,8 @@ fn handle_globals<'a, C: XConnection>(
             s_dmabuf::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
             ZxdgOutputManagerV1,
             s_vp::wp_viewporter::WpViewporter,
-            ZwpPointerConstraintsV1
+            ZwpPointerConstraintsV1,
+            ZwpTabletManagerV2
         ];
     }
 }
@@ -467,6 +477,7 @@ pub struct ServerState<C: XConnection> {
     windows: HashMap<x::Window, WindowData>,
 
     qh: ClientQueueHandle,
+    client: Option<Client>,
     to_focus: Option<x::Window>,
     last_focused_toplevel: Option<x::Window>,
     last_hovered: Option<x::Window>,
@@ -511,6 +522,7 @@ impl<C: XConnection> ServerState<C> {
         Self {
             windows: HashMap::new(),
             clientside,
+            client: None,
             atoms: None,
             qh,
             dh,
@@ -531,9 +543,11 @@ impl<C: XConnection> ServerState<C> {
     }
 
     pub fn connect(&mut self, connection: UnixStream) {
-        self.dh
-            .insert_client(connection, std::sync::Arc::new(()))
-            .unwrap();
+        self.client = Some(
+            self.dh
+                .insert_client(connection, std::sync::Arc::new(()))
+                .unwrap(),
+        );
     }
 
     pub fn set_x_connection(&mut self, connection: C) {
@@ -800,8 +814,7 @@ impl<C: XConnection> ServerState<C> {
     pub fn handle_clientside_events(&mut self) {
         self.handle_new_globals();
 
-        let client_events = std::mem::take(&mut self.clientside.globals.events);
-        for (key, event) in client_events {
+        for (key, event) in self.clientside.read_events() {
             let Some(object) = &mut self.objects.get_mut(key) else {
                 warn!("could not handle clientside event: stale surface");
                 continue;
