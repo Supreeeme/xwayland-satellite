@@ -92,7 +92,7 @@ struct Compositor {
     compositor: TestObject<WlCompositor>,
     shm: TestObject<WlShm>,
     shell: TestObject<XwaylandShellV1>,
-    seat: TestObject<WlSeat>
+    seat: TestObject<WlSeat>,
 }
 
 }
@@ -340,6 +340,12 @@ impl TestFixture {
             }
         }
 
+        // Activate keyboard for focus.
+        TestObject::<WlKeyboard>::from_request(
+            &ret.seat.as_ref().expect("Seat global missing").obj,
+            wl_seat::Request::GetKeyboard {},
+        );
+
         ret.into()
     }
 
@@ -566,6 +572,7 @@ impl TestFixture {
 
         self.testwl
             .configure_toplevel(id, 100, 100, vec![xdg_toplevel::State::Activated]);
+        self.testwl.focus_toplevel(id);
         self.run();
 
         {
@@ -1087,7 +1094,6 @@ fn window_group_properties() {
 #[test]
 fn copy_from_x11() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
     let win = unsafe { Window::new(1) };
     let (_surface, _id) = f.create_toplevel(&comp, win);
 
@@ -1303,7 +1309,8 @@ fn output_offset() {
         );
     }
     f.testwl
-        .configure_toplevel(t_id, 100, 100, vec![xdg_toplevel::State::Activated]);
+        .configure_toplevel(t_id, 100, 100, vec![]);
+    f.testwl.focus_toplevel(t_id);
     f.run();
 
     {

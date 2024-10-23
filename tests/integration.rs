@@ -179,6 +179,7 @@ impl Fixture {
 
         self.testwl
             .configure_toplevel(surface, 100, 100, vec![xdg_toplevel::State::Activated]);
+        self.testwl.focus_toplevel(surface);
         self.wait_and_dispatch();
         let geometry = connection
             .wait_for_reply(connection.send_request(&x::GetGeometry {

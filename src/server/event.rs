@@ -253,15 +253,6 @@ impl SurfaceData {
                 states,
             } => {
                 debug!("configuring toplevel {width}x{height}, {states:?}");
-                let activated = states.contains(&(u32::from(xdg_toplevel::State::Activated) as u8));
-
-                if activated {
-                    // Technically this is wrong - activated doesn't necessarily mean focused
-                    // - but it works and no one's complained yet.
-                    // TODO: base focus on keyboard enter instead.
-                    state.to_focus = Some(self.window.unwrap());
-                }
-
                 if let Some(SurfaceRole::Toplevel(Some(toplevel))) = &mut self.role {
                     let prev_fs = toplevel.fullscreen;
                     toplevel.fullscreen =
@@ -539,9 +530,11 @@ impl HandleEvent for Keyboard {
                 surface,
                 keys,
             } => {
-                state.last_kb_serial = Some(serial);
-                if let Some(surface_data) = state.get_server_surface_from_client(surface) {
-                    self.server.enter(serial, surface_data, keys);
+                let key: ObjectKey = surface.data().copied().unwrap();
+                if let Some(data) = state.objects.get(key).map(|o| <_ as AsRef<SurfaceData>>::as_ref(o)) {
+                    state.last_kb_serial = Some(serial);
+                    state.to_focus = Some(data.window.unwrap());
+                    self.server.enter(serial, &data.server, keys);
                 }
             }
             _ => simple_event_shunt! {

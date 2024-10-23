@@ -161,6 +161,11 @@ struct Output {
     xdg: Option<ZxdgOutputV1>,
 }
 
+struct KeyboardState {
+    keyboard: WlKeyboard,
+    current_focus: Option<SurfaceId>,
+}
+
 struct State {
     surfaces: HashMap<SurfaceId, SurfaceData>,
     outputs: HashMap<WlOutput, Output>,
@@ -171,7 +176,7 @@ struct State {
     last_output: Option<WlOutput>,
     callbacks: Vec<WlCallback>,
     pointer: Option<WlPointer>,
-    keyboard: Option<WlKeyboard>,
+    keyboard: Option<KeyboardState>,
     configure_serial: u32,
     selection: Option<WlDataSource>,
     data_device_man: Option<WlDataDeviceManager>,
@@ -209,15 +214,6 @@ impl State {
         states: Vec<xdg_toplevel::State>,
     ) {
         let last_serial = self.configure_serial;
-        if states.contains(&xdg_toplevel::State::Activated) {
-            if let Some(kb) = &self.keyboard {
-                kb.enter(
-                    last_serial,
-                    &self.surfaces[&surface_id].surface,
-                    Vec::default(),
-                );
-            }
-        }
         let toplevel = self.get_toplevel(surface_id);
         toplevel.states = states.clone();
         let states: Vec<u8> = states
@@ -227,6 +223,38 @@ impl State {
         toplevel.toplevel.configure(width, height, states);
         toplevel.xdg.configure(last_serial);
         self.configure_serial += 1;
+    }
+
+    #[track_caller]
+    fn focus_toplevel(&mut self, surface_id: SurfaceId) {
+        let KeyboardState {
+            keyboard,
+            current_focus,
+        } = self.keyboard.as_mut().expect("Keyboard should be created");
+
+        if let Some(id) = current_focus {
+            keyboard.leave(self.configure_serial, &self.surfaces[id].surface);
+        }
+
+        keyboard.enter(
+            self.configure_serial,
+            &self.surfaces[&surface_id].surface,
+            Vec::default(),
+        );
+
+        *current_focus = Some(surface_id);
+    }
+
+    #[track_caller]
+    fn unfocus_toplevel(&mut self) {
+        let KeyboardState {
+            current_focus,
+            keyboard,
+        } = self.keyboard.as_mut().expect("Keyboard should be created");
+
+        if let Some(id) = current_focus.take() {
+            keyboard.leave(self.configure_serial, &self.surfaces[&id].surface);
+        }
     }
 
     #[track_caller]
@@ -430,6 +458,18 @@ impl Server {
     ) {
         self.state
             .configure_toplevel(surface_id, width, height, states);
+        self.display.flush_clients().unwrap();
+    }
+
+    #[track_caller]
+    pub fn focus_toplevel(&mut self, surface_id: SurfaceId) {
+        self.state.focus_toplevel(surface_id);
+        self.display.flush_clients().unwrap();
+    }
+
+    #[track_caller]
+    pub fn unfocus_toplevel(&mut self) {
+        self.state.unfocus_toplevel();
         self.display.flush_clients().unwrap();
     }
 
@@ -825,7 +865,10 @@ impl Dispatch<WlSeat, ()> for State {
                 state.pointer = Some(data_init.init(id, ()));
             }
             wl_seat::Request::GetKeyboard { id } => {
-                state.keyboard = Some(data_init.init(id, ()));
+                state.keyboard = Some(KeyboardState {
+                    keyboard: data_init.init(id, ()),
+                    current_focus: None,
+                });
             }
             wl_seat::Request::Release => {}
             other => todo!("unhandled request {other:?}"),
@@ -1317,9 +1360,16 @@ impl Dispatch<WlSurface, ()> for State {
             }
             Commit => {}
             Destroy => {
-                state
-                    .surfaces
-                    .remove(&SurfaceId(resource.id().protocol_id()));
+                let id = SurfaceId(resource.id().protocol_id());
+                if let Some(kb) = state
+                    .keyboard
+                    .as_mut()
+                    .filter(|kb| kb.current_focus == Some(id))
+                {
+                    kb.keyboard.leave(state.configure_serial, resource);
+                    kb.current_focus.take();
+                }
+                state.surfaces.remove(&id);
             }
             SetInputRegion { .. } => {}
             SetBufferScale { .. } => {}
