@@ -6,10 +6,9 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    naersk.url = "github:nix-community/naersk";
   };
 
-  outputs = { self, nixpkgs, rust-overlay, naersk, flake-utils }:
+  outputs = { self, nixpkgs, rust-overlay, flake-utils }:
     let systems = [ "x86_64-linux" "aarch64-linux" ];
     in flake-utils.lib.eachSystem systems (system:
       let
@@ -17,35 +16,59 @@
         pkgs = import nixpkgs { inherit system overlays; };
         lib = pkgs.lib;
 
-        naersk' = pkgs.callPackage naersk {
-          cargo = pkgs.rust-bin.stable.latest.default;
-          rustc = pkgs.rust-bin.stable.latest.default;
-        };
+        cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+        cargoPackageVersion = cargoToml.package.version;
 
-        buildXwaylandSatellite = { withSystemd ? false }: naersk'.buildPackage {
-          src = ./.;
+        commitHash = self.shortRev or self.dirtyShortRev or "unknown";
 
-          nativeBuildInputs = with pkgs; [
-            rustPlatform.bindgenHook
-            rust-bin.stable.latest.default
-            pkg-config
+        version = "${cargoPackageVersion}-unstable-${commitHash}";
 
-            xcb-util-cursor
-            xorg.libxcb
+        buildXwaylandSatellite = { withSystemd ? true, ... } @ args:
+          pkgs.rustPlatform.buildRustPackage (rec {
+            pname = "xwayland-satellite";
+            inherit version;
 
-            makeWrapper
-          ] ++ lib.optional withSystemd pkgs.systemd;
+            src = self;
 
-          buildInputs = [ pkgs.xwayland ];
+            cargoLock = {
+              lockFile = "${src}/Cargo.lock";
+              allowBuiltinFetchGit = true;
+            };
 
-          cargoBuildOptions = opts: opts ++ lib.optional withSystemd "--features systemd";
+            nativeBuildInputs = with pkgs; [
+              rustPlatform.bindgenHook
+              pkg-config
+              makeWrapper
+            ];
 
-          postInstall = ''
-            wrapProgram $out/bin/xwayland-satellite \
-              --prefix PATH : ${pkgs.xwayland}/bin
-          '';
-        };
+            buildInputs = with pkgs; [
+              xorg.libxcb
+              xorg.xcbutilcursor
+            ];
 
+            buildFeatures = lib.optionals withSystemd [ "systemd" ];
+
+            postInstall = ''
+              ${lib.optionalString withSystemd ''
+                install -Dm0644 resources/xwayland-satellite.service -t $out/lib/systemd/user
+                substituteInPlace $out/lib/systemd/user/xwayland-satellite.service \
+                  --replace '/usr/local/bin/xwayland-satellite' "$out/bin/xwayland-satellite"
+              ''}
+              wrapProgram $out/bin/xwayland-satellite \
+                --prefix PATH : "${lib.makeBinPath [ pkgs.xwayland ]}"
+            '';
+
+            doCheck = false;
+
+            meta = with lib; {
+              description = "Xwayland outside your Wayland";
+              homepage = "https://github.com/Supreeeme/xwayland-satellite";
+              license = licenses.mpl20;
+              platforms = platforms.linux;
+            };
+          });
+
+        xwayland-satellite = pkgs.callPackage buildXwaylandSatellite { };
       in
       {
         devShell = (pkgs.mkShell.override { stdenv = pkgs.clangStdenv; }) {
@@ -60,11 +83,8 @@
           ];
         };
 
-        packages = rec {
-          xwayland-satellite-nosd = buildXwaylandSatellite { withSystemd = false; };
-
-          xwayland-satellite = buildXwaylandSatellite { withSystemd = true; };
-
+        packages = {
+          xwayland-satellite = xwayland-satellite;
           default = xwayland-satellite;
         };
       });
