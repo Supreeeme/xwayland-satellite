@@ -1308,8 +1308,7 @@ fn output_offset() {
             data.role
         );
     }
-    f.testwl
-        .configure_toplevel(t_id, 100, 100, vec![]);
+    f.testwl.configure_toplevel(t_id, 100, 100, vec![]);
     f.testwl.focus_toplevel(t_id);
     f.run();
 

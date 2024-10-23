@@ -531,7 +531,11 @@ impl HandleEvent for Keyboard {
                 keys,
             } => {
                 let key: ObjectKey = surface.data().copied().unwrap();
-                if let Some(data) = state.objects.get(key).map(|o| <_ as AsRef<SurfaceData>>::as_ref(o)) {
+                if let Some(data) = state
+                    .objects
+                    .get(key)
+                    .map(|o| <_ as AsRef<SurfaceData>>::as_ref(o))
+                {
                     state.last_kb_serial = Some(serial);
                     state.to_focus = Some(data.window.unwrap());
                     self.server.enter(serial, &data.server, keys);
