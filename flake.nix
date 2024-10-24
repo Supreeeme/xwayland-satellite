@@ -26,7 +26,7 @@
           { lib
           , rustPlatform
           , pkg-config
-          , makeWrapper
+          , makeBinaryWrapper
           , libxcb
           , xcb-util-cursor
           , xwayland
@@ -47,7 +47,7 @@
             nativeBuildInputs = [
               rustPlatform.bindgenHook
               pkg-config
-              makeWrapper
+              makeBinaryWrapper
             ];
 
             buildInputs = [
@@ -83,7 +83,7 @@
           lib = pkgs.lib;
           rustPlatform = pkgs.rustPlatform;
           pkg-config = pkgs.pkg-config;
-          makeWrapper = pkgs.makeWrapper;
+          makeBinaryWrapper = pkgs.makeBinaryWrapper;
           libxcb = pkgs.xorg.libxcb;
           xcb-util-cursor = pkgs.xcb-util-cursor;
           xwayland = pkgs.xwayland;
