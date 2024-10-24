@@ -45,7 +45,7 @@
               xorg.libxcb
               xorg.xcbutilcursor
             ];
-
+           buildNoDefaultFeatures = true;
             buildFeatures = lib.optionals withSystemd [ "systemd" ];
 
             postInstall = ''
