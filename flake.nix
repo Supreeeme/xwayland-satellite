@@ -56,15 +56,18 @@
             ];
 
             buildNoDefaultFeatures = true;
-
             buildFeatures = lib.optionals withSystemd [ "systemd" ];
 
-            postInstall = ''
-              ${lib.optionalString withSystemd ''
-                install -Dm0644 resources/xwayland-satellite.service -t $out/lib/systemd/user
-                substituteInPlace $out/lib/systemd/user/xwayland-satellite.service \
-                  --replace-fail '/usr/local/bin/xwayland-satellite' "$out/bin/xwayland-satellite"
-              ''}
+            postPatch = ''
+              substituteInPlace resources/xwayland-satellite.service \
+                --replace-fail '/usr/local/bin' "$out/bin"
+            '';
+
+            postInstall = lib.optionalString withSystemd ''
+              install -Dm0644 resources/xwayland-satellite.service -t $out/lib/systemd/user
+            '';
+
+            postFixup = ''
               wrapProgram $out/bin/xwayland-satellite \
                 --prefix PATH : "${lib.makeBinPath [ xwayland ]}"
             '';
