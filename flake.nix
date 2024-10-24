@@ -28,7 +28,7 @@
           , pkg-config
           , makeWrapper
           , libxcb
-          , xcbutilcursor
+          , xcb-util-cursor
           , xwayland
           , withSystemd ? true
           }:
@@ -52,7 +52,7 @@
 
             buildInputs = [
               libxcb
-              xcbutilcursor
+              xcb-util-cursor
             ];
 
             buildNoDefaultFeatures = true;
@@ -85,7 +85,7 @@
           pkg-config = pkgs.pkg-config;
           makeWrapper = pkgs.makeWrapper;
           libxcb = pkgs.xorg.libxcb;
-          xcbutilcursor = pkgs.xorg.xcbutilcursor;
+          xcb-util-cursor = pkgs.xcb-util-cursor;
           xwayland = pkgs.xwayland;
         };
       in
