@@ -23,8 +23,17 @@
 
         version = "${cargoPackageVersion}-${commitHash}";
 
-        buildXwaylandSatellite = { withSystemd ? true, ... } @ args:
-          pkgs.rustPlatform.buildRustPackage (rec {
+        buildXwaylandSatellite =
+          { withSystemd ? true
+          , rustPlatform
+          , pkg-config
+          , makeWrapper
+          , libxcb
+          , xcbutilcursor
+          , xwayland
+          }:
+
+          rustPlatform.buildRustPackage rec {
             pname = "xwayland-satellite";
             inherit version;
 
@@ -35,17 +44,19 @@
               allowBuiltinFetchGit = true;
             };
 
-            nativeBuildInputs = with pkgs; [
+            nativeBuildInputs = [
               rustPlatform.bindgenHook
               pkg-config
               makeWrapper
             ];
 
-            buildInputs = with pkgs; [
-              xorg.libxcb
-              xorg.xcbutilcursor
+            buildInputs = [
+              libxcb
+              xcbutilcursor
             ];
-           buildNoDefaultFeatures = true;
+
+            buildNoDefaultFeatures = true;
+
             buildFeatures = lib.optionals withSystemd [ "systemd" ];
 
             postInstall = ''
@@ -55,7 +66,7 @@
                   --replace-fail '/usr/local/bin/xwayland-satellite' "$out/bin/xwayland-satellite"
               ''}
               wrapProgram $out/bin/xwayland-satellite \
-                --prefix PATH : "${lib.makeBinPath [ pkgs.xwayland ]}"
+                --prefix PATH : "${lib.makeBinPath [ xwayland ]}"
             '';
 
             doCheck = false;
@@ -66,9 +77,16 @@
               license = licenses.mpl20;
               platforms = platforms.linux;
             };
-          });
+          };
 
-        xwayland-satellite = pkgs.callPackage buildXwaylandSatellite { };
+        xwayland-satellite = pkgs.callPackage buildXwaylandSatellite {
+          rustPlatform = pkgs.rustPlatform;
+          pkg-config = pkgs.pkg-config;
+          makeWrapper = pkgs.makeWrapper;
+          libxcb = pkgs.xorg.libxcb;
+          xcbutilcursor = pkgs.xorg.xcbutilcursor;
+          xwayland = pkgs.xwayland;
+        };
       in
       {
         devShell = (pkgs.mkShell.override { stdenv = pkgs.clangStdenv; }) {
