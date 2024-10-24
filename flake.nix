@@ -14,7 +14,6 @@
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
-        lib = pkgs.lib;
 
         cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
         cargoPackageVersion = cargoToml.package.version;
@@ -24,13 +23,14 @@
         version = "${cargoPackageVersion}-${commitHash}";
 
         buildXwaylandSatellite =
-          { withSystemd ? true
+          { lib
           , rustPlatform
           , pkg-config
           , makeWrapper
           , libxcb
           , xcbutilcursor
           , xwayland
+          , withSystemd ? true
           }:
 
           rustPlatform.buildRustPackage rec {
@@ -80,6 +80,7 @@
           };
 
         xwayland-satellite = pkgs.callPackage buildXwaylandSatellite {
+          lib = pkgs.lib;
           rustPlatform = pkgs.rustPlatform;
           pkg-config = pkgs.pkg-config;
           makeWrapper = pkgs.makeWrapper;
