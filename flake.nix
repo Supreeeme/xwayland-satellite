@@ -52,7 +52,7 @@
               ${lib.optionalString withSystemd ''
                 install -Dm0644 resources/xwayland-satellite.service -t $out/lib/systemd/user
                 substituteInPlace $out/lib/systemd/user/xwayland-satellite.service \
-                  --replace '/usr/local/bin/xwayland-satellite' "$out/bin/xwayland-satellite"
+                  --replace-fail '/usr/local/bin/xwayland-satellite' "$out/bin/xwayland-satellite"
               ''}
               wrapProgram $out/bin/xwayland-satellite \
                 --prefix PATH : "${lib.makeBinPath [ pkgs.xwayland ]}"
