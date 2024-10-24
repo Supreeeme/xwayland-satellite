@@ -21,7 +21,7 @@
 
         commitHash = self.shortRev or self.dirtyShortRev or "unknown";
 
-        version = "${cargoPackageVersion}-unstable-${commitHash}";
+        version = "${cargoPackageVersion}-${commitHash}";
 
         buildXwaylandSatellite = { withSystemd ? true, ... } @ args:
           pkgs.rustPlatform.buildRustPackage (rec {
