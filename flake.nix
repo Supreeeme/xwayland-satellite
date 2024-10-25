@@ -82,15 +82,7 @@
             };
           };
 
-        xwayland-satellite = pkgs.callPackage buildXwaylandSatellite {
-          lib = pkgs.lib;
-          rustPlatform = pkgs.rustPlatform;
-          pkg-config = pkgs.pkg-config;
-          makeBinaryWrapper = pkgs.makeBinaryWrapper;
-          libxcb = pkgs.xorg.libxcb;
-          xcb-util-cursor = pkgs.xcb-util-cursor;
-          xwayland = pkgs.xwayland;
-        };
+        xwayland-satellite = pkgs.callPackage buildXwaylandSatellite { };
       in
       {
         devShell = (pkgs.mkShell.override { stdenv = pkgs.clangStdenv; }) {
