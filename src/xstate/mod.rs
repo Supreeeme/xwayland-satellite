@@ -830,19 +830,35 @@ impl super::XConnection for Arc<xcb::Connection> {
     }
 
     fn close_window(&mut self, window: x::Window, atoms: Self::ExtraData) {
-        let data = [atoms.wm_delete_window.resource_id(), 0, 0, 0, 0];
-        let event = &x::ClientMessageEvent::new(
+        let cookie = self.send_request(&x::GetProperty {
             window,
-            atoms.wm_protocols,
-            x::ClientMessageData::Data32(data),
-        );
+            delete: false,
+            property: atoms.wm_protocols,
+            r#type: x::ATOM_ATOM,
+            long_offset: 0,
+            long_length: 10,
+        });
+        let reply = unwrap_or_skip_bad_window!(self.wait_for_reply(cookie));
 
-        unwrap_or_skip_bad_window!(self.send_and_check_request(&x::SendEvent {
-            destination: x::SendEventDest::Window(window),
-            propagate: false,
-            event_mask: x::EventMask::empty(),
-            event,
-        }));
+        if reply.value::<x::Atom>().contains(&atoms.wm_delete_window) {
+            let data = [atoms.wm_delete_window.resource_id(), 0, 0, 0, 0];
+            let event = &x::ClientMessageEvent::new(
+                window,
+                atoms.wm_protocols,
+                x::ClientMessageData::Data32(data),
+            );
+
+            unwrap_or_skip_bad_window!(self.send_and_check_request(&x::SendEvent {
+                destination: x::SendEventDest::Window(window),
+                propagate: false,
+                event_mask: x::EventMask::empty(),
+                event,
+            }));
+        } else {
+            unwrap_or_skip_bad_window!(self.send_and_check_request(&x::KillClient {
+                resource: window.resource_id()
+            }))
+        }
     }
 
     fn raise_to_top(&mut self, window: x::Window) {

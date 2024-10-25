@@ -12,7 +12,7 @@ use wayland_protocols::xdg::shell::server::xdg_toplevel;
 use wayland_server::Resource;
 use xcb::{x, Xid};
 use xwayland_satellite as xwls;
-use xwayland_satellite::xstate::{WmHintsFlags, WmSizeHintsFlags};
+use xwayland_satellite::xstate::WmSizeHintsFlags;
 
 #[derive(Default)]
 struct TestDataInner {
@@ -195,12 +195,18 @@ impl Fixture {
 
     /// Triggers a Wayland side toplevel Close event and processes the corresponding
     /// X11 side WM_DELETE_WINDOW client message
-    fn close_toplevel(
+    fn wm_delete_window(
         &mut self,
         connection: &mut Connection,
         window: x::Window,
         surface: testwl::SurfaceId,
     ) {
+        connection.set_property(
+            window,
+            x::ATOM_ATOM,
+            connection.atoms.wm_protocols,
+            &[connection.atoms.wm_delete_window],
+        );
         self.testwl.close_toplevel(surface);
         connection.await_event();
         let event = connection
@@ -443,7 +449,7 @@ fn toplevel_flow() {
         Some(testwl::Vec2 { x: 150, y: 200 })
     );
 
-    f.close_toplevel(&mut connection, window, surface);
+    f.wm_delete_window(&mut connection, window, surface);
 
     // Simulate killing client
     drop(connection);
@@ -498,7 +504,7 @@ fn input_focus() {
         .focus();
     assert_eq!(win, focus);
 
-    f.close_toplevel(&mut connection, win, surface);
+    f.wm_delete_window(&mut connection, win, surface);
 }
 
 #[test]
@@ -986,4 +992,32 @@ fn funny_window_title() {
 
     let data = f.testwl.get_surface_data(surface).unwrap();
     assert_eq!(data.toplevel().title, Some("title".into()));
+}
+
+#[test]
+fn close_window() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    connection.map_window(window);
+    f.wait_and_dispatch();
+    let surface = f
+        .testwl
+        .last_created_surface_id()
+        .expect("No surface created");
+    f.configure_and_verify_new_toplevel(&mut connection, window, surface);
+    f.wm_delete_window(&mut connection, window, surface);
+
+    connection
+        .send_and_check_request(&x::DeleteProperty {
+            window,
+            property: connection.atoms.wm_protocols,
+        })
+        .unwrap();
+    f.testwl.close_toplevel(surface);
+    connection.await_event();
+    f.wait_and_dispatch();
+
+    // Connection should no longer work (KillClient)
+    assert!(connection.poll_for_event().is_err());
 }
