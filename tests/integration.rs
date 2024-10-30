@@ -234,6 +234,7 @@ impl Fixture {
 xcb::atoms_struct! {
     struct Atoms {
         wm_protocols => b"WM_PROTOCOLS",
+        net_active_window => b"_NET_ACTIVE_WINDOW",
         wm_delete_window => b"WM_DELETE_WINDOW",
         clipboard => b"CLIPBOARD",
         targets => b"TARGETS",
@@ -489,22 +490,65 @@ fn input_focus() {
     let mut f = Fixture::new();
     let mut connection = Connection::new(&f.display);
 
-    let win = connection.new_window(connection.root, 0, 0, 20, 20, false);
-    connection.map_window(win);
+    let conn = std::cell::RefCell::new(&mut connection);
+    let check_focus = |win: x::Window| {
+        let connection = conn.borrow();
+        let focus = connection
+            .wait_for_reply(connection.send_request(&x::GetInputFocus {}))
+            .unwrap()
+            .focus();
+        assert_eq!(win, focus);
+
+        let reply = connection
+            .wait_for_reply(connection.send_request(&x::GetProperty {
+                delete: false,
+                window: connection.root,
+                property: connection.atoms.net_active_window,
+                r#type: x::ATOM_WINDOW,
+                long_offset: 0,
+                long_length: 1,
+            }))
+            .unwrap();
+
+        assert_eq!(&[win], reply.value::<x::Window>());
+    };
+
+    let mut create_win = || {
+        let mut connection = conn.borrow_mut();
+        let win = connection.new_window(connection.root, 0, 0, 20, 20, false);
+        connection.map_window(win);
+        f.wait_and_dispatch();
+        let surface = f
+            .testwl
+            .last_created_surface_id()
+            .expect("No surface created!");
+        f.configure_and_verify_new_toplevel(&mut connection, win, surface);
+        (win, surface)
+    };
+
+    let (win1, surface1) = create_win();
+    check_focus(win1);
+    let (win2, surface2) = create_win();
+    check_focus(win2);
+
+    f.testwl.focus_toplevel(surface1);
+    // Seems the event doesn't get caught by wait_and_dispatch...
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    check_focus(win1);
+
+    f.testwl.unfocus_toplevel();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    check_focus(x::WINDOW_NONE);
+
+    f.testwl.focus_toplevel(surface2);
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    check_focus(win2);
+
+    conn.borrow().destroy_window(win2);
     f.wait_and_dispatch();
-    let surface = f
-        .testwl
-        .last_created_surface_id()
-        .expect("No surface created!");
-    f.configure_and_verify_new_toplevel(&mut connection, win, surface);
+    check_focus(x::WINDOW_NONE);
 
-    let focus = connection
-        .wait_for_reply(connection.send_request(&x::GetInputFocus {}))
-        .unwrap()
-        .focus();
-    assert_eq!(win, focus);
-
-    f.wm_delete_window(&mut connection, win, surface);
+    f.wm_delete_window(&mut connection, win1, surface1);
 }
 
 #[test]

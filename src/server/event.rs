@@ -525,24 +525,30 @@ impl HandleEvent for Keyboard {
                     self.server.enter(serial, &data.server, keys);
                 }
             }
+            client::wl_keyboard::Event::Leave { serial, surface } => {
+                if !surface.is_alive() {
+                    return;
+                }
+                let key: ObjectKey = surface.data().copied().unwrap();
+                if let Some(data) = state
+                    .objects
+                    .get(key)
+                    .map(|o| <_ as AsRef<SurfaceData>>::as_ref(o))
+                {
+                    if state.to_focus == Some(data.window.unwrap()) {
+                        state.to_focus.take();
+                    } else {
+                        state.unfocus = true;
+                    }
+                    self.server.leave(serial, &data.server);
+                }
+            }
             _ => simple_event_shunt! {
                 self.server, event: client::wl_keyboard::Event => [
                     Keymap {
                         |format| convert_wenum(format),
                         |fd| fd.as_fd(),
                         size
-                    },
-                    Leave {
-                        serial,
-                        |surface| {
-                            if !surface.is_alive() {
-                                return;
-                            }
-                            let Some(surface_data) = state.get_server_surface_from_client(surface) else {
-                                return;
-                            };
-                            surface_data
-                        }
                     },
                     Key {
                         serial,

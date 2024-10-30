@@ -294,13 +294,6 @@ impl XState {
                 xcb::Event::X(x::Event::UnmapNotify(e)) => {
                     trace!("unmap event: {:?}", e.event());
                     server_state.unmap_window(e.window());
-                    unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
-                        &x::ChangeWindowAttributes {
-                            window: e.window(),
-                            value_list: &[x::Cw::EventMask(x::EventMask::empty())],
-                        }
-                    ));
-
                     let active_win = self
                         .connection
                         .wait_for_reply(self.get_property_cookie(
@@ -313,16 +306,19 @@ impl XState {
 
                     let active_win: &[x::Window] = active_win.value();
                     if active_win[0] == e.window() {
-                        self.connection
-                            .send_and_check_request(&x::ChangeProperty {
-                                mode: x::PropMode::Replace,
-                                window: self.root,
-                                property: self.atoms.active_win,
-                                r#type: x::ATOM_WINDOW,
-                                data: &[x::Window::none()],
-                            })
-                            .unwrap();
+                        <_ as super::XConnection>::focus_window(
+                            &mut self.connection,
+                            x::Window::none(),
+                            self.atoms.clone(),
+                        );
                     }
+
+                    unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
+                        &x::ChangeWindowAttributes {
+                            window: e.window(),
+                            value_list: &[x::Cw::EventMask(x::EventMask::empty())],
+                        }
+                    ));
                 }
                 xcb::Event::X(x::Event::DestroyNotify(e)) => {
                     debug!("destroying window {:?}", e.window());
