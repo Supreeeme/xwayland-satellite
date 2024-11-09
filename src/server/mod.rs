@@ -575,7 +575,10 @@ impl<C: XConnection> ServerState<C> {
     }
 
     pub fn set_win_title(&mut self, window: x::Window, name: WmName) {
-        let win = self.windows.get_mut(&window).unwrap();
+        let Some(win) = self.windows.get_mut(&window) else {
+            debug!("not setting title for unknown window {window:?}");
+            return;
+        };
 
         let new_title = match &mut win.attrs.title {
             Some(w) => {
@@ -607,7 +610,10 @@ impl<C: XConnection> ServerState<C> {
     }
 
     pub fn set_win_class(&mut self, window: x::Window, class: String) {
-        let win = self.windows.get_mut(&window).unwrap();
+        let Some(win) = self.windows.get_mut(&window) else {
+            debug!("not setting class for unknown window {window:?}");
+            return;
+        };
 
         let class = win.attrs.class.insert(class);
         if let Some(key) = win.surface_key {
@@ -623,12 +629,18 @@ impl<C: XConnection> ServerState<C> {
     }
 
     pub fn set_win_hints(&mut self, window: x::Window, hints: WmHints) {
-        let win = self.windows.get_mut(&window).unwrap();
+        let Some(win) = self.windows.get_mut(&window) else {
+            debug!("not setting hints for unknown window {window:?}");
+            return;
+        };
         win.attrs.group = hints.window_group;
     }
 
     pub fn set_size_hints(&mut self, window: x::Window, hints: WmNormalHints) {
-        let win = self.windows.get_mut(&window).unwrap();
+        let Some(win) = self.windows.get_mut(&window) else {
+            debug!("not setting size hints for unknown window {window:?}");
+            return;
+        };
 
         if win.attrs.size_hints.is_none() || *win.attrs.size_hints.as_ref().unwrap() != hints {
             debug!("setting {window:?} hints {hints:?}");
@@ -669,7 +681,10 @@ impl<C: XConnection> ServerState<C> {
     }
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
-        let win = self.windows.get_mut(&event.window()).unwrap();
+        let Some(win) = self.windows.get_mut(&event.window()) else {
+            debug!("not reconfiguring unknown window {:?}", event.window());
+            return;
+        };
         let dims = WindowDims {
             x: event.x(),
             y: event.y(),
@@ -716,7 +731,10 @@ impl<C: XConnection> ServerState<C> {
     pub fn map_window(&mut self, window: x::Window) {
         debug!("mapping {window:?}");
 
-        let window = self.windows.get_mut(&window).unwrap();
+        let Some(window) = self.windows.get_mut(&window) else {
+            debug!("not mapping unknown window {window:?}");
+            return;
+        };
         window.mapped = true;
     }
 

@@ -428,7 +428,7 @@ fn toplevel_flow() {
         window,
         x::ATOM_STRING,
         x::ATOM_WM_CLASS,
-        &[c"boink".to_bytes()].concat(),
+        c"boink".to_bytes(),
     );
     connection.set_property(
         window,
@@ -483,6 +483,52 @@ fn reparent() {
         .last_created_surface_id()
         .expect("No surface created!");
     f.configure_and_verify_new_toplevel(&mut connection, child, surface);
+}
+
+#[test]
+fn window_properties_after_reparent() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let child = connection.new_window(connection.root, 0, 0, 1, 1, true);
+    connection.map_window(child);
+    f.wait_and_dispatch();
+    let child_surface = f
+        .testwl
+        .last_created_surface_id()
+        .expect("No surface created!");
+    f.configure_and_verify_new_toplevel(&mut connection, child, child_surface);
+
+    let other = connection.new_window(connection.root, 0, 0, 100, 100, false);
+    connection.map_window(other);
+    f.wait_and_dispatch();
+    let other_surface = f
+        .testwl
+        .last_created_surface_id()
+        .expect("No surface created!");
+    f.configure_and_verify_new_toplevel(&mut connection, other, other_surface);
+
+    connection.send_request(&x::UnmapWindow { window: child });
+    let parent = connection.new_window(connection.root, 0, 0, 20, 20, false);
+
+    connection.send_request(&x::ReparentWindow {
+        window: child,
+        parent,
+        x: 0,
+        y: 0,
+    });
+
+    // The server should get the notifications for these properties and shouldn't crash
+    connection.set_property(
+        child,
+        x::ATOM_WM_SIZE_HINTS,
+        x::ATOM_WM_NORMAL_HINTS,
+        &[16u32, 0, 0, 0, 0, 200, 400],
+    );
+    connection.set_property(child, x::ATOM_STRING, x::ATOM_WM_NAME, b"title\0");
+    connection.set_property(child, x::ATOM_STRING, x::ATOM_WM_CLASS, c"class".to_bytes());
+
+    f.wait_and_dispatch();
 }
 
 #[test]

@@ -235,6 +235,8 @@ impl XState {
                 }
             };
         }
+
+        let mut ignored_windows = Vec::new();
         while let Some(event) = self.connection.poll_for_event().unwrap() {
             trace!("x11 event: {event:?}");
 
@@ -268,6 +270,7 @@ impl XState {
                     } else {
                         debug!("destroying window since its parent is no longer root!");
                         server_state.destroy_window(e.window());
+                        ignored_windows.push(e.window());
                     }
                 }
                 xcb::Event::X(x::Event::MapRequest(e)) => {
@@ -325,6 +328,9 @@ impl XState {
                     server_state.destroy_window(e.window());
                 }
                 xcb::Event::X(x::Event::PropertyNotify(e)) => {
+                    if ignored_windows.contains(&e.window()) {
+                        continue;
+                    }
                     self.handle_property_change(e, server_state);
                 }
                 xcb::Event::X(x::Event::ConfigureRequest(e)) => {
