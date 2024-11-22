@@ -160,7 +160,15 @@ pub fn main(data: impl RunData) -> Option<()> {
             server_state.atoms = Some(xstate.atoms.clone());
 
             #[cfg(feature = "systemd")]
-            let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+            {
+                match sd_notify::notify(true, &[sd_notify::NotifyState::Ready]) {
+                    Ok(()) => info!("Successfully notified systemd of ready state."),
+                    Err(e) => log::warn!("Systemd notify failed: {e:?}"),
+                }
+            }
+
+            #[cfg(not(feature = "systemd"))]
+            info!("Systemd support disabled.");
         }
 
         if let Some(xstate) = &mut xstate {
