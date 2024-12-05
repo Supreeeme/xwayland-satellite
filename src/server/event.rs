@@ -346,7 +346,6 @@ impl HandleEvent for Pointer {
         // destroy the menu if this occurs within a 500 ms interval (which it always does with
         // Niri). Other compositors do not run into this problem because they appear to not send
         // wl_pointer.enter until the user actually moves the mouse in the popup.
-        let mut process_event = Vec::new();
         match event {
             client::wl_pointer::Event::Enter {
                 serial,
@@ -423,14 +422,20 @@ impl HandleEvent for Pointer {
                     else {
                         unreachable!();
                     };
-                    process_event.push(client::wl_pointer::Event::Enter {
-                        serial: *serial,
-                        surface: surface.clone(),
-                        surface_x: *surface_x,
-                        surface_y: *surface_y,
-                    });
-                    process_event.push(event);
-                    trace!("resending enter ({serial}) before motion");
+                    let surface_key: ObjectKey = surface.data().copied().unwrap();
+                    if state.objects.get(surface_key).is_some() {
+                        trace!("resending enter ({serial}) before motion");
+                        let enter_event = client::wl_pointer::Event::Enter {
+                            serial: *serial,
+                            surface: surface.clone(),
+                            surface_x: *surface_x,
+                            surface_y: *surface_y,
+                        };
+                        self.handle_event(enter_event, state);
+                        self.handle_event(event, state);
+                    } else {
+                        warn!("could not move pointer to surface ({serial}): stale surface");
+                    }
                 } else {
                     self.server.motion(time, surface_x, surface_y);
                 }
@@ -495,10 +500,6 @@ impl HandleEvent for Pointer {
                     }
                 ]
             },
-        }
-
-        for event in process_event {
-            self.handle_event(event, state);
         }
     }
 }
