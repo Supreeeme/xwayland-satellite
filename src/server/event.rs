@@ -91,8 +91,25 @@ impl HandleEvent for SurfaceData {
 }
 
 impl SurfaceData {
+    fn get_output_name(&self, state: &ServerState<impl XConnection>) -> Option<String> {
+        let output_name = self
+            .output_key
+            .and_then(|key| state.objects.get(key))
+            .map(|obj| <_ as AsRef<Output>>::as_ref(obj).name.clone());
+
+        if output_name.is_none() {
+            warn!(
+                "{} has no output name ({:?})",
+                self.server.id(),
+                self.output_key
+            );
+        }
+
+        output_name
+    }
+
     fn surface_event<C: XConnection>(
-        &self,
+        &mut self,
         event: client::wl_surface::Event,
         state: &mut ServerState<C>,
     ) {
@@ -106,10 +123,14 @@ impl SurfaceData {
                 };
                 let output: &mut Output = object.as_mut();
 
+                self.server.enter(&output.server);
+                self.output_key = Some(key);
+                debug!("{} entered {}", self.server.id(), output.server.id());
+                let windows = &mut state.windows;
                 if let Some(win_data) = self
                     .window
                     .as_ref()
-                    .map(|win| state.windows.get_mut(&win).unwrap())
+                    .map(|win| windows.get_mut(&win).unwrap())
                 {
                     let (x, y) = match output.position {
                         OutputPosition::Xdg { x, y } => (x, y),
@@ -120,10 +141,16 @@ impl SurfaceData {
                         WindowOutputOffset { x, y },
                         state.connection.as_mut().unwrap(),
                     );
-                    output.windows.insert(win_data.window);
+                    let window = win_data.window;
+                    output.windows.insert(window);
+                    if self.window.is_some() && state.last_focused_toplevel == self.window {
+                        let data = C::ExtraData::create(state);
+                        let output = self.get_output_name(state);
+                        let conn = state.connection.as_mut().unwrap();
+                        debug!("focused window changed outputs - resetting primary output");
+                        conn.focus_window(window, output, data);
+                    }
                 }
-                self.server.enter(&output.server);
-                debug!("{} entered {}", self.server.id(), output.server.id());
             }
             Event::Leave { output } => {
                 let key: ObjectKey = output.data().copied().unwrap();
@@ -132,6 +159,9 @@ impl SurfaceData {
                 };
                 let output: &mut Output = object.as_mut();
                 self.server.leave(&output.server);
+                if self.output_key == Some(key) {
+                    self.output_key = None;
+                }
             }
             Event::PreferredBufferScale { factor } => self.server.preferred_buffer_scale(factor),
             other => warn!("unhandled surface request: {other:?}"),
@@ -522,7 +552,11 @@ impl HandleEvent for Keyboard {
                     .map(|o| <_ as AsRef<SurfaceData>>::as_ref(o))
                 {
                     state.last_kb_serial = Some(serial);
-                    state.to_focus = Some(data.window.unwrap());
+                    let output_name = data.get_output_name(state);
+                    state.to_focus = Some(FocusData {
+                        window: data.window.unwrap(),
+                        output_name,
+                    });
                     self.server.enter(serial, &data.server, keys);
                 }
             }
@@ -536,7 +570,7 @@ impl HandleEvent for Keyboard {
                     .get(key)
                     .map(|o| <_ as AsRef<SurfaceData>>::as_ref(o))
                 {
-                    if state.to_focus == Some(data.window.unwrap()) {
+                    if state.to_focus.as_ref().map(|d| d.window) == Some(data.window.unwrap()) {
                         state.to_focus.take();
                     } else {
                         state.unfocus = true;
@@ -637,6 +671,7 @@ pub struct Output {
     pub xdg: Option<XdgOutput>,
     windows: HashSet<x::Window>,
     position: OutputPosition,
+    name: String,
 }
 
 impl Output {
@@ -647,6 +682,7 @@ impl Output {
             xdg: None,
             windows: HashSet::new(),
             position: OutputPosition::Wl { x: 0, y: 0 },
+            name: "<unknown>".to_string(),
         }
     }
 }
@@ -723,7 +759,12 @@ impl Output {
 
         simple_event_shunt! {
             self.server, event: client::wl_output::Event => [
-                Name { name },
+                Name {
+                    |name| {
+                        self.name = name.clone();
+                        name
+                    }
+                },
                 Description { description },
                 Mode {
                     |flags| convert_wenum(flags),

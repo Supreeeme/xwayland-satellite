@@ -221,7 +221,7 @@ impl super::XConnection for FakeXConnection {
     }
 
     #[track_caller]
-    fn focus_window(&mut self, window: Window, _: ()) {
+    fn focus_window(&mut self, window: Window, _output_name: Option<String>, _: ()) {
         assert!(
             self.windows.contains_key(&window),
             "Unknown window: {window:?}"

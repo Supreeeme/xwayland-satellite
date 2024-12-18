@@ -4,14 +4,13 @@ mod server;
 pub mod xstate;
 
 use crate::server::{PendingSurfaceState, ServerState};
-use crate::xstate::XState;
+use crate::xstate::{RealConnection, XState};
 use log::{error, info};
 use rustix::event::{poll, PollFd, PollFlags};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use wayland_server::{Display, ListeningSocket};
 use xcb::x;
 
@@ -22,7 +21,12 @@ pub trait XConnection: Sized + 'static {
     fn root_window(&self) -> x::Window;
     fn set_window_dims(&mut self, window: x::Window, dims: PendingSurfaceState);
     fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool, data: Self::ExtraData);
-    fn focus_window(&mut self, window: x::Window, data: Self::ExtraData);
+    fn focus_window(
+        &mut self,
+        window: x::Window,
+        output_name: Option<String>,
+        data: Self::ExtraData,
+    );
     fn close_window(&mut self, window: x::Window, data: Self::ExtraData);
     fn raise_to_top(&mut self, window: x::Window);
 }
@@ -36,7 +40,7 @@ pub trait MimeTypeData {
     fn data(&self) -> &[u8];
 }
 
-type RealServerState = ServerState<Arc<xcb::Connection>>;
+type RealServerState = ServerState<RealConnection>;
 
 pub trait RunData {
     fn display(&self) -> Option<&str>;
@@ -156,8 +160,7 @@ pub fn main(data: impl RunData) -> Option<()> {
             display.insert(0, ':');
             info!("Connected to Xwayland on {display}");
             data.xwayland_ready(display);
-            server_state.set_x_connection(xstate.connection.clone());
-            server_state.atoms = Some(xstate.atoms.clone());
+            xstate.server_state_setup(&mut server_state);
 
             #[cfg(feature = "systemd")]
             {

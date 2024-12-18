@@ -167,6 +167,7 @@ struct DataSourceData {
 }
 
 struct Output {
+    name: String,
     wl: WlOutput,
     xdg: Option<ZxdgOutputV1>,
 }
@@ -565,6 +566,13 @@ impl Server {
         self.display.flush_clients().unwrap();
     }
 
+    pub fn get_output(&mut self, name: &str) -> Option<WlOutput> {
+        self.state
+            .outputs
+            .iter()
+            .find_map(|(output, data)| (data.name == name).then_some(output.clone()))
+    }
+
     pub fn move_output(&mut self, output: &WlOutput, x: i32, y: i32) {
         output.geometry(
             x,
@@ -786,11 +794,14 @@ impl GlobalDispatch<WlOutput, (i32, i32)> for State {
             "fake monitor".to_string(),
             wl_output::Transform::Normal,
         );
+        let name = format!("WL-{}", state.outputs.len() + 1);
+        output.name(name.clone());
         output.mode(wl_output::Mode::Current, 1000, 1000, 0);
         output.done();
         state.outputs.insert(
             output.clone(),
             Output {
+                name,
                 wl: output.clone(),
                 xdg: None,
             },

@@ -1,12 +1,13 @@
 mod selection;
 use selection::{SelectionData, SelectionTarget};
 
-use crate::server::WindowAttributes;
+use crate::{server::WindowAttributes, XConnection};
 use bitflags::bitflags;
 use log::{debug, trace, warn};
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, BorrowedFd};
-use std::sync::Arc;
+use std::rc::Rc;
 use xcb::{x, Xid, XidNew};
 use xcb_util_cursor::{Cursor, CursorContext};
 
@@ -103,8 +104,8 @@ impl WmName {
 }
 
 pub struct XState {
-    pub connection: Arc<xcb::Connection>,
-    pub atoms: Atoms,
+    connection: Rc<xcb::Connection>,
+    atoms: Atoms,
     root: x::Window,
     wm_window: x::Window,
     selection_data: SelectionData,
@@ -112,7 +113,15 @@ pub struct XState {
 
 impl XState {
     pub fn new(fd: BorrowedFd) -> Self {
-        let connection = Arc::new(xcb::Connection::connect_to_fd(fd.as_raw_fd(), None).unwrap());
+        let connection = Rc::new(
+            xcb::Connection::connect_to_fd_with_extensions(
+                fd.as_raw_fd(),
+                None,
+                &[xcb::Extension::Composite, xcb::Extension::RandR],
+                &[],
+            )
+            .unwrap(),
+        );
         let setup = connection.get_setup();
         let screen = setup.roots().next().unwrap();
         let root = screen.root();
@@ -139,6 +148,14 @@ impl XState {
             })
             .unwrap();
 
+        // Track RandR output changes
+        connection
+            .send_and_check_request(&xcb::randr::SelectInput {
+                window: root,
+                enable: xcb::randr::NotifyMask::RESOURCE_CHANGE,
+            })
+            .unwrap();
+
         {
             // Setup default cursor theme
             let ctx = CursorContext::new(&connection, screen).unwrap();
@@ -162,6 +179,13 @@ impl XState {
         };
         r.create_ewmh_window();
         r
+    }
+
+    pub fn server_state_setup(&self, server_state: &mut super::RealServerState) {
+        let mut c = RealConnection::new(self.connection.clone());
+        c.update_outputs(self.root);
+        server_state.set_x_connection(c);
+        server_state.atoms = Some(self.atoms.clone());
     }
 
     fn set_root_property<P: x::PropEl>(&self, property: x::Atom, r#type: x::Atom, data: &[P]) {
@@ -309,9 +333,10 @@ impl XState {
 
                     let active_win: &[x::Window] = active_win.value();
                     if active_win[0] == e.window() {
-                        <_ as super::XConnection>::focus_window(
-                            &mut self.connection,
+                        // The connection on the server state stores state.
+                        server_state.connection.as_mut().unwrap().focus_window(
                             x::Window::none(),
+                            None,
                             self.atoms.clone(),
                         );
                     }
@@ -401,6 +426,15 @@ impl XState {
                     t => warn!("unrecognized message: {t:?}"),
                 },
                 xcb::Event::X(x::Event::MappingNotify(_)) => {}
+                xcb::Event::RandR(xcb::randr::Event::Notify(e))
+                    if matches!(e.u(), xcb::randr::NotifyData::Rc(_)) =>
+                {
+                    server_state
+                        .connection
+                        .as_mut()
+                        .unwrap()
+                        .update_outputs(self.root);
+                }
                 other => {
                     warn!("unhandled event: {other:?}");
                 }
@@ -774,17 +808,73 @@ impl TryFrom<u32> for SetState {
     }
 }
 
-impl super::XConnection for Arc<xcb::Connection> {
+pub struct RealConnection {
+    connection: Rc<xcb::Connection>,
+    outputs: HashMap<String, xcb::randr::Output>,
+    primary_output: xcb::randr::Output,
+}
+
+impl RealConnection {
+    fn new(connection: Rc<xcb::Connection>) -> Self {
+        Self {
+            connection,
+            outputs: Default::default(),
+            primary_output: Xid::none(),
+        }
+    }
+
+    fn update_outputs(&mut self, root: x::Window) {
+        self.outputs.clear();
+        let reply = self
+            .connection
+            .wait_for_reply(
+                self.connection
+                    .send_request(&xcb::randr::GetScreenResources { window: root }),
+            )
+            .expect("Couldn't grab screen resources");
+
+        for output in reply.outputs().iter().copied() {
+            let reply = self
+                .connection
+                .wait_for_reply(self.connection.send_request(&xcb::randr::GetOutputInfo {
+                    output,
+                    config_timestamp: reply.config_timestamp(),
+                }))
+                .expect("Couldn't get output info");
+
+            let name = std::str::from_utf8(reply.name())
+                .unwrap_or_else(|_| panic!("couldn't parse output name: {:?}", reply.name()));
+
+            self.outputs.insert(name.to_string(), output);
+        }
+
+        self.primary_output = self
+            .connection
+            .wait_for_reply(
+                self.connection
+                    .send_request(&xcb::randr::GetOutputPrimary { window: root }),
+            )
+            .expect("Couldn't get primary output")
+            .output();
+
+        debug!(
+            "new outputs: {:?} | primary: {:?}",
+            self.outputs, self.primary_output
+        );
+    }
+}
+
+impl XConnection for RealConnection {
     type ExtraData = Atoms;
     type MimeTypeData = SelectionTarget;
 
     fn root_window(&self) -> x::Window {
-        self.get_setup().roots().next().unwrap().root()
+        self.connection.get_setup().roots().next().unwrap().root()
     }
 
     fn set_window_dims(&mut self, window: x::Window, dims: crate::server::PendingSurfaceState) {
         trace!("set window dimensions {window:?} {dims:?}");
-        unwrap_or_skip_bad_window!(self.send_and_check_request(&x::ConfigureWindow {
+        unwrap_or_skip_bad_window!(self.connection.send_and_check_request(&x::ConfigureWindow {
             window,
             value_list: &[
                 x::ConfigWindow::X(dims.x),
@@ -801,38 +891,74 @@ impl super::XConnection for Arc<xcb::Connection> {
         } else {
             &[]
         };
-        self.send_and_check_request(&x::ChangeProperty::<x::Atom> {
-            mode: x::PropMode::Replace,
-            window,
-            property: atoms.net_wm_state,
-            r#type: x::ATOM_ATOM,
-            data,
-        })
-        .unwrap();
+        self.connection
+            .send_and_check_request(&x::ChangeProperty::<x::Atom> {
+                mode: x::PropMode::Replace,
+                window,
+                property: atoms.net_wm_state,
+                r#type: x::ATOM_ATOM,
+                data,
+            })
+            .unwrap();
     }
 
-    fn focus_window(&mut self, window: x::Window, atoms: Self::ExtraData) {
-        if let Err(e) = self.send_and_check_request(&x::SetInputFocus {
+    fn focus_window(
+        &mut self,
+        window: x::Window,
+        output_name: Option<String>,
+        atoms: Self::ExtraData,
+    ) {
+        trace!("{window:?} {output_name:?}");
+        if let Err(e) = self.connection.send_and_check_request(&x::SetInputFocus {
             focus: window,
             revert_to: x::InputFocus::None,
             time: x::CURRENT_TIME,
         }) {
-            log::debug!("SetInputFocus failed ({:?}: {:?})", window, e);
+            debug!("SetInputFocus failed ({:?}: {:?})", window, e);
             return;
         }
-        if let Err(e) = self.send_and_check_request(&x::ChangeProperty {
+        if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty {
             mode: x::PropMode::Replace,
             window: self.root_window(),
             property: atoms.active_win,
             r#type: x::ATOM_WINDOW,
             data: &[window],
         }) {
-            log::debug!("ChangeProperty failed ({:?}: {:?})", window, e);
+            debug!("ChangeProperty failed ({:?}: {:?})", window, e);
+        }
+
+        if let Some(name) = output_name {
+            let Some(output) = self.outputs.get(&name).copied() else {
+                warn!("Couldn't find output {name}, primary output will be wrong");
+                return;
+            };
+            if output == self.primary_output {
+                debug!("primary output is already {name}");
+                return;
+            }
+
+            if let Err(e) = self
+                .connection
+                .send_and_check_request(&xcb::randr::SetOutputPrimary { window, output })
+            {
+                warn!("Couldn't set output {name} as primary: {e:?}");
+            } else {
+                debug!("set {name} as primary output");
+                self.primary_output = output;
+            }
+        } else {
+            let _ = self
+                .connection
+                .send_and_check_request(&xcb::randr::SetOutputPrimary {
+                    window,
+                    output: Xid::none(),
+                });
+            self.primary_output = Xid::none();
         }
     }
 
     fn close_window(&mut self, window: x::Window, atoms: Self::ExtraData) {
-        let cookie = self.send_request(&x::GetProperty {
+        let cookie = self.connection.send_request(&x::GetProperty {
             window,
             delete: false,
             property: atoms.wm_protocols,
@@ -840,7 +966,7 @@ impl super::XConnection for Arc<xcb::Connection> {
             long_offset: 0,
             long_length: 10,
         });
-        let reply = unwrap_or_skip_bad_window!(self.wait_for_reply(cookie));
+        let reply = unwrap_or_skip_bad_window!(self.connection.wait_for_reply(cookie));
 
         if reply.value::<x::Atom>().contains(&atoms.wm_delete_window) {
             let data = [atoms.wm_delete_window.resource_id(), 0, 0, 0, 0];
@@ -850,28 +976,28 @@ impl super::XConnection for Arc<xcb::Connection> {
                 x::ClientMessageData::Data32(data),
             );
 
-            unwrap_or_skip_bad_window!(self.send_and_check_request(&x::SendEvent {
+            unwrap_or_skip_bad_window!(self.connection.send_and_check_request(&x::SendEvent {
                 destination: x::SendEventDest::Window(window),
                 propagate: false,
                 event_mask: x::EventMask::empty(),
                 event,
             }));
         } else {
-            unwrap_or_skip_bad_window!(self.send_and_check_request(&x::KillClient {
+            unwrap_or_skip_bad_window!(self.connection.send_and_check_request(&x::KillClient {
                 resource: window.resource_id()
             }))
         }
     }
 
     fn raise_to_top(&mut self, window: x::Window) {
-        unwrap_or_skip_bad_window!(self.send_and_check_request(&x::ConfigureWindow {
+        unwrap_or_skip_bad_window!(self.connection.send_and_check_request(&x::ConfigureWindow {
             window,
             value_list: &[x::ConfigWindow::StackMode(x::StackMode::Above)],
         }));
     }
 }
 
-impl super::FromServerState<Arc<xcb::Connection>> for Atoms {
+impl super::FromServerState<RealConnection> for Atoms {
     fn create(state: &super::RealServerState) -> Self {
         state.atoms.as_ref().unwrap().clone()
     }

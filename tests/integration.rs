@@ -82,7 +82,7 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
-    fn new() -> Self {
+    fn new_preset(pre_connect: impl FnOnce(&mut testwl::Server)) -> Self {
         static INIT: Once = Once::new();
         INIT.call_once(|| {
             env_logger::builder()
@@ -94,6 +94,7 @@ impl Fixture {
 
         let (a, b) = UnixStream::pair().unwrap();
         let mut testwl = testwl::Server::new(false);
+        pre_connect(&mut testwl);
         testwl.connect(a);
         let our_data = TestData::new(b);
         let data = our_data.clone();
@@ -147,6 +148,9 @@ impl Fixture {
             display,
         }
     }
+    fn new() -> Self {
+        Self::new_preset(|_| {})
+    }
 
     #[track_caller]
     fn wait_and_dispatch(&mut self) {
@@ -193,6 +197,22 @@ impl Fixture {
         assert_eq!(geometry.height(), 100);
     }
 
+    #[track_caller]
+    fn map_as_toplevel(
+        &mut self,
+        connection: &mut Connection,
+        window: x::Window,
+    ) -> testwl::SurfaceId {
+        connection.map_window(window);
+        self.wait_and_dispatch();
+        let surface = self
+            .testwl
+            .last_created_surface_id()
+            .expect("No surface created");
+        self.configure_and_verify_new_toplevel(connection, window, surface);
+        surface
+    }
+
     /// Triggers a Wayland side toplevel Close event and processes the corresponding
     /// X11 side WM_DELETE_WINDOW client message
     fn wm_delete_window(
@@ -228,6 +248,12 @@ impl Fixture {
             }
             other => panic!("wrong data type: {other:?}"),
         }
+    }
+
+    fn create_output(&mut self, x: i32, y: i32) -> wayland_server::protocol::wl_output::WlOutput {
+        self.testwl.new_output(x, y);
+        self.wait_and_dispatch();
+        self.testwl.last_created_output()
     }
 }
 
@@ -927,9 +953,7 @@ fn different_output_position() {
         .expect("No surface created!");
     f.configure_and_verify_new_toplevel(&mut connection, window, surface);
 
-    f.testwl.new_output(0, 0);
-    f.wait_and_dispatch();
-    let output = f.testwl.last_created_output();
+    let output = f.create_output(0, 0);
     f.testwl.move_surface_to_output(surface, &output);
     f.testwl.move_pointer_to(surface, 10.0, 10.0);
     f.wait_and_dispatch();
@@ -938,9 +962,7 @@ fn different_output_position() {
     assert_eq!(reply.win_x(), 10);
     assert_eq!(reply.win_y(), 10);
 
-    f.testwl.new_output(100, 0);
-    f.wait_and_dispatch();
-    let output = f.testwl.last_created_output();
+    let output = f.create_output(100, 0);
     //f.testwl.move_xdg_output(&output, 100, 0);
     f.testwl.move_surface_to_output(surface, &output);
     f.testwl.move_pointer_to(surface, 150.0, 12.0);
@@ -1110,4 +1132,68 @@ fn close_window() {
 
     // Connection should no longer work (KillClient)
     assert!(connection.poll_for_event().is_err());
+}
+
+// TODO: figure out if the sleeps in this test can be dealt with...
+#[test]
+fn primary_output() {
+    let mut f = Fixture::new_preset(|testwl| {
+        testwl.new_output(0, 0); // WL-1
+        testwl.new_output(500, 500); // WL-2
+    });
+    let mut conn = Connection::new(&f.display);
+
+    let reply = conn.get_reply(&xcb::randr::GetScreenResources { window: conn.root });
+    let config_timestamp = reply.config_timestamp();
+    let mut it = reply.outputs().into_iter().copied().map(|output| {
+        let reply = conn.get_reply(&xcb::randr::GetOutputInfo {
+            output,
+            config_timestamp,
+        });
+        let name = std::str::from_utf8(reply.name()).unwrap();
+        (
+            f.testwl
+                .get_output(name)
+                .unwrap_or_else(|| panic!("Couldn't find output {name}")),
+            output,
+        )
+    });
+    let (wl_output1, output1) = it.next().expect("Couldn't find first output");
+    let (wl_output2, output2) = it.next().expect("Couldn't find second output");
+    assert_eq!(it.collect::<Vec<_>>(), vec![]);
+
+    let window1 = conn.new_window(conn.root, 0, 0, 20, 20, false);
+    let surface1 = f.map_as_toplevel(&mut conn, window1);
+    f.testwl.move_surface_to_output(surface1, &wl_output1);
+    let window2 = conn.new_window(conn.root, 0, 0, 20, 20, false);
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let surface2 = f.map_as_toplevel(&mut conn, window2);
+    f.testwl.move_surface_to_output(surface2, &wl_output2);
+    assert_ne!(surface1, surface2);
+    f.wait_and_dispatch();
+
+    f.testwl.focus_toplevel(surface1);
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let reply = conn.get_reply(&xcb::randr::GetOutputPrimary { window: conn.root });
+    assert_eq!(reply.output(), output1);
+
+    f.testwl.focus_toplevel(surface2);
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let reply = conn.get_reply(&xcb::randr::GetOutputPrimary { window: conn.root });
+    assert_eq!(reply.output(), output2);
+
+    let wl_output3 = f.create_output(24, 46);
+    f.testwl.move_surface_to_output(surface2, &wl_output3);
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    let reply = conn.get_reply(&xcb::randr::GetScreenResources { window: conn.root });
+    assert_eq!(reply.outputs().len(), 3);
+    let output3 = reply
+        .outputs()
+        .iter()
+        .copied()
+        .find(|o| ![output1, output2].contains(o))
+        .unwrap();
+    let reply = conn.get_reply(&xcb::randr::GetOutputPrimary { window: conn.root });
+    assert_eq!(reply.output(), output3);
 }

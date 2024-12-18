@@ -241,6 +241,7 @@ impl<C: XConnection>
                         role: None,
                         xwl: None,
                         window: None,
+                        output_key: None,
                     }
                     .into()
                 });

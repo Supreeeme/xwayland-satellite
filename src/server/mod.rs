@@ -179,6 +179,7 @@ pub struct SurfaceData {
     role: Option<SurfaceRole>,
     xwl: Option<XwaylandSurfaceV1>,
     window: Option<x::Window>,
+    output_key: Option<ObjectKey>,
 }
 
 impl SurfaceData {
@@ -468,6 +469,12 @@ fn handle_globals<'a, C: XConnection>(
 new_key_type! {
     pub struct ObjectKey;
 }
+
+struct FocusData {
+    window: x::Window,
+    output_name: Option<String>,
+}
+
 pub struct ServerState<C: XConnection> {
     pub atoms: Option<Atoms>,
     dh: DisplayHandle,
@@ -478,11 +485,11 @@ pub struct ServerState<C: XConnection> {
 
     qh: ClientQueueHandle,
     client: Option<Client>,
-    to_focus: Option<x::Window>,
+    to_focus: Option<FocusData>,
     unfocus: bool,
     last_focused_toplevel: Option<x::Window>,
     last_hovered: Option<x::Window>,
-    connection: Option<C>,
+    pub connection: Option<C>,
 
     xdg_wm_base: XdgWmBase,
     clipboard_data: Option<ClipboardData<C::MimeTypeData>>,
@@ -846,16 +853,20 @@ impl<C: XConnection> ServerState<C> {
         }
 
         {
-            if let Some(win) = self.to_focus.take() {
+            if let Some(FocusData {
+                window,
+                output_name,
+            }) = self.to_focus.take()
+            {
                 let data = C::ExtraData::create(self);
                 let conn = self.connection.as_mut().unwrap();
-                debug!("focusing window {win:?}");
-                conn.focus_window(win, data);
-                self.last_focused_toplevel = Some(win);
+                debug!("focusing window {window:?}");
+                conn.focus_window(window, output_name, data);
+                self.last_focused_toplevel = Some(window);
             } else if self.unfocus {
                 let data = C::ExtraData::create(self);
                 let conn = self.connection.as_mut().unwrap();
-                conn.focus_window(x::WINDOW_NONE, data);
+                conn.focus_window(x::WINDOW_NONE, None, data);
             }
             self.unfocus = false;
         }
