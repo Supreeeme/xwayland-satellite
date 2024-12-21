@@ -1,4 +1,6 @@
+#[cfg(feature = "clipboard-sync")]
 mod selection;
+#[cfg(feature = "clipboard-sync")]
 use selection::{SelectionData, SelectionTarget};
 
 use crate::{server::WindowAttributes, XConnection};
@@ -108,6 +110,7 @@ pub struct XState {
     atoms: Atoms,
     root: x::Window,
     wm_window: x::Window,
+    #[cfg(feature = "clipboard-sync")]
     selection_data: SelectionData,
 }
 
@@ -175,6 +178,7 @@ impl XState {
             wm_window,
             root,
             atoms,
+            #[cfg(feature = "clipboard-sync")]
             selection_data: Default::default(),
         };
         r.create_ewmh_window();
@@ -241,6 +245,7 @@ impl XState {
             })
             .unwrap();
 
+        #[cfg(feature = "clipboard-sync")]
         self.set_clipboard_owner(x::CURRENT_TIME);
     }
 
@@ -264,6 +269,7 @@ impl XState {
         while let Some(event) = self.connection.poll_for_event().unwrap() {
             trace!("x11 event: {event:?}");
 
+            #[cfg(feature = "clipboard-sync")]
             if self.handle_selection_event(&event, server_state) {
                 continue;
             }
@@ -872,6 +878,7 @@ impl RealConnection {
 
 impl XConnection for RealConnection {
     type ExtraData = Atoms;
+    #[cfg(feature = "clipboard-sync")]
     type MimeTypeData = SelectionTarget;
 
     fn root_window(&self) -> x::Window {
