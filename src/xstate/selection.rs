@@ -32,6 +32,7 @@ impl MimeTypeData for SelectionTarget {
     fn data(&self) -> &[u8] {
         match &self.value {
             TargetValue::U8(v) => v,
+            TargetValue::U32(v) => unsafe { v.align_to().1 },
             other => {
                 warn!(
                     "Unexpectedly requesting data from mime type with data type {} - nothing will be copied",
@@ -43,13 +44,23 @@ impl MimeTypeData for SelectionTarget {
     }
 }
 
+enum PendingMimeDataType {
+    Standard,
+    Incremental(TargetValue),
+}
+
+struct PendingMimeData {
+    ty: PendingMimeDataType,
+    id: SelectionTargetId,
+    dest_property: x::Atom,
+}
+
 enum MimeTypes {
     Temporary {
         /// Temporary mime data, being built
         data: Vec<SelectionTarget>,
         /// Mime types we still need to receive feedback on
-        /// 2nd field is the destination property
-        to_grab: Vec<(SelectionTargetId, x::Atom)>,
+        to_grab: Vec<PendingMimeData>,
     },
     /// Done grabbing mime data
     Complete(Rc<Vec<SelectionTarget>>),
@@ -118,7 +129,7 @@ impl XState {
 
         self.selection_data.mime_types = MimeTypes::Complete(Rc::new(types));
         self.selection_data.foreign_data = Some(selection);
-        trace!("Clipboard set from Wayland");
+        debug!("Clipboard set from Wayland");
     }
 
     pub(crate) fn handle_selection_event(
@@ -157,19 +168,23 @@ impl XState {
                     return true;
                 }
 
+                trace!(
+                    "selection notify target: {}",
+                    get_atom_name(&self.connection, e.target())
+                );
                 match e.target() {
                     x if x == self.atoms.targets => self.handle_target_list(e.property()),
                     atom => self.handle_clipboard_data(atom),
                 }
 
-                if let MimeTypes::Temporary { data, to_grab } = &mut self.selection_data.mime_types
-                {
+                if let MimeTypes::Temporary { to_grab, .. } = &self.selection_data.mime_types {
                     if to_grab.is_empty() {
-                        let data = Rc::new(std::mem::take(data));
-                        self.selection_data.mime_types = MimeTypes::Complete(data.clone());
-                        self.set_clipboard_owner(self.selection_data.clear_time.unwrap());
-                        server_state.set_copy_paste_source(data);
-                        trace!("Clipboard set from X11");
+                        let MimeTypes::Temporary { data, .. } =
+                            std::mem::take(&mut self.selection_data.mime_types)
+                        else {
+                            unreachable!()
+                        };
+                        self.finish_mime_data(server_state, data);
                     }
                 }
             }
@@ -320,26 +335,27 @@ impl XState {
                         only_if_exists: false,
                     }))
                     .unwrap();
-                let dest = reply.atom();
+                let dest_property = reply.atom();
 
                 self.connection
                     .send_and_check_request(&x::ConvertSelection {
                         requestor: self.wm_window,
                         selection: self.atoms.clipboard,
                         target: target_atom,
-                        property: dest,
+                        property: dest_property,
                         time: self.selection_data.clear_time.as_ref().copied().unwrap(),
                     })
                     .unwrap();
 
                 let target_name = get_atom_name(&self.connection, target_atom);
-                (
-                    SelectionTargetId {
+                PendingMimeData {
+                    ty: PendingMimeDataType::Standard,
+                    id: SelectionTargetId {
                         name: target_name,
                         atom: target_atom,
                     },
-                    dest,
-                )
+                    dest_property,
+                }
             })
             .collect();
 
@@ -355,7 +371,10 @@ impl XState {
             return;
         };
 
-        let Some(idx) = to_grab.iter().position(|(id, _)| id.atom == atom) else {
+        let Some(idx) = to_grab
+            .iter()
+            .position(|PendingMimeData { id, .. }| id.atom == atom)
+        else {
             warn!(
                 "unexpected SelectionNotify type: {}",
                 get_atom_name(&self.connection, atom)
@@ -363,7 +382,11 @@ impl XState {
             return;
         };
 
-        let (id, dest) = to_grab.swap_remove(idx);
+        let PendingMimeData {
+            ty,
+            id,
+            dest_property,
+        } = to_grab.swap_remove(idx);
 
         let value = match atom {
             x if x == self.atoms.timestamp => TargetValue::U32(vec![self
@@ -373,36 +396,47 @@ impl XState {
                 .copied()
                 .unwrap()]),
             _ => {
-                let reply = self
-                    .connection
-                    .wait_for_reply(self.connection.send_request(&x::GetProperty {
-                        delete: true,
-                        window: self.wm_window,
-                        property: dest,
-                        r#type: x::ATOM_ANY,
-                        long_offset: 0,
-                        long_length: u32::MAX,
-                    }))
-                    .unwrap();
+                let reply = get_property_any(&self.connection, self.wm_window, dest_property);
 
-                match reply.format() {
-                    8 => TargetValue::U8(reply.value().to_vec()),
-                    16 => TargetValue::U16(reply.value().to_vec()),
-                    32 => TargetValue::U32(reply.value().to_vec()),
-                    other => {
-                        if log::log_enabled!(log::Level::Debug) {
-                            let target_name = &id.name;
-                            let ty = if reply.r#type() == x::ATOM_NONE {
-                                "None".to_string()
-                            } else {
-                                get_atom_name(&self.connection, reply.r#type())
-                            };
-                            let dest = get_atom_name(&self.connection, dest);
-                            let value = reply.value::<u8>().to_vec();
-                            debug!("unexpected format: {other} (atom: {target_name}, type: {ty:?}, property: {dest}, value: {value:?})");
+                trace!(
+                    "got type {} for mime type {}",
+                    get_atom_name(&self.connection, reply.r#type()),
+                    get_atom_name(&self.connection, atom)
+                );
+
+                match reply.r#type() {
+                    x if x == self.atoms.incr => {
+                        assert!(matches!(ty, PendingMimeDataType::Standard));
+                        debug!(
+                            "beginning incr process for {}",
+                            get_atom_name(&self.connection, atom)
+                        );
+                        if let Some(data) =
+                            begin_incr(&self.connection, self.wm_window, reply, id, dest_property)
+                        {
+                            to_grab.push(data);
                         }
                         return;
                     }
+                    _ => match reply.format() {
+                        8 => TargetValue::U8(reply.value().to_vec()),
+                        16 => TargetValue::U16(reply.value().to_vec()),
+                        32 => TargetValue::U32(reply.value().to_vec()),
+                        other => {
+                            if log::log_enabled!(log::Level::Debug) {
+                                let target_name = &id.name;
+                                let ty = if reply.r#type() == x::ATOM_NONE {
+                                    "None".to_string()
+                                } else {
+                                    get_atom_name(&self.connection, reply.r#type())
+                                };
+                                let dest = get_atom_name(&self.connection, dest_property);
+                                let value = reply.value::<u8>().to_vec();
+                                debug!("unexpected format: {other} (atom: {target_name}, type: {ty:?}, property: {dest}, value: {value:?})");
+                            }
+                            return;
+                        }
+                    },
                 }
             }
         };
@@ -410,4 +444,148 @@ impl XState {
         trace!("Selection data: {id:?} {value:?}");
         data.push(SelectionTarget { id, value });
     }
+
+    pub(super) fn handle_selection_property_change(
+        &mut self,
+        event: &x::PropertyNotifyEvent,
+        server_state: &mut RealServerState,
+    ) -> bool {
+        if event.window() != self.wm_window {
+            return false;
+        }
+
+        let MimeTypes::Temporary { data, to_grab } = &mut self.selection_data.mime_types else {
+            debug!("Got potential selection property change, but not awaiting mime data");
+            return false;
+        };
+
+        let Some(idx) = to_grab.iter().position(|p| {
+            matches!(p.ty, PendingMimeDataType::Incremental(_)) && p.dest_property == event.atom()
+        }) else {
+            debug!(
+                "Changed non selection property: {}",
+                get_atom_name(&self.connection, event.atom())
+            );
+            return false;
+        };
+
+        let pending = &mut to_grab[idx];
+        let reply = get_property_any(&self.connection, self.wm_window, pending.dest_property);
+
+        if reply.r#type() != pending.id.atom {
+            warn!(
+                "wrong getproperty type: {}",
+                get_atom_name(&self.connection, reply.r#type())
+            );
+            return false;
+        }
+
+        match reply.format() {
+            8 => {
+                let value: &[u8] = reply.value();
+                trace!("got incr data ({} bytes)", value.len());
+                if value.is_empty() {
+                    let pending = to_grab.swap_remove(idx);
+                    let PendingMimeDataType::Incremental(value) = pending.ty else {
+                        unreachable!()
+                    };
+                    let atom = pending.id.atom;
+                    data.push(SelectionTarget {
+                        id: pending.id,
+                        value,
+                    });
+                    trace!(
+                        "finalized incr for {}",
+                        get_atom_name(&self.connection, atom)
+                    );
+                } else {
+                    let PendingMimeDataType::Incremental(TargetValue::U8(data)) = &mut pending.ty
+                    else {
+                        unreachable!()
+                    };
+                    data.extend_from_slice(value);
+                    trace!("new incr len: {}", data.len());
+                }
+            }
+            other => {
+                warn!("Got unexpected format {other} for INCR data - copy/pasting with mime type {} will fail!", get_atom_name(&self.connection, reply.r#type()));
+                to_grab.swap_remove(idx);
+            }
+        }
+
+        if to_grab.is_empty() {
+            let MimeTypes::Temporary { data, .. } =
+                std::mem::take(&mut self.selection_data.mime_types)
+            else {
+                unreachable!()
+            };
+            self.finish_mime_data(server_state, data);
+        }
+
+        true
+    }
+
+    fn finish_mime_data(&mut self, server_state: &mut RealServerState, data: Vec<SelectionTarget>) {
+        self.connection
+            .send_and_check_request(&x::ChangeWindowAttributes {
+                window: self.wm_window,
+                value_list: &[x::Cw::EventMask(x::EventMask::empty())],
+            })
+            .unwrap();
+        let data = Rc::new(data);
+        self.selection_data.mime_types = MimeTypes::Complete(data.clone());
+        self.set_clipboard_owner(self.selection_data.clear_time.unwrap());
+        server_state.set_copy_paste_source(data);
+        debug!("Clipboard set from X11");
+    }
+}
+
+fn get_property_any(
+    connection: &xcb::Connection,
+    window: x::Window,
+    property: x::Atom,
+) -> x::GetPropertyReply {
+    connection
+        .wait_for_reply(connection.send_request(&x::GetProperty {
+            delete: true,
+            window,
+            property,
+            r#type: x::ATOM_ANY,
+            long_offset: 0,
+            long_length: u32::MAX,
+        }))
+        .unwrap()
+}
+fn begin_incr(
+    connection: &xcb::Connection,
+    window: x::Window,
+    reply: x::GetPropertyReply,
+    id: SelectionTargetId,
+    dest_property: x::Atom,
+) -> Option<PendingMimeData> {
+    let size = match reply.format() {
+        8 => reply.value::<u8>()[0] as usize,
+        16 => reply.value::<u16>()[0] as usize,
+        32 => reply.value::<u32>()[0] as usize,
+        other => {
+            warn!("unexpected incr format: {other}");
+            return None;
+        }
+    };
+
+    connection
+        .send_and_check_request(&x::ChangeWindowAttributes {
+            window,
+            value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
+        })
+        .unwrap();
+
+    // XXX: storing INCR property data in memory could significantly bloat memory depending on how
+    // much data is going to be stuck into the clipboard, but we'll cross that bridge when we get
+    // to it.
+    Some(PendingMimeData {
+        ty: PendingMimeDataType::Incremental(TargetValue::U8(Vec::with_capacity(size))),
+        id,
+        dest_property,
+    })
 }

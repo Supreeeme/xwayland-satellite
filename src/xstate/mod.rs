@@ -626,12 +626,15 @@ impl XState {
     }
 
     fn handle_property_change(
-        &self,
+        &mut self,
         event: x::PropertyNotifyEvent,
         server_state: &mut super::RealServerState,
     ) {
         if event.state() != x::Property::NewValue {
-            debug!("ignoring non newvalue for property {:?}", event.atom());
+            debug!(
+                "ignoring non newvalue for property {:?}",
+                get_atom_name(&self.connection, event.atom())
+            );
             return;
         }
 
@@ -663,7 +666,9 @@ impl XState {
                 server_state.set_win_class(window, class);
             }
             _ => {
-                if log::log_enabled!(log::Level::Debug) {
+                if !self.handle_selection_property_change(&event, server_state)
+                    && log::log_enabled!(log::Level::Debug)
+                {
                     debug!(
                         "changed property {:?} for {:?}",
                         get_atom_name(&self.connection, event.atom()),
@@ -698,6 +703,7 @@ xcb::atoms_struct! {
         pub multiple => b"MULTIPLE" only_if_exists = false,
         pub timestamp => b"TIMESTAMP" only_if_exists = false,
         pub selection_reply => b"_selection_reply" only_if_exists = false,
+        pub incr => b"INCR" only_if_exists = false,
     }
 }
 
