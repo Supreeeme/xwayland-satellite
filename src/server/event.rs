@@ -127,11 +127,7 @@ impl SurfaceData {
                 self.output_key = Some(key);
                 debug!("{} entered {}", self.server.id(), output.server.id());
                 let windows = &mut state.windows;
-                if let Some(win_data) = self
-                    .window
-                    .as_ref()
-                    .map(|win| windows.get_mut(&win).unwrap())
-                {
+                if let Some(win_data) = self.window.as_ref().and_then(|win| windows.get_mut(win)) {
                     let (x, y) = match output.position {
                         OutputPosition::Xdg { x, y } => (x, y),
                         OutputPosition::Wl { x, y } => (x, y),
