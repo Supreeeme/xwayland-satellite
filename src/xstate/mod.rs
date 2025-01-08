@@ -897,15 +897,17 @@ impl XConnection for RealConnection {
         } else {
             &[]
         };
-        self.connection
+
+        if let Err(e) = self.connection
             .send_and_check_request(&x::ChangeProperty::<x::Atom> {
                 mode: x::PropMode::Replace,
                 window,
                 property: atoms.net_wm_state,
                 r#type: x::ATOM_ATOM,
                 data,
-            })
-            .unwrap();
+            }) {
+            warn!("Failed to set fullscreen state on {window:?} ({e})");
+        }
     }
 
     fn focus_window(
