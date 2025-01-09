@@ -1,5 +1,5 @@
 mod selection;
-use selection::{SelectionData, SelectionTarget};
+use selection::{Selection, SelectionData};
 
 use crate::{server::WindowAttributes, XConnection};
 use bitflags::bitflags;
@@ -117,7 +117,11 @@ impl XState {
             xcb::Connection::connect_to_fd_with_extensions(
                 fd.as_raw_fd(),
                 None,
-                &[xcb::Extension::Composite, xcb::Extension::RandR],
+                &[
+                    xcb::Extension::Composite,
+                    xcb::Extension::RandR,
+                    xcb::Extension::XFixes,
+                ],
                 &[],
             )
             .unwrap(),
@@ -156,6 +160,28 @@ impl XState {
             })
             .unwrap();
 
+        // negotiate xfixes version
+        let reply = connection
+            .wait_for_reply(connection.send_request(&xcb::xfixes::QueryVersion {
+                client_major_version: 1,
+                client_minor_version: 0,
+            }))
+            .unwrap();
+        log::info!(
+            "xfixes version: {}.{}",
+            reply.major_version(),
+            reply.minor_version()
+        );
+        use xcb::xfixes::SelectionEventMask;
+        connection
+            .send_and_check_request(&xcb::xfixes::SelectSelectionInput {
+                window: root,
+                selection: atoms.clipboard,
+                event_mask: SelectionEventMask::SET_SELECTION_OWNER
+                    | SelectionEventMask::SELECTION_WINDOW_DESTROY
+                    | SelectionEventMask::SELECTION_CLIENT_CLOSE,
+            })
+            .unwrap();
         {
             // Setup default cursor theme
             let ctx = CursorContext::new(&connection, screen).unwrap();
@@ -169,13 +195,14 @@ impl XState {
         }
 
         let wm_window = connection.generate_id();
+        let selection_data = SelectionData::new(&connection, root);
 
         let mut r = Self {
             connection,
             wm_window,
             root,
             atoms,
-            selection_data: Default::default(),
+            selection_data,
         };
         r.create_ewmh_window();
         r
@@ -240,8 +267,6 @@ impl XState {
                 data: b"xwayland-satellite",
             })
             .unwrap();
-
-        self.set_clipboard_owner(x::CURRENT_TIME);
     }
 
     pub fn handle_events(&mut self, server_state: &mut super::RealServerState) {
@@ -666,7 +691,7 @@ impl XState {
                 server_state.set_win_class(window, class);
             }
             _ => {
-                if !self.handle_selection_property_change(&event, server_state)
+                if !self.handle_selection_property_change(&event)
                     && log::log_enabled!(log::Level::Debug)
                 {
                     debug!(
@@ -872,7 +897,7 @@ impl RealConnection {
 
 impl XConnection for RealConnection {
     type ExtraData = Atoms;
-    type MimeTypeData = SelectionTarget;
+    type X11Selection = Selection;
 
     fn root_window(&self) -> x::Window {
         self.connection.get_setup().roots().next().unwrap().root()
@@ -898,14 +923,16 @@ impl XConnection for RealConnection {
             &[]
         };
 
-        if let Err(e) = self.connection
+        if let Err(e) = self
+            .connection
             .send_and_check_request(&x::ChangeProperty::<x::Atom> {
                 mode: x::PropMode::Replace,
                 window,
                 property: atoms.net_wm_state,
                 r#type: x::ATOM_ATOM,
                 data,
-            }) {
+            })
+        {
             warn!("Failed to set fullscreen state on {window:?} ({e})");
         }
     }

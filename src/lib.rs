@@ -7,6 +7,7 @@ use crate::server::{PendingSurfaceState, ServerState};
 use crate::xstate::{RealConnection, XState};
 use log::{error, info};
 use rustix::event::{poll, PollFd, PollFlags};
+use smithay_client_toolkit::data_device_manager::WritePipe;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
@@ -16,7 +17,7 @@ use xcb::x;
 
 pub trait XConnection: Sized + 'static {
     type ExtraData: FromServerState<Self>;
-    type MimeTypeData: MimeTypeData;
+    type X11Selection: X11Selection;
 
     fn root_window(&self) -> x::Window;
     fn set_window_dims(&mut self, window: x::Window, dims: PendingSurfaceState);
@@ -35,9 +36,9 @@ pub trait FromServerState<C: XConnection> {
     fn create(state: &ServerState<C>) -> Self;
 }
 
-pub trait MimeTypeData {
-    fn name(&self) -> &str;
-    fn data(&self) -> &[u8];
+pub trait X11Selection {
+    fn mime_types(&self) -> Vec<&str>;
+    fn write_to(&self, mime: &str, pipe: WritePipe);
 }
 
 type RealServerState = ServerState<RealConnection>;

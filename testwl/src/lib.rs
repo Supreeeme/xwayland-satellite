@@ -503,6 +503,7 @@ impl Server {
         self.state.pointer.as_ref().unwrap()
     }
 
+    #[track_caller]
     pub fn data_source_mimes(&self) -> Vec<String> {
         let Some(selection) = &self.state.selection else {
             panic!("No selection set on data device");
@@ -513,13 +514,79 @@ impl Server {
         data.mimes.to_vec()
     }
 
-    pub fn paste_data(&mut self) -> PasteDataResolver {
-        let Some(selection) = &self.state.selection else {
+    #[track_caller]
+    pub fn paste_data(
+        &mut self,
+        mut send_data_for_mime: impl FnMut(&str, &mut Self) -> bool,
+    ) -> Vec<PasteData> {
+        struct PendingData {
+            rx: std::fs::File,
+            data: Vec<u8>,
+        }
+        let Some(selection) = self.state.selection.take() else {
             panic!("No selection set on data device");
         };
+        type PendingRet = Vec<(String, Option<PendingData>)>;
+        let mut pending_ret: PendingRet = {
+            let data: &Mutex<DataSourceData> = selection.data().unwrap();
+            data.lock()
+                .unwrap()
+                .mimes
+                .iter()
+                .rev()
+                .map(|mime| (mime.clone(), None))
+                .collect()
+        };
 
-        let ret = PasteDataResolver::new(&selection);
-        self.display.flush_clients().unwrap();
+        let mut ret = Vec::new();
+        let mut try_transfer =
+            |pending_ret: &mut PendingRet, mime: String, mut pending: PendingData| {
+                self.display.flush_clients().unwrap();
+                let transfer_complete = send_data_for_mime(&mime, self);
+                if transfer_complete {
+                    pending.rx.read_to_end(&mut pending.data).unwrap();
+                    ret.push(PasteData {
+                        mime_type: mime,
+                        data: pending.data,
+                    });
+                } else {
+                    loop {
+                        match pending.rx.read(&mut pending.data) {
+                            Ok(0) => break,
+                            Ok(_) => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(e) => panic!("Failed reading data for mime {mime}: {e:?}"),
+                        }
+                    }
+                    pending_ret.push((mime, Some(pending)));
+                    self.dispatch();
+                }
+            };
+
+        while !pending_ret.is_empty() {
+            let (mime, pending) = pending_ret.pop().unwrap();
+            match pending {
+                Some(pending) => try_transfer(&mut pending_ret, mime, pending),
+                None => {
+                    let (rx, tx) = rustix::pipe::pipe().unwrap();
+                    selection.send(mime.clone(), tx.as_fd());
+                    drop(tx);
+
+                    let rx = std::fs::File::from(rx);
+                    try_transfer(
+                        &mut pending_ret,
+                        mime,
+                        PendingData {
+                            rx,
+                            data: Vec::new(),
+                        },
+                    );
+                }
+            }
+        }
+
+        self.state.selection = Some(selection);
+
         ret
     }
 
@@ -527,6 +594,7 @@ impl Server {
         self.state.selection.is_none()
     }
 
+    #[track_caller]
     pub fn create_data_offer(&mut self, data: Vec<PasteData>) {
         let Some(dev) = &self.state.data_device else {
             panic!("No data device created");
@@ -608,45 +676,6 @@ impl Server {
         xdg.logical_position(x, y);
         xdg.done();
         self.display.flush_clients().unwrap();
-    }
-}
-
-pub struct PasteDataResolver {
-    fds: Vec<(String, OwnedFd, OwnedFd)>,
-}
-
-impl PasteDataResolver {
-    fn new(source: &WlDataSource) -> Self {
-        let data: &Mutex<DataSourceData> = source.data().unwrap();
-        let data = data.lock().unwrap();
-        let mimes = &data.mimes;
-
-        let fds = mimes
-            .iter()
-            .map(|mime| {
-                let (rx, tx) = rustix::pipe::pipe().unwrap();
-                source.send(mime.clone(), tx.as_fd());
-                (mime.clone(), tx, rx)
-            })
-            .collect();
-
-        PasteDataResolver { fds }
-    }
-
-    pub fn resolve(self) -> Vec<PasteData> {
-        self.fds
-            .into_iter()
-            .map(|(mime, tx, rx)| {
-                drop(tx);
-                let mut data = Vec::new();
-                let mut file = std::fs::File::from(rx);
-                file.read_to_end(&mut data).unwrap();
-                PasteData {
-                    mime_type: mime,
-                    data,
-                }
-            })
-            .collect()
     }
 }
 
@@ -857,6 +886,7 @@ impl Dispatch<WlDataOffer, Vec<PasteData>> for State {
                 let mut stream = UnixStream::from(fd);
                 stream.write_all(&data[pos].data).unwrap();
             }
+            wl_data_offer::Request::Destroy => {}
             other => todo!("unhandled request: {other:?}"),
         }
     }

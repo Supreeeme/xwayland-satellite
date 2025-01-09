@@ -8,7 +8,7 @@ use self::event::*;
 use super::FromServerState;
 use crate::clientside::*;
 use crate::xstate::{Atoms, WindowDims, WmHints, WmName, WmNormalHints};
-use crate::{MimeTypeData, XConnection};
+use crate::{X11Selection, XConnection};
 use log::{debug, warn};
 use rustix::event::{poll, PollFd, PollFlags};
 use slotmap::{new_key_type, HopSlotMap, SparseSecondaryMap};
@@ -18,10 +18,9 @@ use smithay_client_toolkit::data_device_manager::{
 };
 use std::collections::HashMap;
 use std::io::Read;
-use std::io::Write;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use wayland_client::{globals::Global, protocol as client, Proxy};
 use wayland_protocols::{
     wp::{
@@ -492,7 +491,7 @@ pub struct ServerState<C: XConnection> {
     pub connection: Option<C>,
 
     xdg_wm_base: XdgWmBase,
-    clipboard_data: Option<ClipboardData<C::MimeTypeData>>,
+    clipboard_data: Option<ClipboardData<C::X11Selection>>,
     last_kb_serial: Option<u32>,
 }
 
@@ -518,7 +517,7 @@ impl<C: XConnection> ServerState<C> {
         let clipboard_data = manager.map(|manager| ClipboardData {
             manager,
             device: None,
-            source: None::<CopyPasteData<C::MimeTypeData>>,
+            source: None::<CopyPasteData<C::X11Selection>>,
         });
 
         dh.create_global::<Self, XwaylandShellV1, _>(1, ());
@@ -680,11 +679,7 @@ impl<C: XConnection> ServerState<C> {
             return true;
         };
 
-        if win.mapped && !win.attrs.override_redirect {
-            false
-        } else {
-            true
-        }
+        !(win.mapped && !win.attrs.override_redirect)
     }
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
@@ -805,14 +800,14 @@ impl<C: XConnection> ServerState<C> {
         let _ = self.windows.remove(&window);
     }
 
-    pub(crate) fn set_copy_paste_source(&mut self, mime_types: Rc<Vec<C::MimeTypeData>>) {
+    pub(crate) fn set_copy_paste_source(&mut self, selection: &Rc<C::X11Selection>) {
         if let Some(d) = &mut self.clipboard_data {
             let src = d
                 .manager
-                .create_copy_paste_source(&self.qh, mime_types.iter().map(|m| m.name()));
+                .create_copy_paste_source(&self.qh, selection.mime_types());
             let data = CopyPasteData::X11 {
                 inner: src,
-                data: mime_types,
+                data: Rc::downgrade(selection),
             };
             let CopyPasteData::X11 { inner, .. } = d.source.insert(data) else {
                 unreachable!();
@@ -891,13 +886,12 @@ impl<C: XConnection> ServerState<C> {
         let globals = &mut self.clientside.globals;
 
         if let Some(clipboard) = self.clipboard_data.as_mut() {
-            for (mime_type, mut fd) in std::mem::take(&mut globals.selection_requests) {
+            for (mime_type, fd) in std::mem::take(&mut globals.selection_requests) {
                 let CopyPasteData::X11 { data, .. } = clipboard.source.as_ref().unwrap() else {
-                    unreachable!()
+                    unreachable!("Got selection request without having set the selection?")
                 };
-                let pos = data.iter().position(|m| m.name() == mime_type).unwrap();
-                if let Err(e) = fd.write_all(data[pos].data()) {
-                    warn!("Failed to write selection data: {e:?}");
+                if let Some(data) = data.upgrade() {
+                    data.write_to(&mime_type, fd);
                 }
             }
 
@@ -1090,10 +1084,10 @@ pub struct PendingSurfaceState {
     pub height: i32,
 }
 
-struct ClipboardData<M: MimeTypeData> {
+struct ClipboardData<X: X11Selection> {
     manager: DataDeviceManagerState,
     device: Option<DataDevice>,
-    source: Option<CopyPasteData<M>>,
+    source: Option<CopyPasteData<X>>,
 }
 
 pub struct ForeignSelection {
@@ -1121,10 +1115,10 @@ impl Drop for ForeignSelection {
     }
 }
 
-enum CopyPasteData<M: MimeTypeData> {
+enum CopyPasteData<X: X11Selection> {
     X11 {
         inner: CopyPasteSource,
-        data: Rc<Vec<M>>,
+        data: Weak<X>,
     },
     Foreign(ForeignSelection),
 }

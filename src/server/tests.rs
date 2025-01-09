@@ -3,6 +3,7 @@ use crate::xstate::{SetState, WmName};
 use paste::paste;
 use rustix::event::{poll, PollFd, PollFlags};
 use std::collections::HashMap;
+use std::io::Write;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
@@ -182,19 +183,30 @@ impl super::FromServerState<FakeXConnection> for () {
     fn create(_: &FakeServerState) -> Self {}
 }
 
-impl crate::MimeTypeData for testwl::PasteData {
-    fn name(&self) -> &str {
-        &self.mime_type
+impl crate::X11Selection for Vec<testwl::PasteData> {
+    fn mime_types(&self) -> Vec<&str> {
+        self.iter().map(|data| data.mime_type.as_str()).collect()
     }
 
-    fn data(&self) -> &[u8] {
-        &self.data
+    fn write_to(
+        &self,
+        mime: &str,
+        mut pipe: smithay_client_toolkit::data_device_manager::WritePipe,
+    ) {
+        println!("writing");
+        let data = self
+            .iter()
+            .find(|data| data.mime_type == mime)
+            .unwrap_or_else(|| panic!("Couldn't find mime type {mime}"));
+        pipe.write_all(&data.data)
+            .expect("Couldn't write paste data");
+        println!("goodbye pipe {mime}");
     }
 }
 
 impl super::XConnection for FakeXConnection {
     type ExtraData = ();
-    type MimeTypeData = testwl::PasteData;
+    type X11Selection = Vec<testwl::PasteData>;
     fn root_window(&self) -> Window {
         self.root
     }
@@ -1162,7 +1174,7 @@ fn copy_from_x11() {
         },
     ]);
 
-    f.satellite.set_copy_paste_source(mimes.clone());
+    f.satellite.set_copy_paste_source(&mimes);
     f.run();
 
     let server_mimes = f.testwl.data_source_mimes();
@@ -1170,9 +1182,10 @@ fn copy_from_x11() {
         assert!(server_mimes.contains(&mime.mime_type));
     }
 
-    let data = f.testwl.paste_data();
-    f.run();
-    let data = data.resolve();
+    let data = f.testwl.paste_data(|_, _| {
+        f.satellite.run();
+        true
+    });
     assert_eq!(*mimes, data);
 }
 
@@ -1236,7 +1249,7 @@ fn clipboard_x11_then_wayland() {
         },
     ]);
 
-    f.satellite.set_copy_paste_source(x11data.clone());
+    f.satellite.set_copy_paste_source(&x11data);
     f.run();
 
     let waylanddata = vec![
