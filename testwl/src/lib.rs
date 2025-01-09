@@ -168,7 +168,6 @@ struct DataSourceData {
 
 struct Output {
     name: String,
-    wl: WlOutput,
     xdg: Option<ZxdgOutputV1>,
 }
 
@@ -827,14 +826,9 @@ impl GlobalDispatch<WlOutput, (i32, i32)> for State {
         output.name(name.clone());
         output.mode(wl_output::Mode::Current, 1000, 1000, 0);
         output.done();
-        state.outputs.insert(
-            output.clone(),
-            Output {
-                name,
-                wl: output.clone(),
-                xdg: None,
-            },
-        );
+        state
+            .outputs
+            .insert(output.clone(), Output { name, xdg: None });
         state.last_output = Some(output);
     }
 }

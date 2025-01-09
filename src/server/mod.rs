@@ -679,7 +679,7 @@ impl<C: XConnection> ServerState<C> {
             return true;
         };
 
-        !(win.mapped && !win.attrs.override_redirect)
+        !win.mapped || win.attrs.override_redirect
     }
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {

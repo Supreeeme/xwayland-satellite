@@ -749,9 +749,9 @@ where
         backend: &Backend,
         msg: Message<ObjectId, std::os::fd::OwnedFd>,
     ) -> Option<Arc<dyn ObjectData>> {
-        fn obj_data<T: Proxy>() -> Arc<dyn ObjectData>
+        fn obj_data<T>() -> Arc<dyn ObjectData>
         where
-            T: Send + Sync + 'static,
+            T: Proxy + Send + Sync + 'static,
             T::Event: Send + Sync + std::fmt::Debug,
         {
             Arc::new(TestObjectData::<T>::default())
@@ -1143,7 +1143,6 @@ fn window_group_properties() {
         win,
         super::WmHints {
             window_group: Some(prop_win),
-            ..Default::default()
         },
     );
     f.satellite.map_window(win);
@@ -1524,10 +1523,11 @@ fn ignore_toplevel_reconfigure() {
     );
 }
 
+type EventMatcher<'a, Event> = Box<dyn FnMut(&Event) -> bool + 'a>;
 #[track_caller]
-fn events_check<'a, Event: std::fmt::Debug, const N: usize>(
+fn events_check<Event: std::fmt::Debug, const N: usize>(
     mut it: impl Iterator<Item = Event>,
-    mut matchers: [Box<dyn FnMut(&Event) -> bool + 'a>; N],
+    mut matchers: [EventMatcher<'_, Event>; N],
 ) {
     for (idx, matcher) in matchers.iter_mut().enumerate() {
         let item = it.next();
@@ -1595,10 +1595,7 @@ fn tablet_smoke_test() {
     events_check(
         tab_events,
         [
-            Box::new(|e| match e {
-                zwp_tablet_v2::Event::Name { name } if name == "tabby" => true,
-                _ => false,
-            }),
+            Box::new(|e| matches!(e, zwp_tablet_v2::Event::Name { name } if name == "tabby")),
             Box::new(|e| matches!(e, zwp_tablet_v2::Event::Done)),
         ],
     );
@@ -1644,9 +1641,9 @@ fn tablet_smoke_test() {
     events_check(
         g_events,
         [
-            Box::new(|e| match e {
-                zwp_tablet_pad_group_v2::Event::Buttons { buttons } if buttons.is_empty() => true,
-                _ => false,
+            Box::new(|e| {
+                matches!(e,
+                zwp_tablet_pad_group_v2::Event::Buttons { buttons } if buttons.is_empty())
             }),
             Box::new(|e| matches!(e, zwp_tablet_pad_group_v2::Event::Ring { .. })),
             Box::new(|e| matches!(e, zwp_tablet_pad_group_v2::Event::Strip { .. })),

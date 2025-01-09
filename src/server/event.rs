@@ -545,7 +545,7 @@ impl HandleEvent for Keyboard {
                 if let Some(data) = state
                     .objects
                     .get(key)
-                    .map(|o| <_ as AsRef<SurfaceData>>::as_ref(o))
+                    .map(<_ as AsRef<SurfaceData>>::as_ref)
                 {
                     state.last_kb_serial = Some(serial);
                     let output_name = data.get_output_name(state);
@@ -564,7 +564,7 @@ impl HandleEvent for Keyboard {
                 if let Some(data) = state
                     .objects
                     .get(key)
-                    .map(|o| <_ as AsRef<SurfaceData>>::as_ref(o))
+                    .map(<_ as AsRef<SurfaceData>>::as_ref)
                 {
                     if state.to_focus.as_ref().map(|d| d.window) == Some(data.window.unwrap()) {
                         state.to_focus.take();
@@ -741,7 +741,7 @@ impl Output {
                 state.connection.as_mut().unwrap(),
             );
 
-            return true;
+            true
         });
     }
     fn wl_event<C: XConnection>(
