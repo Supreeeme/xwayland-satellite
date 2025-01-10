@@ -875,7 +875,7 @@ impl Dispatch<WlDataOffer, Vec<PasteData>> for State {
                 let pos = data
                     .iter()
                     .position(|data| data.mime_type == mime_type)
-                    .expect("Invalid mime type: {mime_type}");
+                    .unwrap_or_else(|| panic!("Invalid mime type: {mime_type}"));
 
                 let mut stream = UnixStream::from(fd);
                 stream.write_all(&data[pos].data).unwrap();

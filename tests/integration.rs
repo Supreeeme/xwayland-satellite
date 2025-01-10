@@ -1306,3 +1306,59 @@ fn wayland_then_x11_clipboard_owner() {
     assert_eq!(request.selection(), connection.atoms.clipboard);
     assert_eq!(request.target(), connection.atoms.targets);
 }
+
+#[test]
+fn fake_selection_targets() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    connection.get_selection_owner_change_events(true, window);
+
+    let data = b"boingloings";
+    f.map_as_toplevel(&mut connection, window);
+    let offer = vec![testwl::PasteData {
+        mime_type: "text/plain;charset=utf-8".into(),
+        data: data.to_vec(),
+    }];
+    f.testwl.create_data_offer(offer.clone());
+
+    connection.await_selection_owner_change();
+    connection.verify_clipboard_owner(connection.wm_window);
+    connection.get_selection_owner_change_events(false, window);
+
+    let utf8_string = connection
+        .get_reply(&x::InternAtom {
+            only_if_exists: false,
+            name: b"UTF8_STRING",
+        })
+        .atom();
+
+    connection
+        .send_and_check_request(&x::ConvertSelection {
+            requestor: window,
+            selection: connection.atoms.clipboard,
+            target: utf8_string,
+            property: utf8_string,
+            time: x::CURRENT_TIME,
+        })
+        .unwrap();
+
+    f.wait_and_dispatch();
+    let notify = connection.await_selection_notify();
+    assert_eq!(notify.property(), utf8_string, "ConvertSelection failed");
+
+    let reply = connection.get_reply(&x::GetProperty {
+        delete: false,
+        window,
+        property: utf8_string,
+        r#type: utf8_string,
+        long_offset: 0,
+        long_length: data.len() as u32,
+    });
+    let paste_data: &[u8] = reply.value();
+
+    assert_eq!(
+        std::str::from_utf8(paste_data).unwrap(),
+        std::str::from_utf8(data).unwrap()
+    );
+}

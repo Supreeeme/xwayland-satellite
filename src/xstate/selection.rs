@@ -12,6 +12,7 @@ use xcb::x;
 struct SelectionTargetId {
     name: String,
     atom: x::Atom,
+    source: Option<String>,
 }
 
 struct PendingSelectionData {
@@ -227,10 +228,18 @@ impl XState {
     }
 
     pub(crate) fn set_clipboard(&mut self, selection: ForeignSelection) {
-        let mimes = selection
+        let mut utf8_xwl = false;
+        let mut utf8_wl = false;
+        let mut mimes: Vec<SelectionTargetId> = selection
             .mime_types
             .iter()
             .map(|mime| {
+                match mime.as_str() {
+                    "UTF8_STRING" => utf8_xwl = true,
+                    "text/plain;charset=utf-8" => utf8_wl = true,
+                    _ => {}
+                }
+
                 let atom = self
                     .connection
                     .wait_for_reply(self.connection.send_request(&x::InternAtom {
@@ -242,9 +251,27 @@ impl XState {
                 SelectionTargetId {
                     name: mime.clone(),
                     atom: atom.atom(),
+                    source: None,
                 }
             })
             .collect();
+
+        if utf8_wl && !utf8_xwl {
+            let name = "UTF8_STRING".to_string();
+            let atom = self
+                .connection
+                .wait_for_reply(self.connection.send_request(&x::InternAtom {
+                    only_if_exists: false,
+                    name: name.as_bytes(),
+                }))
+                .unwrap()
+                .atom();
+            mimes.push(SelectionTargetId {
+                name,
+                atom,
+                source: Some("text/plain;charset=utf-8".to_string()),
+            });
+        }
 
         self.selection_data.current_selection = Some(CurrentSelection::Wayland {
             mimes,
@@ -364,7 +391,12 @@ impl XState {
                             return true;
                         };
 
-                        let data = inner.receive(target.name.clone(), server_state);
+                        let mime_name = target
+                            .source
+                            .as_ref()
+                            .cloned()
+                            .unwrap_or_else(|| target.name.clone());
+                        let data = inner.receive(mime_name, server_state);
                         match self.connection.send_and_check_request(&x::ChangeProperty {
                             mode: x::PropMode::Replace,
                             window: e.requestor(),
@@ -479,6 +511,7 @@ impl XState {
             .map(|target_atom| SelectionTargetId {
                 name: get_atom_name(&self.connection, target_atom),
                 atom: target_atom,
+                source: None,
             })
             .collect();
 
