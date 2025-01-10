@@ -2,7 +2,7 @@
 members = ["macros"]
 [workspace.dependencies]
 wayland-client = "0.31.2"
-wayland-protocols = "0.31.2"
+wayland-protocols = "0.32.0"
 wayland-scanner = "0.31.1"
 wayland-server = "0.31.1"
 rustix = "0.38.31"

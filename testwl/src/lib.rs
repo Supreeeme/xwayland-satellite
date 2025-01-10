@@ -295,6 +295,7 @@ impl State {
 
 macro_rules! simple_global_dispatch {
     ($type:ty) => {
+        #[allow(non_local_definitions)]
         impl GlobalDispatch<$type, ()> for State {
             fn bind(
                 _: &mut Self,
@@ -328,6 +329,7 @@ impl Server {
                     dh.create_global::<State, $type, _>(1, ());
                 }
                 simple_global_dispatch!($type);
+                #[allow(non_local_definitions)]
                 impl Dispatch<$type, ()> for State {
                     fn request(
                         _: &mut Self,
