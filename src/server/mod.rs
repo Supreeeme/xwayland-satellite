@@ -670,7 +670,10 @@ impl<C: XConnection> ServerState<C> {
     }
 
     pub fn set_window_serial(&mut self, window: x::Window, serial: [u32; 2]) {
-        let win = self.windows.get_mut(&window).unwrap();
+        let Some(win) = self.windows.get_mut(&window) else {
+            warn!("Tried to set serial for unknown window {window:?}");
+            return;
+        };
         win.surface_serial = Some(serial);
     }
 
@@ -768,7 +771,10 @@ impl<C: XConnection> ServerState<C> {
     }
 
     pub fn set_fullscreen(&mut self, window: x::Window, state: super::xstate::SetState) {
-        let win = self.windows.get(&window).unwrap();
+        let Some(win) = self.windows.get(&window) else {
+            warn!("Tried to set unknown window {window:?} fullscreen");
+            return;
+        };
         let Some(key) = win.surface_key else {
             warn!("Tried to set window without surface fullscreen: {window:?}");
             return;
@@ -783,10 +789,11 @@ impl<C: XConnection> ServerState<C> {
             return;
         };
 
+        use crate::xstate::SetState;
         match state {
-            crate::xstate::SetState::Add => toplevel.toplevel.set_fullscreen(None),
-            crate::xstate::SetState::Remove => toplevel.toplevel.unset_fullscreen(),
-            crate::xstate::SetState::Toggle => {
+            SetState::Add => toplevel.toplevel.set_fullscreen(None),
+            SetState::Remove => toplevel.toplevel.unset_fullscreen(),
+            SetState::Toggle => {
                 if toplevel.fullscreen {
                     toplevel.toplevel.unset_fullscreen()
                 } else {
@@ -829,7 +836,7 @@ impl<C: XConnection> ServerState<C> {
         self.clientside
             .queue
             .dispatch_pending(&mut self.clientside.globals)
-            .unwrap();
+            .expect("Failed dispatching client side Wayland events");
         self.handle_clientside_events();
     }
 
@@ -867,7 +874,10 @@ impl<C: XConnection> ServerState<C> {
         }
 
         self.handle_clipboard_events();
-        self.clientside.queue.flush().unwrap();
+        self.clientside
+            .queue
+            .flush()
+            .expect("Failed flushing clientside events");
     }
 
     pub fn new_selection(&mut self) -> Option<ForeignSelection> {
