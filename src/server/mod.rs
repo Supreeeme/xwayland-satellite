@@ -480,6 +480,7 @@ pub struct ServerState<C: XConnection> {
     clientside: ClientState,
     objects: ObjectMap,
     associated_windows: SparseSecondaryMap<ObjectKey, x::Window>,
+    output_keys: SparseSecondaryMap<ObjectKey, ()>,
     windows: HashMap<x::Window, WindowData>,
 
     qh: ClientQueueHandle,
@@ -539,6 +540,7 @@ impl<C: XConnection> ServerState<C> {
             last_hovered: None,
             connection: None,
             objects: Default::default(),
+            output_keys: Default::default(),
             associated_windows: Default::default(),
             xdg_wm_base,
             clipboard_data,
@@ -922,15 +924,20 @@ impl<C: XConnection> ServerState<C> {
     }
 
     fn create_role_window(&mut self, window: x::Window, surface_key: ObjectKey) {
-        let surface: &mut SurfaceData = self.objects[surface_key].as_mut();
+        // Temporarily remove surface to placate borrow checker
+        let mut surface: SurfaceData = self.objects[surface_key]
+            .0
+            .take()
+            .unwrap()
+            .try_into()
+            .unwrap();
         surface.window = Some(window);
-        let client = &surface.client;
-        client.attach(None, 0, 0);
-        client.commit();
+        surface.client.attach(None, 0, 0);
+        surface.client.commit();
 
         let xdg_surface = self
             .xdg_wm_base
-            .get_xdg_surface(client, &self.qh, surface_key);
+            .get_xdg_surface(&surface.client, &self.qh, surface_key);
 
         let window_data = self.windows.get_mut(&window).unwrap();
         if window_data.attrs.override_redirect {
@@ -941,15 +948,27 @@ impl<C: XConnection> ServerState<C> {
                 window_data.attrs.popup_for = Some(win);
             }
         }
+
+        let mut fullscreen = false;
+        let (width, height) = (window_data.attrs.dims.width, window_data.attrs.dims.height);
+        for (key, _) in &self.output_keys {
+            let output: &Output = self.objects[key].as_ref();
+            if output.dimensions.width == width as i32 && output.dimensions.height == height as i32
+            {
+                fullscreen = true;
+                window_data.attrs.popup_for = None;
+            }
+        }
+
+        let surface_id = surface.client.id();
+        // Reinsert surface
+        self.objects[surface_key].0 = Some(surface.into());
         let window = self.windows.get(&window).unwrap();
 
         let role = if let Some(parent) = window.attrs.popup_for {
             debug!(
                 "creating popup ({:?}) {:?} {:?} {:?} {surface_key:?}",
-                window.window,
-                parent,
-                window.attrs.dims,
-                client.id()
+                window.window, parent, window.attrs.dims, surface_id
             );
 
             let parent_window = self.windows.get(&parent).unwrap();
@@ -988,7 +1007,7 @@ impl<C: XConnection> ServerState<C> {
             };
             SurfaceRole::Popup(Some(popup))
         } else {
-            let data = self.create_toplevel(window, surface_key, xdg_surface);
+            let data = self.create_toplevel(window, surface_key, xdg_surface, fullscreen);
             SurfaceRole::Toplevel(Some(data))
         };
 
@@ -1013,6 +1032,7 @@ impl<C: XConnection> ServerState<C> {
         window: &WindowData,
         surface_key: ObjectKey,
         xdg: XdgSurface,
+        fullscreen: bool,
     ) -> ToplevelData {
         debug!("creating toplevel for {:?}", window.window);
 
@@ -1042,6 +1062,10 @@ impl<C: XConnection> ServerState<C> {
             .or(group.and_then(|g| g.attrs.title.as_ref()))
         {
             toplevel.set_title(title.name().to_string());
+        }
+
+        if fullscreen {
+            toplevel.set_fullscreen(None);
         }
 
         ToplevelData {

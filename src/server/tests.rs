@@ -1651,6 +1651,60 @@ fn tablet_smoke_test() {
         ],
     )
 }
+
+#[test]
+fn fullscreen_heuristic() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let (_, output) = f.new_output(0, 0);
+
+    let window1 = unsafe { Window::new(1) };
+    let (_, id) = f.create_toplevel(&comp, window1);
+    f.testwl.move_surface_to_output(id, &output);
+    f.run();
+
+    let mut check_fullscreen = |id, override_redirect| {
+        let window = unsafe { Window::new(id) };
+        let (buffer, surface) = comp.create_surface();
+        let data = WindowData {
+            mapped: true,
+            dims: WindowDims {
+                x: 0,
+                y: 0,
+                // Outputs default to 1000x1000 in testwl
+                width: 1000,
+                height: 1000,
+            },
+            fullscreen: false,
+        };
+        f.new_window(window, override_redirect, data, None);
+        f.map_window(&comp, window, &surface.obj, &buffer);
+        f.run();
+        let id = f.check_new_surface();
+        let surface_data = f.testwl.get_surface_data(id).unwrap();
+        assert!(
+            surface_data.surface
+                == f.testwl
+                    .get_object::<s_proto::wl_surface::WlSurface>(id)
+                    .unwrap()
+        );
+
+        let Some(testwl::SurfaceRole::Toplevel(toplevel_data)) = &surface_data.role else {
+            panic!("Expected toplevel, got {:?}", surface_data.role);
+        };
+
+        assert!(
+            toplevel_data
+                .states
+                .contains(&xdg_toplevel::State::Fullscreen),
+            "states: {:?}",
+            toplevel_data.states
+        );
+    };
+
+    check_fullscreen(2, false);
+    check_fullscreen(3, true);
+}
+
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}

@@ -128,13 +128,12 @@ impl SurfaceData {
                 debug!("{} entered {}", self.server.id(), output.server.id());
                 let windows = &mut state.windows;
                 if let Some(win_data) = self.window.as_ref().and_then(|win| windows.get_mut(win)) {
-                    let (x, y) = match output.position {
-                        OutputPosition::Xdg { x, y } => (x, y),
-                        OutputPosition::Wl { x, y } => (x, y),
-                    };
                     win_data.update_output_offset(
                         key,
-                        WindowOutputOffset { x, y },
+                        WindowOutputOffset {
+                            x: output.dimensions.x,
+                            y: output.dimensions.y,
+                        },
                         state.connection.as_mut().unwrap(),
                     );
                     let window = win_data.window;
@@ -656,9 +655,18 @@ pub struct XdgOutput {
 }
 
 #[derive(Copy, Clone)]
-pub enum OutputPosition {
-    Wl { x: i32, y: i32 },
-    Xdg { x: i32, y: i32 },
+enum OutputDimensionsSource {
+    Wl,
+    Xdg,
+}
+
+#[derive(Copy, Clone)]
+pub(super) struct OutputDimensions {
+    source: OutputDimensionsSource,
+    x: i32,
+    y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 pub struct Output {
@@ -666,7 +674,7 @@ pub struct Output {
     pub server: WlOutput,
     pub xdg: Option<XdgOutput>,
     windows: HashSet<x::Window>,
-    position: OutputPosition,
+    pub(super) dimensions: OutputDimensions,
     name: String,
 }
 
@@ -677,7 +685,13 @@ impl Output {
             server,
             xdg: None,
             windows: HashSet::new(),
-            position: OutputPosition::Wl { x: 0, y: 0 },
+            dimensions: OutputDimensions {
+                source: OutputDimensionsSource::Wl,
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             name: "<unknown>".to_string(),
         }
     }
@@ -715,19 +729,23 @@ impl HandleEvent for Output {
 impl Output {
     fn update_offset<C: XConnection>(
         &mut self,
-        offset: OutputPosition,
+        source: OutputDimensionsSource,
+        x: i32,
+        y: i32,
         state: &mut ServerState<C>,
     ) {
-        if matches!(offset, OutputPosition::Wl { .. })
-            && matches!(self.position, OutputPosition::Xdg { .. })
+        if matches!(source, OutputDimensionsSource::Wl)
+            && matches!(self.dimensions.source, OutputDimensionsSource::Xdg)
         {
             return;
         }
 
-        self.position = offset;
-        let (x, y, id) = match offset {
-            OutputPosition::Xdg { x, y } => (x, y, self.xdg.as_ref().unwrap().server.id()),
-            OutputPosition::Wl { x, y } => (x, y, self.server.id()),
+        self.dimensions.source = source;
+        self.dimensions.x = x;
+        self.dimensions.y = y;
+        let id = match source {
+            OutputDimensionsSource::Xdg => self.xdg.as_ref().unwrap().server.id(),
+            OutputDimensionsSource::Wl => self.server.id(),
         };
         debug!("moving {id} to {x}x{y}");
         self.windows.retain(|window| {
@@ -750,7 +768,15 @@ impl Output {
         state: &mut ServerState<C>,
     ) {
         if let client::wl_output::Event::Geometry { x, y, .. } = event {
-            self.update_offset(OutputPosition::Wl { x, y }, state);
+            self.update_offset(OutputDimensionsSource::Wl, x, y, state);
+        }
+
+        if let client::wl_output::Event::Mode { width, height, .. } = event {
+            if matches!(self.dimensions.source, OutputDimensionsSource::Wl) {
+                self.dimensions.width = width;
+                self.dimensions.height = height;
+                debug!("{} dimensions: {width}x{height} (wl)", self.server.id());
+            }
         }
 
         simple_event_shunt! {
@@ -790,9 +816,15 @@ impl Output {
         state: &mut ServerState<C>,
     ) {
         if let zxdg_output_v1::Event::LogicalPosition { x, y } = event {
-            self.update_offset(OutputPosition::Xdg { x, y }, state);
+            self.update_offset(OutputDimensionsSource::Xdg, x, y, state);
         }
         let xdg = &self.xdg.as_ref().unwrap().server;
+        if let zxdg_output_v1::Event::LogicalSize { width, height } = event {
+            self.dimensions.source = OutputDimensionsSource::Xdg;
+            self.dimensions.width = width;
+            self.dimensions.height = height;
+            debug!("{} dimensions: {width}x{height} (xdg)", self.server.id());
+        }
         simple_event_shunt! {
             xdg, event: zxdg_output_v1::Event => [
                 LogicalPosition { x, y },
