@@ -831,7 +831,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xwayland-satellite"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bitflags 2.8.0",
  "env_logger 0.11.6",
