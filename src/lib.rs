@@ -1,6 +1,7 @@
 mod clientside;
 mod data_device;
 mod server;
+mod xdg_activation;
 pub mod xstate;
 
 use crate::server::{PendingSurfaceState, ServerState};

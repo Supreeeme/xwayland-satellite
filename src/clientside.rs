@@ -16,6 +16,7 @@ use wayland_protocols::wp::relative_pointer::zv1::client::{
     zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
     zwp_relative_pointer_v1::ZwpRelativePointerV1,
 };
+use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::client::{
@@ -67,6 +68,7 @@ pub struct Globals {
         smithay_client_toolkit::data_device_manager::WritePipe,
     )>,
     pub cancelled: bool,
+    pub pending_activations: Vec<(xcb::x::Window, String)>,
 }
 
 pub type ClientQueueHandle = QueueHandle<Globals>;
@@ -134,6 +136,7 @@ delegate_noop!(Globals: WpViewport);
 delegate_noop!(Globals: ZxdgOutputManagerV1);
 delegate_noop!(Globals: ZwpPointerConstraintsV1);
 delegate_noop!(Globals: ZwpTabletManagerV2);
+delegate_noop!(Globals: XdgActivationV1);
 
 impl Dispatch<WlRegistry, GlobalListContents> for Globals {
     fn event(
