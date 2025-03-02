@@ -1,4 +1,5 @@
 mod data_device;
+pub mod xdg_activation;
 
 use crate::server::{ObjectEvent, ObjectKey};
 use std::os::unix::net::UnixStream;
@@ -46,6 +47,7 @@ use wayland_protocols::{
         viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
     },
     xdg::{
+        activation::v1::client::xdg_activation_v1::XdgActivationV1,
         shell::client::{
             xdg_popup::XdgPopup, xdg_positioner::XdgPositioner, xdg_surface::XdgSurface,
             xdg_toplevel::XdgToplevel, xdg_wm_base::XdgWmBase,
@@ -69,6 +71,7 @@ pub struct Globals {
         smithay_client_toolkit::data_device_manager::WritePipe,
     )>,
     pub cancelled: bool,
+    pub pending_activations: Vec<(xcb::x::Window, String)>,
 }
 
 pub type ClientQueueHandle = QueueHandle<Globals>;
@@ -136,6 +139,7 @@ delegate_noop!(Globals: WpViewport);
 delegate_noop!(Globals: ZxdgOutputManagerV1);
 delegate_noop!(Globals: ZwpPointerConstraintsV1);
 delegate_noop!(Globals: ZwpTabletManagerV2);
+delegate_noop!(Globals: XdgActivationV1);
 
 impl Dispatch<WlRegistry, GlobalListContents> for Globals {
     fn event(
