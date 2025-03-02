@@ -546,6 +546,17 @@ impl Connection {
         })
         .unwrap();
     }
+
+    #[track_caller]
+    fn send_client_message(&self, request: &x::ClientMessageEvent) {
+        self.send_and_check_request(&x::SendEvent {
+            propagate: false,
+            destination: x::SendEventDest::Window(self.root),
+            event_mask: x::EventMask::SUBSTRUCTURE_NOTIFY | x::EventMask::SUBSTRUCTURE_REDIRECT,
+            event: request,
+        })
+        .unwrap();
+    }
 }
 
 #[test]
@@ -779,6 +790,28 @@ fn input_focus() {
     check_focus(x::WINDOW_NONE);
 
     f.wm_delete_window(&mut connection, win1, surface1);
+}
+
+#[test]
+fn activation_x11_to_x11() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window1 = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface1 = f.map_as_toplevel(&mut connection, window1);
+    let window2 = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface2 = f.map_as_toplevel(&mut connection, window2);
+
+    f.testwl.focus_toplevel(surface2);
+    std::thread::sleep(Duration::from_millis(1));
+    connection.send_client_message(&x::ClientMessageEvent::new(
+        window1,
+        connection.atoms.net_active_window,
+        x::ClientMessageData::Data32([2, x::CURRENT_TIME, 0, 0, 0]),
+    ));
+    f.wait_and_dispatch();
+
+    assert_eq!(f.testwl.get_focused(), Some(surface1));
 }
 
 #[test]

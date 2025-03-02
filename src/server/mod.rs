@@ -11,11 +11,12 @@ use crate::{X11Selection, XConnection};
 use log::{debug, warn};
 use rustix::event::{poll, PollFd, PollFlags};
 use slotmap::{new_key_type, HopSlotMap, SparseSecondaryMap};
+use smithay_client_toolkit::activation::ActivationState;
 use smithay_client_toolkit::data_device_manager::{
     data_device::DataDevice, data_offer::SelectionOffer, data_source::CopyPasteSource,
     DataDeviceManagerState,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
@@ -43,10 +44,11 @@ use wayland_protocols::{
         xwayland_shell_v1::XwaylandShellV1, xwayland_surface_v1::XwaylandSurfaceV1,
     },
 };
+use wayland_server::protocol::wl_seat::WlSeat;
 use wayland_server::{
     protocol::{
-        wl_callback::WlCallback, wl_compositor::WlCompositor, wl_output::WlOutput, wl_seat::WlSeat,
-        wl_shm::WlShm, wl_surface::WlSurface,
+        wl_callback::WlCallback, wl_compositor::WlCompositor, wl_output::WlOutput, wl_shm::WlShm,
+        wl_surface::WlSurface,
     },
     Client, DisplayHandle, Resource, WEnum,
 };
@@ -102,6 +104,7 @@ struct WindowData {
     attrs: WindowAttributes,
     output_offset: WindowOutputOffset,
     output_key: Option<ObjectKey>,
+    activation_token: Option<String>,
 }
 
 impl WindowData {
@@ -110,6 +113,7 @@ impl WindowData {
         override_redirect: bool,
         dims: WindowDims,
         parent: Option<x::Window>,
+        activation_token: Option<String>,
     ) -> Self {
         Self {
             window,
@@ -124,6 +128,7 @@ impl WindowData {
             },
             output_offset: WindowOutputOffset::default(),
             output_key: None,
+            activation_token,
         }
     }
 
@@ -488,6 +493,7 @@ pub struct ServerState<C: XConnection> {
     associated_windows: SparseSecondaryMap<ObjectKey, x::Window>,
     output_keys: SparseSecondaryMap<ObjectKey, ()>,
     windows: HashMap<x::Window, WindowData>,
+    pids: HashSet<u32>,
 
     qh: ClientQueueHandle,
     client: Option<Client>,
@@ -499,7 +505,8 @@ pub struct ServerState<C: XConnection> {
 
     xdg_wm_base: XdgWmBase,
     clipboard_data: Option<ClipboardData<C::X11Selection>>,
-    last_kb_serial: Option<u32>,
+    last_kb_serial: Option<(client::wl_seat::WlSeat, u32)>,
+    activation_state: Option<ActivationState>,
     global_output_offset: GlobalOutputOffset,
     global_offset_updated: bool,
 }
@@ -529,6 +536,12 @@ impl<C: XConnection> ServerState<C> {
             source: None::<CopyPasteData<C::X11Selection>>,
         });
 
+        let activation_state = ActivationState::bind(&clientside.global_list, &qh)
+            .inspect_err(|e| {
+                warn!("Could not bind xdg activation ({e:?}). Windows might not recive focus depending on compositor focus stealing policy.")
+            })
+            .ok();
+
         dh.create_global::<Self, XwaylandShellV1, _>(1, ());
         clientside
             .global_list
@@ -537,6 +550,7 @@ impl<C: XConnection> ServerState<C> {
 
         Self {
             windows: HashMap::new(),
+            pids: HashSet::new(),
             clientside,
             client: None,
             qh,
@@ -552,6 +566,7 @@ impl<C: XConnection> ServerState<C> {
             xdg_wm_base,
             clipboard_data,
             last_kb_serial: None,
+            activation_state,
             global_output_offset: GlobalOutputOffset {
                 x: GlobalOutputOffsetDimension {
                     owner: None,
@@ -593,10 +608,23 @@ impl<C: XConnection> ServerState<C> {
         override_redirect: bool,
         dims: WindowDims,
         parent: Option<x::Window>,
+        pid: Option<u32>,
     ) {
+        let activation_token = pid
+            .filter(|pid| self.pids.insert(*pid))
+            .and_then(|pid| std::fs::read(format!("/proc/{pid}/environ")).ok())
+            .and_then(|environ| {
+                environ
+                    .split(|byte| *byte == 0)
+                    .find_map(|line| line.strip_prefix(b"XDG_ACTIVATION_TOKEN="))
+                    .and_then(|token| String::from_utf8(token.to_vec()).ok())
+            });
+        if activation_token.is_none() {
+            self.activate_window(window);
+        }
         self.windows.insert(
             window,
-            WindowData::new(window, override_redirect, dims, parent),
+            WindowData::new(window, override_redirect, dims, parent, activation_token),
         );
     }
 
@@ -823,6 +851,41 @@ impl<C: XConnection> ServerState<C> {
         }
     }
 
+    pub fn activate_window(&mut self, window: x::Window) {
+        let Some(activation_state) = self.activation_state.as_ref() else {
+            return;
+        };
+
+        let Some(last_focused_toplevel) = self.last_focused_toplevel else {
+            warn!("No last focused toplevel, cannot focus window {window:?}");
+            return;
+        };
+        let Some(win) = self.windows.get(&last_focused_toplevel) else {
+            warn!("Unknown last focused toplevel, cannot focus window {window:?}");
+            return;
+        };
+        let Some(key) = win.surface_key else {
+            warn!("Last focused toplevel has no surface, cannot focus window {window:?}");
+            return;
+        };
+        let Some(object) = self.objects.get_mut(key) else {
+            warn!("Last focused toplevel has stale reference, cannot focus window {window:?}");
+            return;
+        };
+        let surface: &mut SurfaceData = object.as_mut();
+        activation_state.request_token_with_data(
+            &self.qh,
+            xdg_activation::ActivationData::new(
+                window,
+                smithay_client_toolkit::activation::RequestData {
+                    app_id: win.attrs.class.clone(),
+                    seat_and_serial: self.last_kb_serial.clone(),
+                    surface: Some(surface.client.clone()),
+                },
+            ),
+        );
+    }
+
     pub fn destroy_window(&mut self, window: x::Window) {
         let _ = self.windows.remove(&window);
     }
@@ -839,7 +902,12 @@ impl<C: XConnection> ServerState<C> {
             let CopyPasteData::X11 { inner, .. } = d.source.insert(data) else {
                 unreachable!();
             };
-            if let Some(serial) = self.last_kb_serial.as_ref().copied() {
+            if let Some(serial) = self
+                .last_kb_serial
+                .as_ref()
+                .map(|(_seat, serial)| serial)
+                .copied()
+            {
                 inner.set_selection(d.device.as_ref().unwrap(), serial);
             }
         }
@@ -920,6 +988,7 @@ impl<C: XConnection> ServerState<C> {
         }
 
         self.handle_clipboard_events();
+        self.handle_activations();
         self.clientside
             .queue
             .flush()
@@ -965,6 +1034,24 @@ impl<C: XConnection> ServerState<C> {
                 globals.cancelled = false;
             }
         }
+    }
+
+    fn handle_activations(&mut self) {
+        let Some(activation_state) = self.activation_state.as_ref() else {
+            return;
+        };
+        let globals = &mut self.clientside.globals;
+
+        globals.pending_activations.retain(|(window, token)| {
+            if let Some(window) = self.windows.get(window) {
+                if let Some(key) = window.surface_key {
+                    let surface: &SurfaceData = self.objects[key].as_ref();
+                    activation_state.activate::<Self>(&surface.client, token.clone());
+                    return false;
+                }
+            }
+            true
+        });
     }
 
     fn calc_global_output_offset(&mut self) {
@@ -1132,6 +1219,14 @@ impl<C: XConnection> ServerState<C> {
 
         if fullscreen {
             toplevel.set_fullscreen(None);
+        }
+
+        let surface: &SurfaceData = self.objects[surface_key].as_ref();
+        if let (Some(activation_state), Some(token)) = (
+            self.activation_state.as_ref(),
+            window.activation_token.clone(),
+        ) {
+            activation_state.activate::<Self>(&surface.client, token);
         }
 
         ToplevelData {

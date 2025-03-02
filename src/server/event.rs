@@ -540,7 +540,12 @@ impl HandleEvent for Pointer {
     }
 }
 
-pub type Keyboard = GenericObject<WlKeyboard, client::wl_keyboard::WlKeyboard>;
+pub struct Keyboard {
+    pub server: WlKeyboard,
+    pub client: client::wl_keyboard::WlKeyboard,
+    pub seat: client::wl_seat::WlSeat,
+}
+
 impl HandleEvent for Keyboard {
     type Event = client::wl_keyboard::Event;
 
@@ -557,7 +562,14 @@ impl HandleEvent for Keyboard {
                         .get(key)
                         .map(<_ as AsRef<SurfaceData>>::as_ref)
                 }) {
-                    state.last_kb_serial = Some(serial);
+                    state.last_kb_serial = Some((
+                        state
+                            .last_kb_serial
+                            .take()
+                            .and_then(|(seat, _)| (seat == self.seat).then_some(seat))
+                            .unwrap_or_else(|| self.seat.clone()),
+                        serial,
+                    ));
                     let output_name = data.get_output_name(state);
                     state.to_focus = Some(FocusData {
                         window: data.window.unwrap(),
@@ -584,18 +596,28 @@ impl HandleEvent for Keyboard {
                     self.server.leave(serial, &data.server);
                 }
             }
+            client::wl_keyboard::Event::Key {
+                serial,
+                time,
+                key,
+                state: key_state,
+            } => {
+                state.last_kb_serial = Some((
+                    state
+                        .last_kb_serial
+                        .take()
+                        .and_then(|(seat, _)| (seat == self.seat).then_some(seat))
+                        .unwrap_or_else(|| self.seat.clone()),
+                    serial,
+                ));
+                self.server.key(serial, time, key, convert_wenum(key_state));
+            }
             _ => simple_event_shunt! {
                 self.server, event: client::wl_keyboard::Event => [
                     Keymap {
                         |format| convert_wenum(format),
                         |fd| fd.as_fd(),
                         size
-                    },
-                    Key {
-                        serial,
-                        time,
-                        key,
-                        |state| convert_wenum(state)
                     },
                     Modifiers {
                         serial,

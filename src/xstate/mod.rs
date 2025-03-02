@@ -121,6 +121,7 @@ impl XState {
                     xcb::Extension::Composite,
                     xcb::Extension::RandR,
                     xcb::Extension::XFixes,
+                    xcb::Extension::Res,
                 ],
                 &[],
             )
@@ -301,7 +302,13 @@ impl XState {
                     } else {
                         Some(parent)
                     };
-                    server_state.new_window(e.window(), e.override_redirect(), (&e).into(), parent);
+                    server_state.new_window(
+                        e.window(),
+                        e.override_redirect(),
+                        (&e).into(),
+                        parent,
+                        self.get_pid(e.window()),
+                    );
                 }
                 xcb::Event::X(x::Event::ReparentNotify(e)) => {
                     debug!("reparent event: {e:?}");
@@ -313,6 +320,7 @@ impl XState {
                             attrs.override_redirect,
                             attrs.dims,
                             None,
+                            self.get_pid(e.window()),
                         );
                         self.handle_window_attributes(server_state, e.window(), attrs);
                     } else {
@@ -446,6 +454,9 @@ impl XState {
                                 _ => {}
                             }
                         }
+                    }
+                    x if x == self.atoms.active_win => {
+                        server_state.activate_window(e.window());
                     }
                     t => warn!("unrecognized message: {t:?}"),
                 },
@@ -647,6 +658,24 @@ impl XState {
             cookie,
             resolver,
         }
+    }
+
+    fn get_pid(&self, window: x::Window) -> Option<u32> {
+        let Some(pid) = self
+            .connection
+            .wait_for_reply(self.connection.send_request(&xcb::res::QueryClientIds {
+                specs: &[xcb::res::ClientIdSpec {
+                    client: window.resource_id(),
+                    mask: xcb::res::ClientIdMask::LOCAL_CLIENT_PID,
+                }],
+            }))
+            .ok()
+            .and_then(|reply| Some(*reply.ids().next()?.value().first()?))
+        else {
+            warn!("Failed to get pid of window: {window:?}");
+            return None;
+        };
+        Some(pid)
     }
 
     fn handle_property_change(
