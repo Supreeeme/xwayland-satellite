@@ -445,10 +445,18 @@ impl<C: XConnection> Dispatch<WlSeat, ObjectKey> for ServerState<C> {
                 state
                     .objects
                     .insert_from_other_objects([*key], |[seat_obj], key| {
-                        let Seat { client, .. }: &Seat = seat_obj.try_into().unwrap();
-                        let client = client.get_keyboard(&state.qh, key);
+                        let Seat {
+                            client: client_seat,
+                            ..
+                        }: &Seat = seat_obj.try_into().unwrap();
+                        let client = client_seat.get_keyboard(&state.qh, key);
                         let server = data_init.init(id, key);
-                        Keyboard { client, server }.into()
+                        Keyboard {
+                            client,
+                            server,
+                            seat: client_seat.clone(),
+                        }
+                        .into()
                     });
             }
             Request::<WlSeat>::GetTouch { id } => {

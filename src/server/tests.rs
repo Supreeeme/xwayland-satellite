@@ -515,7 +515,7 @@ impl TestFixture {
         let dims = data.dims;
         self.register_window(window, data);
         self.satellite
-            .new_window(window, override_redirect, dims, parent);
+            .new_window(window, override_redirect, dims, parent, None);
     }
 
     fn map_window(
@@ -1118,6 +1118,7 @@ fn window_group_properties() {
             ..Default::default()
         },
         None,
+        None,
     );
     f.satellite
         .set_win_title(prop_win, WmName::WmName("window".into()));
@@ -1137,7 +1138,7 @@ fn window_group_properties() {
     let (_, surface) = comp.create_surface();
     let dims = data.dims;
     f.register_window(win, data);
-    f.satellite.new_window(win, false, dims, None);
+    f.satellite.new_window(win, false, dims, None, None);
     f.satellite.set_win_hints(
         win,
         super::WmHints {
