@@ -378,9 +378,11 @@ impl HandleEvent for Pointer {
                 surface_x,
                 surface_y,
             } => 'enter: {
-                let surface_key: ObjectKey = surface.data().copied().unwrap();
-                let Some(surface_data): Option<&SurfaceData> =
-                    state.objects.get(surface_key).map(|o| o.as_ref())
+                let Some(surface_data): Option<&SurfaceData> = surface
+                    .data::<ObjectKey>()
+                    .copied()
+                    .and_then(|key| state.objects.get(key))
+                    .map(|o| o.as_ref())
                 else {
                     warn!("could not enter surface: stale surface");
                     break 'enter;
