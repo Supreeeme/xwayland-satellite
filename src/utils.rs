@@ -1,0 +1,45 @@
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
+
+pub fn cursor_name_to_shape(cursor: &str) -> Option<Shape> {
+    // x11 names loosely based on GDK and Chromium
+    match cursor {
+        "default" | "left_ptr" => Some(Shape::Default),
+        "context-menu" => Some(Shape::ContextMenu),
+        "help" | "question_arrow" => Some(Shape::Help),
+        "pointer" | "hand" => Some(Shape::Pointer),
+        "progress" | "left_ptr_watch" => Some(Shape::Progress),
+        "wait" | "watch" => Some(Shape::Wait),
+        "cell" | "plus" => Some(Shape::Cell),
+        "crosshair" | "cross" => Some(Shape::Crosshair),
+        "text" | "xterm" => Some(Shape::Text),
+        "vertical-text" => Some(Shape::VerticalText),
+        "alias" | "dnd-link" => Some(Shape::Alias),
+        "copy" | "dnd-copy" => Some(Shape::Copy),
+        "move" | "dnd-move" => Some(Shape::Move),
+        "no-drop" | "dnd-none" => Some(Shape::NoDrop),
+        "not-allowed" | "crossed_circle" => Some(Shape::NotAllowed),
+        "grab" | "hand1" => Some(Shape::Grab),
+        "grabbing" | "hand2" => Some(Shape::Grabbing),
+        "all-scroll" | "fleur" => Some(Shape::AllScroll),
+        "col-resize" => Some(Shape::ColResize),
+        "row-resize" => Some(Shape::RowResize),
+        "n-resize" | "top_side" => Some(Shape::NResize),
+        "e-resize" | "right_side" => Some(Shape::EResize),
+        "s-resize" | "bottom_side" => Some(Shape::SResize),
+        "w-resize" | "left_side" => Some(Shape::WResize),
+        "ne-resize" | "top_right_corner" => Some(Shape::NeResize),
+        "nw-resize" | "top_left_corner" => Some(Shape::NwResize),
+        "sw-resize" | "bottom_right_corner" => Some(Shape::SwResize),
+        "se-resize" | "bottom_left_corner" => Some(Shape::SeResize),
+        "ew-resize" | "sb_h_double_arrow" => Some(Shape::EwResize),
+        "ns-resize" | "sb_v_double_arrow" => Some(Shape::NsResize),
+        "nesw-resize" | "fd_double_arrow" => Some(Shape::NeswResize),
+        "nwse-resize" | "bd_double_arrow" => Some(Shape::NwseResize),
+        "zoom-in" => Some(Shape::ZoomIn),
+        "zoom-out" => Some(Shape::ZoomOut),
+        // TODO: Add when the updated protocol is available
+        // "dnd-ask" => Some(Shape::DndAsk),
+        // "all-resize" => Some(Shape::AllResize),
+        _ => None,
+    }
+}

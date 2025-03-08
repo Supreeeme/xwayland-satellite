@@ -165,7 +165,7 @@ impl XState {
         // negotiate xfixes version
         let reply = connection
             .wait_for_reply(connection.send_request(&xcb::xfixes::QueryVersion {
-                client_major_version: 1,
+                client_major_version: 6,
                 client_minor_version: 0,
             }))
             .unwrap();
@@ -174,7 +174,7 @@ impl XState {
             reply.major_version(),
             reply.minor_version()
         );
-        use xcb::xfixes::SelectionEventMask;
+        use xcb::xfixes::{CursorNotifyMask, SelectionEventMask};
         connection
             .send_and_check_request(&xcb::xfixes::SelectSelectionInput {
                 window: root,
@@ -182,6 +182,12 @@ impl XState {
                 event_mask: SelectionEventMask::SET_SELECTION_OWNER
                     | SelectionEventMask::SELECTION_WINDOW_DESTROY
                     | SelectionEventMask::SELECTION_CLIENT_CLOSE,
+            })
+            .unwrap();
+        connection
+            .send_and_check_request(&xcb::xfixes::SelectCursorInput {
+                window: root,
+                event_mask: CursorNotifyMask::DISPLAY_CURSOR,
             })
             .unwrap();
         {
@@ -466,6 +472,15 @@ impl XState {
                     t => warn!("unrecognized message: {t:?}"),
                 },
                 xcb::Event::X(x::Event::MappingNotify(_)) => {}
+                xcb::Event::XFixes(xcb::xfixes::Event::CursorNotify(e)) => {
+                    let cursor = unwrap_or_skip_bad_window_cont!(self.connection.wait_for_reply(
+                        self.connection
+                            .send_request(&xcb::xfixes::GetCursorImageAndName {})
+                    ));
+                    if let Ok(cursor) = cursor.name().try_as_ascii() {
+                        server_state.set_cursor(cursor);
+                    }
+                }
                 xcb::Event::RandR(xcb::randr::Event::Notify(e))
                     if matches!(e.u(), xcb::randr::NotifyData::Rc(_)) =>
                 {

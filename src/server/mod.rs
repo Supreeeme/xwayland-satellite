@@ -6,6 +6,7 @@ mod tests;
 
 use self::event::*;
 use crate::clientside::*;
+use crate::utils::cursor_name_to_shape;
 use crate::xstate::{Decorations, WindowDims, WmHints, WmName, WmNormalHints};
 use crate::{X11Selection, XConnection};
 use log::{debug, warn};
@@ -16,12 +17,16 @@ use smithay_client_toolkit::data_device_manager::{
     data_device::DataDevice, data_offer::SelectionOffer, data_source::CopyPasteSource,
     DataDeviceManagerState,
 };
+use smithay_client_toolkit::seat::pointer::cursor_shape::CursorShapeManager;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::rc::{Rc, Weak};
 use wayland_client::{globals::Global, protocol as client, Proxy};
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
+    Shape, WpCursorShapeDeviceV1,
+};
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1;
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::{
     self, ZxdgToplevelDecorationV1,
@@ -519,6 +524,11 @@ pub struct ServerState<C: XConnection> {
     global_output_offset: GlobalOutputOffset,
     global_offset_updated: bool,
     decoration_manager: Option<ZxdgDecorationManagerV1>,
+    cursor_shape_manager: Option<CursorShapeManager>,
+    cursor_shape_device: Option<WpCursorShapeDeviceV1>,
+    cursor_shape: Option<Shape>,
+    client_cursor: Option<(client::wl_surface::WlSurface, i32, i32)>,
+    last_pointer_enter_serial: Option<u32>,
 }
 
 impl<C: XConnection> ServerState<C> {
@@ -560,6 +570,12 @@ impl<C: XConnection> ServerState<C> {
             })
             .ok();
 
+        let cursor_shape_manager = CursorShapeManager::bind(&clientside.global_list, &qh)
+            .inspect_err(|e| {
+                warn!("Could not bind cursor shape manager ({e:?}). Cursors sizes may be inconsistent.")
+            })
+            .ok();
+
         dh.create_global::<Self, XwaylandShellV1, _>(1, ());
         clientside
             .global_list
@@ -597,6 +613,11 @@ impl<C: XConnection> ServerState<C> {
             },
             global_offset_updated: false,
             decoration_manager,
+            cursor_shape_manager,
+            cursor_shape_device: None,
+            cursor_shape: None,
+            client_cursor: None,
+            last_pointer_enter_serial: None,
         }
     }
 
@@ -936,6 +957,43 @@ impl<C: XConnection> ServerState<C> {
 
     pub fn destroy_window(&mut self, window: x::Window) {
         let _ = self.windows.remove(&window);
+    }
+
+    pub fn set_cursor(&mut self, cursor: &str) {
+        if self.cursor_shape_manager.is_none() {
+            return;
+        };
+        let Some(cursor_shape_device) = self.cursor_shape_device.as_ref() else {
+            warn!("No cursor shape device found, cannot set cursor shape");
+            return;
+        };
+        let Some(last_pointer_enter_serial) = self.last_pointer_enter_serial else {
+            warn!("No last pointer enter serial, skipping setting cursor shape");
+            return;
+        };
+        if let Some(shape) = cursor_name_to_shape(cursor) {
+            self.cursor_shape = Some(shape);
+            cursor_shape_device.set_shape(last_pointer_enter_serial, shape);
+        } else {
+            if !cursor.is_empty() {
+                warn!("Unknown cursor: {cursor}");
+            }
+            self.cursor_shape = None;
+            if let Some((surface, hotspot_x, hotspot_y)) = self.client_cursor.take() {
+                let Some(pointer) = self.clientside.globals.pointer.as_ref() else {
+                    warn!("No pointer found, cannot restore client cursor");
+                    return;
+                };
+                pointer.set_cursor(
+                    last_pointer_enter_serial,
+                    Some(&surface),
+                    hotspot_x,
+                    hotspot_y,
+                );
+            } else {
+                cursor_shape_device.set_shape(last_pointer_enter_serial, Shape::Default);
+            }
+        }
     }
 
     pub(crate) fn set_copy_paste_source(&mut self, selection: &Rc<C::X11Selection>) {

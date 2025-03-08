@@ -383,6 +383,7 @@ impl HandleEvent for Pointer {
                 surface_x,
                 surface_y,
             } => 'enter: {
+                state.last_pointer_enter_serial = Some(serial);
                 let Some(surface_data): Option<&SurfaceData> = surface
                     .data::<ObjectKey>()
                     .copied()
