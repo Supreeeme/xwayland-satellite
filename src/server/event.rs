@@ -454,8 +454,12 @@ impl HandleEvent for Pointer {
                     else {
                         unreachable!();
                     };
-                    let surface_key: ObjectKey = surface.data().copied().unwrap();
-                    if state.objects.get(surface_key).is_some() {
+                    if surface
+                        .data()
+                        .copied()
+                        .and_then(|key| state.objects.get(key))
+                        .is_some()
+                    {
                         trace!("resending enter ({serial}) before motion");
                         let enter_event = client::wl_pointer::Event::Enter {
                             serial: *serial,
@@ -547,12 +551,12 @@ impl HandleEvent for Keyboard {
                 surface,
                 keys,
             } => {
-                let key: ObjectKey = surface.data().copied().unwrap();
-                if let Some(data) = state
-                    .objects
-                    .get(key)
-                    .map(<_ as AsRef<SurfaceData>>::as_ref)
-                {
+                if let Some(data) = surface.data().copied().and_then(|key| {
+                    state
+                        .objects
+                        .get(key)
+                        .map(<_ as AsRef<SurfaceData>>::as_ref)
+                }) {
                     state.last_kb_serial = Some(serial);
                     let output_name = data.get_output_name(state);
                     state.to_focus = Some(FocusData {
@@ -566,12 +570,12 @@ impl HandleEvent for Keyboard {
                 if !surface.is_alive() {
                     return;
                 }
-                let key: ObjectKey = surface.data().copied().unwrap();
-                if let Some(data) = state
-                    .objects
-                    .get(key)
-                    .map(<_ as AsRef<SurfaceData>>::as_ref)
-                {
+                if let Some(data) = surface.data().copied().and_then(|key| {
+                    state
+                        .objects
+                        .get(key)
+                        .map(<_ as AsRef<SurfaceData>>::as_ref)
+                }) {
                     if state.to_focus.as_ref().map(|d| d.window) == Some(data.window.unwrap()) {
                         state.to_focus.take();
                     } else {
