@@ -547,7 +547,7 @@ impl TestFixture {
 
         let serial = self.surface_serial;
         let serial_lo = (serial & 0xFF) as u32;
-        let serial_hi = (serial >> 8 & 0xFF) as u32;
+        let serial_hi = ((serial >> 8) & 0xFF) as u32;
         self.surface_serial += 1;
 
         xwl.send_request(Req::<XwaylandSurfaceV1>::SetSerial {
