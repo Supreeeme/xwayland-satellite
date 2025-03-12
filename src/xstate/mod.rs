@@ -209,10 +209,9 @@ impl XState {
     }
 
     pub fn server_state_setup(&self, server_state: &mut super::RealServerState) {
-        let mut c = RealConnection::new(self.connection.clone());
+        let mut c = RealConnection::new(self.connection.clone(), self.atoms.clone());
         c.update_outputs(self.root);
         server_state.set_x_connection(c);
-        server_state.atoms = Some(self.atoms.clone());
     }
 
     fn set_root_property<P: x::PropEl>(&self, property: x::Atom, r#type: x::Atom, data: &[P]) {
@@ -359,11 +358,11 @@ impl XState {
                     let active_win: &[x::Window] = active_win.value();
                     if active_win[0] == e.window() {
                         // The connection on the server state stores state.
-                        server_state.connection.as_mut().unwrap().focus_window(
-                            x::Window::none(),
-                            None,
-                            self.atoms.clone(),
-                        );
+                        server_state
+                            .connection
+                            .as_mut()
+                            .unwrap()
+                            .focus_window(x::Window::none(), None);
                     }
 
                     unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
@@ -707,28 +706,28 @@ impl XState {
 
 xcb::atoms_struct! {
     #[derive(Clone, Debug)]
-    pub struct Atoms {
-        pub wl_surface_id => b"WL_SURFACE_ID" only_if_exists = false,
-        pub wl_surface_serial => b"WL_SURFACE_SERIAL" only_if_exists = false,
-        pub wm_protocols => b"WM_PROTOCOLS" only_if_exists = false,
-        pub wm_delete_window => b"WM_DELETE_WINDOW" only_if_exists = false,
-        pub wm_transient_for => b"WM_TRANSIENT_FOR" only_if_exists = false,
-        pub wm_check => b"_NET_SUPPORTING_WM_CHECK" only_if_exists = false,
-        pub net_wm_name => b"_NET_WM_NAME" only_if_exists = false,
-        pub wm_pid => b"_NET_WM_PID" only_if_exists = false,
-        pub net_wm_state => b"_NET_WM_STATE" only_if_exists = false,
-        pub wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
-        pub active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
-        pub client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
-        pub supported => b"_NET_SUPPORTED" only_if_exists = false,
-        pub utf8_string => b"UTF8_STRING" only_if_exists = false,
-        pub clipboard => b"CLIPBOARD" only_if_exists = false,
-        pub targets => b"TARGETS" only_if_exists = false,
-        pub save_targets => b"SAVE_TARGETS" only_if_exists = false,
-        pub multiple => b"MULTIPLE" only_if_exists = false,
-        pub timestamp => b"TIMESTAMP" only_if_exists = false,
-        pub selection_reply => b"_selection_reply" only_if_exists = false,
-        pub incr => b"INCR" only_if_exists = false,
+    struct Atoms {
+        wl_surface_id => b"WL_SURFACE_ID" only_if_exists = false,
+        wl_surface_serial => b"WL_SURFACE_SERIAL" only_if_exists = false,
+        wm_protocols => b"WM_PROTOCOLS" only_if_exists = false,
+        wm_delete_window => b"WM_DELETE_WINDOW" only_if_exists = false,
+        wm_transient_for => b"WM_TRANSIENT_FOR" only_if_exists = false,
+        wm_check => b"_NET_SUPPORTING_WM_CHECK" only_if_exists = false,
+        net_wm_name => b"_NET_WM_NAME" only_if_exists = false,
+        wm_pid => b"_NET_WM_PID" only_if_exists = false,
+        net_wm_state => b"_NET_WM_STATE" only_if_exists = false,
+        wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
+        active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
+        client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
+        supported => b"_NET_SUPPORTED" only_if_exists = false,
+        utf8_string => b"UTF8_STRING" only_if_exists = false,
+        clipboard => b"CLIPBOARD" only_if_exists = false,
+        targets => b"TARGETS" only_if_exists = false,
+        save_targets => b"SAVE_TARGETS" only_if_exists = false,
+        multiple => b"MULTIPLE" only_if_exists = false,
+        timestamp => b"TIMESTAMP" only_if_exists = false,
+        selection_reply => b"_selection_reply" only_if_exists = false,
+        incr => b"INCR" only_if_exists = false,
     }
 }
 
@@ -840,14 +839,16 @@ impl TryFrom<u32> for SetState {
 }
 
 pub struct RealConnection {
+    atoms: Atoms,
     connection: Rc<xcb::Connection>,
     outputs: HashMap<String, xcb::randr::Output>,
     primary_output: xcb::randr::Output,
 }
 
 impl RealConnection {
-    fn new(connection: Rc<xcb::Connection>) -> Self {
+    fn new(connection: Rc<xcb::Connection>, atoms: Atoms) -> Self {
         Self {
+            atoms,
             connection,
             outputs: Default::default(),
             primary_output: Xid::none(),
@@ -896,7 +897,6 @@ impl RealConnection {
 }
 
 impl XConnection for RealConnection {
-    type ExtraData = Atoms;
     type X11Selection = Selection;
 
     fn root_window(&self) -> x::Window {
@@ -916,9 +916,9 @@ impl XConnection for RealConnection {
         }));
     }
 
-    fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool, atoms: Self::ExtraData) {
+    fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool) {
         let data = if fullscreen {
-            std::slice::from_ref(&atoms.wm_fullscreen)
+            std::slice::from_ref(&self.atoms.wm_fullscreen)
         } else {
             &[]
         };
@@ -928,7 +928,7 @@ impl XConnection for RealConnection {
             .send_and_check_request(&x::ChangeProperty::<x::Atom> {
                 mode: x::PropMode::Replace,
                 window,
-                property: atoms.net_wm_state,
+                property: self.atoms.net_wm_state,
                 r#type: x::ATOM_ATOM,
                 data,
             })
@@ -937,12 +937,7 @@ impl XConnection for RealConnection {
         }
     }
 
-    fn focus_window(
-        &mut self,
-        window: x::Window,
-        output_name: Option<String>,
-        atoms: Self::ExtraData,
-    ) {
+    fn focus_window(&mut self, window: x::Window, output_name: Option<String>) {
         trace!("{window:?} {output_name:?}");
         if let Err(e) = self.connection.send_and_check_request(&x::SetInputFocus {
             focus: window,
@@ -955,7 +950,7 @@ impl XConnection for RealConnection {
         if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty {
             mode: x::PropMode::Replace,
             window: self.root_window(),
-            property: atoms.active_win,
+            property: self.atoms.active_win,
             r#type: x::ATOM_WINDOW,
             data: &[window],
         }) {
@@ -992,22 +987,25 @@ impl XConnection for RealConnection {
         }
     }
 
-    fn close_window(&mut self, window: x::Window, atoms: Self::ExtraData) {
+    fn close_window(&mut self, window: x::Window) {
         let cookie = self.connection.send_request(&x::GetProperty {
             window,
             delete: false,
-            property: atoms.wm_protocols,
+            property: self.atoms.wm_protocols,
             r#type: x::ATOM_ATOM,
             long_offset: 0,
             long_length: 10,
         });
         let reply = unwrap_or_skip_bad_window!(self.connection.wait_for_reply(cookie));
 
-        if reply.value::<x::Atom>().contains(&atoms.wm_delete_window) {
-            let data = [atoms.wm_delete_window.resource_id(), 0, 0, 0, 0];
+        if reply
+            .value::<x::Atom>()
+            .contains(&self.atoms.wm_delete_window)
+        {
+            let data = [self.atoms.wm_delete_window.resource_id(), 0, 0, 0, 0];
             let event = &x::ClientMessageEvent::new(
                 window,
-                atoms.wm_protocols,
+                self.atoms.wm_protocols,
                 x::ClientMessageData::Data32(data),
             );
 
@@ -1035,12 +1033,6 @@ impl XConnection for RealConnection {
             window,
             value_list: &[x::ConfigWindow::StackMode(x::StackMode::Above)],
         }));
-    }
-}
-
-impl super::FromServerState<RealConnection> for Atoms {
-    fn create(state: &super::RealServerState) -> Self {
-        state.atoms.as_ref().unwrap().clone()
     }
 }
 

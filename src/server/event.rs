@@ -139,11 +139,10 @@ impl SurfaceData {
                     let window = win_data.window;
                     output.windows.insert(window);
                     if self.window.is_some() && state.last_focused_toplevel == self.window {
-                        let data = C::ExtraData::create(state);
                         let output = self.get_output_name(state);
                         let conn = state.connection.as_mut().unwrap();
                         debug!("focused window changed outputs - resetting primary output");
-                        conn.focus_window(window, output, data);
+                        conn.focus_window(window, output);
                     }
                 }
             }
@@ -233,12 +232,11 @@ impl SurfaceData {
                         states.contains(&(u32::from(xdg_toplevel::State::Fullscreen) as u8));
                     if toplevel.fullscreen != prev_fs {
                         let window = state.associated_windows[self.key];
-                        let data = C::ExtraData::create(state);
-                        state.connection.as_mut().unwrap().set_fullscreen(
-                            window,
-                            toplevel.fullscreen,
-                            data,
-                        );
+                        state
+                            .connection
+                            .as_mut()
+                            .unwrap()
+                            .set_fullscreen(window, toplevel.fullscreen);
                     }
                 };
 

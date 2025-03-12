@@ -179,10 +179,6 @@ impl Default for FakeXConnection {
     }
 }
 
-impl super::FromServerState<FakeXConnection> for () {
-    fn create(_: &FakeServerState) -> Self {}
-}
-
 impl crate::X11Selection for Vec<testwl::PasteData> {
     fn mime_types(&self) -> Vec<&str> {
         self.iter().map(|data| data.mime_type.as_str()).collect()
@@ -205,20 +201,19 @@ impl crate::X11Selection for Vec<testwl::PasteData> {
 }
 
 impl super::XConnection for FakeXConnection {
-    type ExtraData = ();
     type X11Selection = Vec<testwl::PasteData>;
     fn root_window(&self) -> Window {
         self.root
     }
 
     #[track_caller]
-    fn close_window(&mut self, window: Window, _: ()) {
+    fn close_window(&mut self, window: Window) {
         log::debug!("closing window {window:?}");
         self.window(window).mapped = false;
     }
 
     #[track_caller]
-    fn set_fullscreen(&mut self, window: xcb::x::Window, fullscreen: bool, _: ()) {
+    fn set_fullscreen(&mut self, window: xcb::x::Window, fullscreen: bool) {
         self.window(window).fullscreen = fullscreen;
     }
 
@@ -233,7 +228,7 @@ impl super::XConnection for FakeXConnection {
     }
 
     #[track_caller]
-    fn focus_window(&mut self, window: Window, _output_name: Option<String>, _: ()) {
+    fn focus_window(&mut self, window: Window, _output_name: Option<String>) {
         assert!(
             self.windows.contains_key(&window),
             "Unknown window: {window:?}"

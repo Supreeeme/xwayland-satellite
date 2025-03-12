@@ -5,9 +5,8 @@ mod event;
 mod tests;
 
 use self::event::*;
-use super::FromServerState;
 use crate::clientside::*;
-use crate::xstate::{Atoms, WindowDims, WmHints, WmName, WmNormalHints};
+use crate::xstate::{WindowDims, WmHints, WmName, WmNormalHints};
 use crate::{X11Selection, XConnection};
 use log::{debug, warn};
 use rustix::event::{poll, PollFd, PollFlags};
@@ -475,7 +474,6 @@ struct FocusData {
 }
 
 pub struct ServerState<C: XConnection> {
-    pub atoms: Option<Atoms>,
     dh: DisplayHandle,
     clientside: ClientState,
     objects: ObjectMap,
@@ -531,7 +529,6 @@ impl<C: XConnection> ServerState<C> {
             windows: HashMap::new(),
             clientside,
             client: None,
-            atoms: None,
             qh,
             dh,
             to_focus: None,
@@ -862,15 +859,13 @@ impl<C: XConnection> ServerState<C> {
                 output_name,
             }) = self.to_focus.take()
             {
-                let data = C::ExtraData::create(self);
                 let conn = self.connection.as_mut().unwrap();
                 debug!("focusing window {window:?}");
-                conn.focus_window(window, output_name, data);
+                conn.focus_window(window, output_name);
                 self.last_focused_toplevel = Some(window);
             } else if self.unfocus {
-                let data = C::ExtraData::create(self);
                 let conn = self.connection.as_mut().unwrap();
-                conn.focus_window(x::WINDOW_NONE, None, data);
+                conn.focus_window(x::WINDOW_NONE, None);
             }
             self.unfocus = false;
         }
@@ -1099,8 +1094,7 @@ impl<C: XConnection> ServerState<C> {
 
     fn close_x_window(&mut self, window: x::Window) {
         debug!("sending close request to {window:?}");
-        let data = C::ExtraData::create(self);
-        self.connection.as_mut().unwrap().close_window(window, data);
+        self.connection.as_mut().unwrap().close_window(window);
         if self.last_focused_toplevel == Some(window) {
             self.last_focused_toplevel.take();
         }

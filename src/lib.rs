@@ -16,25 +16,15 @@ use wayland_server::{Display, ListeningSocket};
 use xcb::x;
 
 pub trait XConnection: Sized + 'static {
-    type ExtraData: FromServerState<Self>;
     type X11Selection: X11Selection;
 
     fn root_window(&self) -> x::Window;
     fn set_window_dims(&mut self, window: x::Window, dims: PendingSurfaceState);
-    fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool, data: Self::ExtraData);
-    fn focus_window(
-        &mut self,
-        window: x::Window,
-        output_name: Option<String>,
-        data: Self::ExtraData,
-    );
-    fn close_window(&mut self, window: x::Window, data: Self::ExtraData);
+    fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool);
+    fn focus_window(&mut self, window: x::Window, output_name: Option<String>);
+    fn close_window(&mut self, window: x::Window);
     fn unmap_window(&mut self, window: x::Window);
     fn raise_to_top(&mut self, window: x::Window);
-}
-
-pub trait FromServerState<C: XConnection> {
-    fn create(state: &ServerState<C>) -> Self;
 }
 
 pub trait X11Selection {
