@@ -1,0 +1,36 @@
+name: Bug Report
+description: File a bug report
+labels: ["bug"]
+body:
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      placeholder: Arch Linux, Ubuntu 24.04, Gentoo, etc
+    validations:
+      required: true
+  - type: input
+    id: comp
+    attributes:
+      label: Wayland Compositor
+      placeholder: Niri, Hyprland, Sway, etc
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Describe the issue.
+      value: |
+        **Please attach a log if applicable.**
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+  - type: checkboxes
+    attributes:
+      label: Please confirm you have reproduced this on the latest commit.
+      options:
+        - label: I have reproduced this on the latest commit
+          required: true
