@@ -29,6 +29,7 @@ pub trait XConnection: Sized + 'static {
         data: Self::ExtraData,
     );
     fn close_window(&mut self, window: x::Window, data: Self::ExtraData);
+    fn unmap_window(&mut self, window: x::Window);
     fn raise_to_top(&mut self, window: x::Window);
 }
 

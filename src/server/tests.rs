@@ -247,6 +247,10 @@ impl super::XConnection for FakeXConnection {
             "Unknown window: {window:?}"
         );
     }
+
+    fn unmap_window(&mut self, _: x::Window) {
+        todo!()
+    }
 }
 
 type FakeServerState = ServerState<FakeXConnection>;

@@ -256,7 +256,7 @@ impl SurfaceData {
         }
     }
 
-    fn popup_event<C: XConnection>(&mut self, event: xdg_popup::Event, _: &mut ServerState<C>) {
+    fn popup_event<C: XConnection>(&mut self, event: xdg_popup::Event, state: &mut ServerState<C>) {
         match event {
             xdg_popup::Event::Configure {
                 x,
@@ -273,6 +273,13 @@ impl SurfaceData {
                 });
             }
             xdg_popup::Event::Repositioned { .. } => {}
+            xdg_popup::Event::PopupDone => {
+                state
+                    .connection
+                    .as_mut()
+                    .unwrap()
+                    .unmap_window(self.window.unwrap());
+            }
             other => todo!("{other:?}"),
         }
     }

@@ -1024,6 +1024,12 @@ impl XConnection for RealConnection {
         }
     }
 
+    fn unmap_window(&mut self, window: x::Window) {
+        unwrap_or_skip_bad_window!(self
+            .connection
+            .send_and_check_request(&x::UnmapWindow { window }));
+    }
+
     fn raise_to_top(&mut self, window: x::Window) {
         unwrap_or_skip_bad_window!(self.connection.send_and_check_request(&x::ConfigureWindow {
             window,

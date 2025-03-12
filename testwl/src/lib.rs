@@ -268,7 +268,7 @@ impl State {
     }
 
     #[track_caller]
-    pub fn configure_popup(&mut self, surface_id: SurfaceId) {
+    fn configure_popup(&mut self, surface_id: SurfaceId) {
         let surface = self.surfaces.get_mut(&surface_id).unwrap();
         let Some(SurfaceRole::Popup(p)) = &mut surface.role else {
             panic!("Surface does not have popup role: {:?}", surface.role);
@@ -290,6 +290,15 @@ impl State {
             Some(SurfaceRole::Toplevel(t)) => t,
             other => panic!("Surface does not have toplevel role: {:?}", other),
         }
+    }
+
+    #[track_caller]
+    fn popup_done(&mut self, surface_id: SurfaceId) {
+        let surface = self.surfaces.get_mut(&surface_id).unwrap();
+        let Some(SurfaceRole::Popup(p)) = &mut surface.role else {
+            panic!("Surface does not have popup role: {:?}", surface.role);
+        };
+        p.popup.popup_done();
     }
 }
 
@@ -489,6 +498,12 @@ impl Server {
     #[track_caller]
     pub fn configure_popup(&mut self, surface_id: SurfaceId) {
         self.state.configure_popup(surface_id);
+        self.display.flush_clients().unwrap();
+    }
+
+    #[track_caller]
+    pub fn popup_done(&mut self, surface_id: SurfaceId) {
+        self.state.popup_done(surface_id);
         self.display.flush_clients().unwrap();
     }
 

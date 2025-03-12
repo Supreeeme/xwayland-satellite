@@ -211,6 +211,42 @@ impl Fixture {
         surface
     }
 
+    #[track_caller]
+    fn map_as_popup(
+        &mut self,
+        connection: &mut Connection,
+        window: x::Window,
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+    ) -> testwl::SurfaceId {
+        connection.map_window(window);
+        self.wait_and_dispatch();
+        let surface = self
+            .testwl
+            .last_created_surface_id()
+            .expect("No surface created");
+        let data = self.testwl.get_surface_data(surface).unwrap();
+        assert!(
+            matches!(data.role, Some(testwl::SurfaceRole::Popup(_))),
+            "surface role was wrong: {:?}",
+            data.role
+        );
+        self.testwl.configure_popup(surface);
+        self.wait_and_dispatch();
+        let geometry = connection.get_reply(&x::GetGeometry {
+            drawable: x::Drawable::Window(window),
+        });
+
+        assert_eq!(geometry.x(), x);
+        assert_eq!(geometry.y(), y);
+        assert_eq!(geometry.width(), width);
+        assert_eq!(geometry.height(), height);
+
+        surface
+    }
+
     /// Triggers a Wayland side toplevel Close event and processes the corresponding
     /// X11 side WM_DELETE_WINDOW client message
     fn wm_delete_window(
@@ -1361,4 +1397,24 @@ fn fake_selection_targets() {
         std::str::from_utf8(paste_data).unwrap(),
         std::str::from_utf8(data).unwrap()
     );
+}
+
+#[test]
+fn popup_done() {
+    let mut f = Fixture::new();
+    let mut conn = Connection::new(&f.display);
+    let toplevel = conn.new_window(conn.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut conn, toplevel);
+
+    let popup = conn.new_window(conn.root, 0, 0, 20, 20, true);
+    let surface = f.map_as_popup(&mut conn, popup, 0, 0, 20, 20);
+
+    f.testwl.popup_done(surface);
+    f.wait_and_dispatch();
+
+    let reply = conn
+        .wait_for_reply(conn.send_request(&x::GetWindowAttributes { window: popup }))
+        .expect("Couldn't get window attributes");
+
+    assert_eq!(reply.map_state(), x::MapState::Unmapped);
 }
