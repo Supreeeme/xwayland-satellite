@@ -1,5 +1,6 @@
 use rustix::event::{poll, PollFd, PollFlags};
 use rustix::process::{Pid, Signal, WaitOptions};
+use std::io::Write;
 use std::mem::ManuallyDrop;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
@@ -22,15 +23,17 @@ struct TestDataInner {
     display: Mutex<Option<String>>,
     server: Mutex<Option<UnixStream>>,
     pid: Mutex<Option<u32>>,
+    quit_rx: Option<UnixStream>,
 }
 
 #[derive(Default, Clone)]
 struct TestData(Arc<TestDataInner>);
 
 impl TestData {
-    fn new(server: UnixStream) -> Self {
+    fn new(server: UnixStream, quit_rx: UnixStream) -> Self {
         Self(Arc::new(TestDataInner {
             server: Mutex::new(server.into()),
+            quit_rx: Some(quit_rx),
             ..Default::default()
         }))
     }
@@ -50,6 +53,10 @@ impl xwls::RunData for TestData {
 
     fn connected_server(&self) {
         self.server_connected.store(true, Ordering::Relaxed);
+    }
+
+    fn quit_rx(&self) -> Option<&UnixStream> {
+        self.quit_rx.as_ref()
     }
 
     fn xwayland_ready(&self, display: String, pid: u32) {
@@ -74,17 +81,18 @@ struct Fixture {
     pollfd: PollFd<'static>,
     display: String,
     pid: Pid,
+    quit_tx: UnixStream,
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         let thread = unsafe { ManuallyDrop::take(&mut self.thread) };
-        if thread.is_finished() {
-            thread.join().expect("Main thread panicked");
-        } else {
-            rustix::process::kill_process(self.pid, Signal::Term).unwrap();
-            rustix::process::waitpid(Some(self.pid), WaitOptions::NOHANG).unwrap();
-        }
+        // Sending anything to the quit receiver to stop the main loop. Then we guarantee a main
+        // thread does not use file descriptors which outlive the Fixture's BorrowedFd
+        self.quit_tx.write_all(&1_usize.to_ne_bytes()).unwrap();
+        thread.join().expect("Main thread panicked");
+        rustix::process::kill_process(self.pid, Signal::Term).unwrap();
+        rustix::process::waitpid(Some(self.pid), WaitOptions::NOHANG).unwrap();
     }
 }
 
@@ -99,11 +107,13 @@ impl Fixture {
                 .init();
         });
 
+        let (quit_tx, quit_rx) = UnixStream::pair().unwrap();
+
         let (a, b) = UnixStream::pair().unwrap();
         let mut testwl = testwl::Server::new(false);
         pre_connect(&mut testwl);
         testwl.connect(a);
-        let our_data = TestData::new(b);
+        let our_data = TestData::new(b, quit_rx);
         let data = our_data.clone();
         let thread = std::thread::spawn(move || xwls::main(data));
 
@@ -155,6 +165,7 @@ impl Fixture {
             pollfd,
             display,
             pid: Pid::from_raw(pid as _).expect("Xwayland PID was invalid?"),
+            quit_tx,
         }
     }
     fn new() -> Self {
