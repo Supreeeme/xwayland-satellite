@@ -1,5 +1,3 @@
-#![deny(clippy::all)]
-
 mod clientside;
 mod data_device;
 mod server;
