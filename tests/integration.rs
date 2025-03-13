@@ -1,4 +1,5 @@
 use rustix::event::{poll, PollFd, PollFlags};
+use rustix::process::{Pid, Signal, WaitOptions};
 use std::mem::ManuallyDrop;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
@@ -20,6 +21,7 @@ struct TestDataInner {
     server_connected: AtomicBool,
     display: Mutex<Option<String>>,
     server: Mutex<Option<UnixStream>>,
+    pid: Mutex<Option<u32>>,
 }
 
 #[derive(Default, Clone)]
@@ -50,8 +52,9 @@ impl xwls::RunData for TestData {
         self.server_connected.store(true, Ordering::Relaxed);
     }
 
-    fn xwayland_ready(&self, display: String) {
+    fn xwayland_ready(&self, display: String, pid: u32) {
         *self.display.lock().unwrap() = Some(display);
+        *self.pid.lock().unwrap() = Some(pid);
     }
 
     fn display(&self) -> Option<&str> {
@@ -70,6 +73,7 @@ struct Fixture {
     thread: ManuallyDrop<JoinHandle<Option<()>>>,
     pollfd: PollFd<'static>,
     display: String,
+    pid: Pid,
 }
 
 impl Drop for Fixture {
@@ -77,6 +81,9 @@ impl Drop for Fixture {
         let thread = unsafe { ManuallyDrop::take(&mut self.thread) };
         if thread.is_finished() {
             thread.join().expect("Main thread panicked");
+        } else {
+            rustix::process::kill_process(self.pid, Signal::Term).unwrap();
+            rustix::process::waitpid(Some(self.pid), WaitOptions::NOHANG).unwrap();
         }
     }
 }
@@ -141,11 +148,13 @@ impl Fixture {
         assert!(ready, "connecting to xwayland failed");
 
         let display = our_data.display.lock().unwrap().take().unwrap();
+        let pid = our_data.pid.lock().unwrap().take().unwrap();
         Self {
             testwl,
             thread: ManuallyDrop::new(thread),
             pollfd,
             display,
+            pid: Pid::from_raw(pid as _).expect("Xwayland PID was invalid?"),
         }
     }
     fn new() -> Self {
@@ -262,13 +271,8 @@ impl Fixture {
             &[connection.atoms.wm_delete_window],
         );
         self.testwl.close_toplevel(surface);
-        connection.await_event();
-        let event = connection
-            .inner
-            .poll_for_event()
-            .unwrap()
-            .expect("No close event");
 
+        let event = connection.await_event();
         let xcb::Event::X(x::Event::ClientMessage(event)) = event else {
             panic!("Expected ClientMessage event, got {event:?}");
         };
@@ -426,12 +430,19 @@ impl Connection {
     }
 
     #[track_caller]
-    fn await_event(&mut self) {
-        self.pollfd.clear_revents();
+    #[must_use]
+    fn await_event(&mut self) -> xcb::Event {
+        if let Some(event) = self.poll_for_event().expect("Failed to poll for event") {
+            return event;
+        }
         assert!(
             poll(&mut [self.pollfd.clone()], 100).expect("poll failed") > 0,
             "Did not get any X11 events"
         );
+        self.pollfd.clear_revents();
+        self.poll_for_event()
+            .expect("Failed to poll for event after pollfd")
+            .unwrap()
     }
 
     #[track_caller]
@@ -462,18 +473,16 @@ impl Connection {
 
     #[track_caller]
     fn await_selection_request(&mut self) -> x::SelectionRequestEvent {
-        self.await_event();
-        match self.poll_for_event().unwrap() {
-            Some(xcb::Event::X(x::Event::SelectionRequest(r))) => r,
+        match self.await_event() {
+            xcb::Event::X(x::Event::SelectionRequest(r)) => r,
             other => panic!("Didn't get selection request event, instead got {other:?}"),
         }
     }
 
     #[track_caller]
     fn await_selection_notify(&mut self) -> x::SelectionNotifyEvent {
-        self.await_event();
-        match self.poll_for_event().unwrap() {
-            Some(xcb::Event::X(x::Event::SelectionNotify(r))) => r,
+        match self.await_event() {
+            xcb::Event::X(x::Event::SelectionNotify(r)) => r,
             other => panic!("Didn't get selection notify event, instead got {other:?}"),
         }
     }
@@ -505,9 +514,8 @@ impl Connection {
 
     #[track_caller]
     fn await_selection_owner_change(&mut self) -> xcb::xfixes::SelectionNotifyEvent {
-        self.await_event();
-        match self.poll_for_event().unwrap() {
-            Some(xcb::Event::XFixes(xcb::xfixes::Event::SelectionNotify(e))) => e,
+        match self.await_event() {
+            xcb::Event::XFixes(xcb::xfixes::Event::SelectionNotify(e)) => e,
             other => panic!("Expected XFixes SelectionNotify, got {other:?}"),
         }
     }
@@ -1131,7 +1139,6 @@ fn close_window() {
         })
         .unwrap();
     f.testwl.close_toplevel(surface);
-    connection.await_event();
     f.wait_and_dispatch();
 
     // Connection should no longer work (KillClient)
@@ -1261,9 +1268,8 @@ fn incr_copy_from_x11() {
         }
         assert_ne!(destination_property, x::Atom::none());
 
-        connection.await_event();
-        let notify = match connection.poll_for_event().unwrap() {
-            Some(xcb::Event::X(x::Event::PropertyNotify(p))) => p,
+        let notify = match connection.await_event() {
+            xcb::Event::X(x::Event::PropertyNotify(p)) => p,
             other => panic!("Didn't get property notify event, instead got {other:?}"),
         };
 
@@ -1337,7 +1343,6 @@ fn wayland_then_x11_clipboard_owner() {
     f.testwl.dispatch();
     connection.verify_clipboard_owner(window);
 
-    connection.await_event();
     let request = connection.await_selection_request();
     assert_eq!(request.selection(), connection.atoms.clipboard);
     assert_eq!(request.target(), connection.atoms.targets);

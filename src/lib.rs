@@ -41,7 +41,7 @@ pub trait RunData {
     }
     fn created_server(&self) {}
     fn connected_server(&self) {}
-    fn xwayland_ready(&self, _display: String) {}
+    fn xwayland_ready(&self, _display: String, _pid: u32) {}
 }
 
 pub fn main(data: impl RunData) -> Option<()> {
@@ -74,6 +74,8 @@ pub fn main(data: impl RunData) -> Option<()> {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+
+    let xwl_pid = xwayland.id();
 
     let (mut finish_tx, mut finish_rx) = UnixStream::pair().unwrap();
     let stderr = xwayland.stderr.take().unwrap();
@@ -151,7 +153,7 @@ pub fn main(data: impl RunData) -> Option<()> {
             display.pop();
             display.insert(0, ':');
             info!("Connected to Xwayland on {display}");
-            data.xwayland_ready(display);
+            data.xwayland_ready(display, xwl_pid);
             xstate.server_state_setup(&mut server_state);
 
             #[cfg(feature = "systemd")]
