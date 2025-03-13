@@ -41,6 +41,9 @@ pub trait RunData {
     }
     fn created_server(&self) {}
     fn connected_server(&self) {}
+    fn quit_rx(&self) -> Option<&UnixStream> {
+        None
+    }
     fn xwayland_ready(&self, _display: String, _pid: u32) {}
 }
 
@@ -115,7 +118,6 @@ pub fn main(data: impl RunData) -> Option<()> {
             panic!("first poll failed: {e:?}")
         }
     };
-    drop(finish_rx);
 
     server_state.connect(connection);
     server_state.run();
@@ -127,11 +129,16 @@ pub fn main(data: impl RunData) -> Option<()> {
     let server_fd = unsafe { BorrowedFd::borrow_raw(server_state.clientside_fd().as_raw_fd()) };
     let display_fd = unsafe { BorrowedFd::borrow_raw(display.backend().poll_fd().as_raw_fd()) };
 
+    // `finish_rx` only writes the status code of `Xwayland` exiting, so it is reasonable to use as
+    // the UnixStream of choice when not running the integration tests.
+    let quit_rx = data.quit_rx().unwrap_or(&finish_rx);
+
     let mut fds = [
         PollFd::from_borrowed_fd(server_fd, PollFlags::IN),
         PollFd::new(&xsock_wl, PollFlags::IN),
         PollFd::from_borrowed_fd(display_fd, PollFlags::IN),
         PollFd::new(&ready_rx, PollFlags::IN),
+        PollFd::new(quit_rx, PollFlags::IN),
     ];
 
     let mut ready = false;
@@ -140,6 +147,9 @@ pub fn main(data: impl RunData) -> Option<()> {
             Ok(_) => {
                 if !fds[3].revents().is_empty() {
                     ready = true;
+                }
+                if !fds[4].revents().is_empty() {
+                    return None;
                 }
             }
             Err(other) => panic!("Poll failed: {other:?}"),
