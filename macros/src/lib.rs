@@ -12,7 +12,7 @@ enum FieldOrClosure {
 
 impl Parse for FieldOrClosure {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        input.parse().map(|ident| Self::Field(ident)).or_else(|_| {
+        input.parse().map(Self::Field).or_else(|_| {
             input.parse().map(|mut closure: syn::ExprClosure| {
                 assert_eq!(closure.inputs.len(), 1);
                 let syn::Pat::Ident(arg) = closure.inputs.pop().unwrap().into_value() else {
