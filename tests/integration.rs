@@ -23,7 +23,7 @@ struct TestDataInner {
     display: Mutex<Option<String>>,
     server: Mutex<Option<UnixStream>>,
     pid: Mutex<Option<u32>>,
-    quit_rx: Option<UnixStream>,
+    quit_rx: Mutex<Option<UnixStream>>,
 }
 
 #[derive(Default, Clone)]
@@ -33,7 +33,7 @@ impl TestData {
     fn new(server: UnixStream, quit_rx: UnixStream) -> Self {
         Self(Arc::new(TestDataInner {
             server: Mutex::new(server.into()),
-            quit_rx: Some(quit_rx),
+            quit_rx: Mutex::new(Some(quit_rx)),
             ..Default::default()
         }))
     }
@@ -55,8 +55,8 @@ impl xwls::RunData for TestData {
         self.server_connected.store(true, Ordering::Relaxed);
     }
 
-    fn quit_rx(&self) -> Option<&UnixStream> {
-        self.quit_rx.as_ref()
+    fn quit_rx(&self) -> Option<UnixStream> {
+        self.quit_rx.lock().unwrap().take()
     }
 
     fn xwayland_ready(&self, display: String, pid: u32) {
@@ -825,7 +825,6 @@ fn quick_delete() {
     assert_eq!(f.testwl.get_surface_data(surf), None);
 }
 
-// aaaaaaaaaa
 #[test]
 fn copy_from_x11() {
     let mut f = Fixture::new();
@@ -1064,13 +1063,7 @@ fn bad_clipboard_data() {
     let mut f = Fixture::new();
     let mut connection = Connection::new(&f.display);
     let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
-    connection.map_window(window);
-    f.wait_and_dispatch();
-    let surface = f
-        .testwl
-        .last_created_surface_id()
-        .expect("No surface created");
-    f.configure_and_verify_new_toplevel(&mut connection, window, surface);
+    f.map_as_toplevel(&mut connection, window);
     connection.set_selection_owner(window);
 
     let request = connection.await_selection_request();

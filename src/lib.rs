@@ -11,7 +11,7 @@ use smithay_client_toolkit::data_device_manager::WritePipe;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use wayland_server::{Display, ListeningSocket};
 use xcb::x;
 
@@ -41,7 +41,7 @@ pub trait RunData {
     }
     fn created_server(&self) {}
     fn connected_server(&self) {}
-    fn quit_rx(&self) -> Option<&UnixStream> {
+    fn quit_rx(&self) -> Option<UnixStream> {
         None
     }
     fn xwayland_ready(&self, _display: String, _pid: u32) {}
@@ -98,15 +98,17 @@ pub fn main(data: impl RunData) -> Option<()> {
         PollFd::new(&finish_rx, PollFlags::IN),
     ];
 
+    fn xwayland_exit_code(rx: &mut UnixStream) -> Box<ExitStatus> {
+        let mut data = [0; (usize::BITS / 8) as usize];
+        rx.read_exact(&mut data).unwrap();
+        let data = usize::from_ne_bytes(data);
+        unsafe { Box::from_raw(data as *mut _) }
+    }
+
     let connection = match poll(&mut ready_fds, -1) {
         Ok(_) => {
             if !ready_fds[1].revents().is_empty() {
-                let mut data = [0; (usize::BITS / 8) as usize];
-                finish_rx.read_exact(&mut data).unwrap();
-                let data = usize::from_ne_bytes(data);
-                let status: Box<std::process::ExitStatus> =
-                    unsafe { Box::from_raw(data as *mut _) };
-
+                let status = xwayland_exit_code(&mut finish_rx);
                 error!("Xwayland exited early with {status}");
                 return None;
             }
@@ -131,14 +133,18 @@ pub fn main(data: impl RunData) -> Option<()> {
 
     // `finish_rx` only writes the status code of `Xwayland` exiting, so it is reasonable to use as
     // the UnixStream of choice when not running the integration tests.
-    let quit_rx = data.quit_rx().unwrap_or(&finish_rx);
+    let (mut quit_rx, is_test_thread) = if let Some(quit_rx) = data.quit_rx() {
+        (quit_rx, true)
+    } else {
+        (finish_rx, false)
+    };
 
     let mut fds = [
         PollFd::from_borrowed_fd(server_fd, PollFlags::IN),
         PollFd::new(&xsock_wl, PollFlags::IN),
         PollFd::from_borrowed_fd(display_fd, PollFlags::IN),
         PollFd::new(&ready_rx, PollFlags::IN),
-        PollFd::new(quit_rx, PollFlags::IN),
+        PollFd::new(&quit_rx, PollFlags::IN),
     ];
 
     let mut ready = false;
@@ -149,6 +155,10 @@ pub fn main(data: impl RunData) -> Option<()> {
                     ready = true;
                 }
                 if !fds[4].revents().is_empty() {
+                    if !is_test_thread {
+                        let status = xwayland_exit_code(&mut quit_rx);
+                        error!("Xwayland exited early with {status}");
+                    }
                     return None;
                 }
             }
