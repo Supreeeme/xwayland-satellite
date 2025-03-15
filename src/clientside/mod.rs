@@ -1,3 +1,5 @@
+mod data_device;
+
 use crate::server::{ObjectEvent, ObjectKey};
 use std::os::unix::net::UnixStream;
 use std::sync::{mpsc, Mutex, OnceLock};
