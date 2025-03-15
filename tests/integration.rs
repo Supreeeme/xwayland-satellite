@@ -89,7 +89,8 @@ impl Drop for Fixture {
         let thread = unsafe { ManuallyDrop::take(&mut self.thread) };
         // Sending anything to the quit receiver to stop the main loop. Then we guarantee a main
         // thread does not use file descriptors which outlive the Fixture's BorrowedFd
-        self.quit_tx.write_all(&1_usize.to_ne_bytes()).unwrap();
+        let return_ptr = Box::into_raw(Box::new(0_usize)) as usize;
+        self.quit_tx.write_all(&return_ptr.to_ne_bytes()).unwrap();
         thread.join().expect("Main thread panicked");
         rustix::process::kill_process(self.pid, Signal::Term).unwrap();
         rustix::process::waitpid(Some(self.pid), WaitOptions::NOHANG).unwrap();

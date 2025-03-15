@@ -133,11 +133,7 @@ pub fn main(data: impl RunData) -> Option<()> {
 
     // `finish_rx` only writes the status code of `Xwayland` exiting, so it is reasonable to use as
     // the UnixStream of choice when not running the integration tests.
-    let (mut quit_rx, is_test_thread) = if let Some(quit_rx) = data.quit_rx() {
-        (quit_rx, true)
-    } else {
-        (finish_rx, false)
-    };
+    let mut quit_rx = data.quit_rx().unwrap_or(finish_rx);
 
     let mut fds = [
         PollFd::from_borrowed_fd(server_fd, PollFlags::IN),
@@ -155,8 +151,8 @@ pub fn main(data: impl RunData) -> Option<()> {
                     ready = true;
                 }
                 if !fds[4].revents().is_empty() {
-                    if !is_test_thread {
-                        let status = xwayland_exit_code(&mut quit_rx);
+                    let status = xwayland_exit_code(&mut quit_rx);
+                    if *status != ExitStatus::default() {
                         error!("Xwayland exited early with {status}");
                     }
                     return None;
