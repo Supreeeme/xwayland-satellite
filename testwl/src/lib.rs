@@ -411,7 +411,7 @@ impl Server {
 
         if noops {
             dh.backend_handle()
-                .create_global(&interface, interface.version, Arc::new(Handler));
+                .create_global(interface, interface.version, Arc::new(Handler));
         }
 
         Self {
@@ -579,8 +579,7 @@ impl Server {
                 }
             };
 
-        while !pending_ret.is_empty() {
-            let (mime, pending) = pending_ret.pop().unwrap();
+        while let Some((mime, pending)) = pending_ret.pop() {
             match pending {
                 Some(pending) => try_transfer(&mut pending_ret, mime, pending),
                 None => {
