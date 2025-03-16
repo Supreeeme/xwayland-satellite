@@ -1428,3 +1428,39 @@ fn popup_done() {
 
     assert_eq!(reply.map_state(), x::MapState::Unmapped);
 }
+
+#[test]
+fn negative_output_coordinates() {
+    let mut f = Fixture::new();
+    let output = f.create_output(-500, -500);
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 200, 200, false);
+    let surface = f.map_as_toplevel(&mut connection, window);
+    f.testwl.move_surface_to_output(surface, &output);
+    f.testwl.move_pointer_to(surface, 30.0, 40.0);
+    f.wait_and_dispatch();
+
+    let tree = connection.get_reply(&x::QueryTree { window });
+    let geo = connection.get_reply(&x::GetGeometry {
+        drawable: x::Drawable::Window(window),
+    });
+    let reply = connection.get_reply(&x::TranslateCoordinates {
+        src_window: tree.parent(),
+        dst_window: connection.root,
+        src_x: geo.x(),
+        src_y: geo.y(),
+    });
+
+    assert!(reply.same_screen());
+    assert_eq!(reply.dst_x(), 0);
+    assert_eq!(reply.dst_y(), 0);
+
+    let ptr_reply = connection.get_reply(&x::QueryPointer {
+        window: connection.root,
+    });
+    assert!(ptr_reply.same_screen());
+    assert_eq!(ptr_reply.child(), window);
+    assert_eq!(ptr_reply.win_x(), 30);
+    assert_eq!(ptr_reply.win_y(), 40);
+}

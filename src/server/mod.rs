@@ -87,7 +87,7 @@ pub struct WindowAttributes {
     pub group: Option<x::Window>,
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
 struct WindowOutputOffset {
     x: i32,
     y: i32,
@@ -473,6 +473,18 @@ struct FocusData {
     output_name: Option<String>,
 }
 
+#[derive(Copy, Clone, Default)]
+struct GlobalOutputOffsetDimension {
+    owner: Option<ObjectKey>,
+    value: i32,
+}
+
+#[derive(Copy, Clone)]
+struct GlobalOutputOffset {
+    x: GlobalOutputOffsetDimension,
+    y: GlobalOutputOffsetDimension,
+}
+
 pub struct ServerState<C: XConnection> {
     dh: DisplayHandle,
     clientside: ClientState,
@@ -492,6 +504,8 @@ pub struct ServerState<C: XConnection> {
     xdg_wm_base: XdgWmBase,
     clipboard_data: Option<ClipboardData<C::X11Selection>>,
     last_kb_serial: Option<u32>,
+    global_output_offset: GlobalOutputOffset,
+    global_offset_updated: bool,
 }
 
 impl<C: XConnection> ServerState<C> {
@@ -542,6 +556,17 @@ impl<C: XConnection> ServerState<C> {
             xdg_wm_base,
             clipboard_data,
             last_kb_serial: None,
+            global_output_offset: GlobalOutputOffset {
+                x: GlobalOutputOffsetDimension {
+                    owner: None,
+                    value: 0,
+                },
+                y: GlobalOutputOffsetDimension {
+                    owner: None,
+                    value: 0,
+                },
+            },
+            global_offset_updated: false,
         }
     }
 
@@ -844,13 +869,41 @@ impl<C: XConnection> ServerState<C> {
 
         for (key, event) in self.clientside.read_events() {
             let Some(object) = &mut self.objects.get_mut(key) else {
-                warn!("could not handle clientside event: stale surface");
+                warn!("could not handle clientside event: stale object");
                 continue;
             };
             let mut object = object.0.take().unwrap();
             object.handle_event(event, self);
+
             let ret = self.objects[key].0.replace(object); // safe indexed access?
             debug_assert!(ret.is_none());
+        }
+
+        if self.global_offset_updated {
+            if self.global_output_offset.x.owner.is_none()
+                || self.global_output_offset.y.owner.is_none()
+            {
+                self.calc_global_output_offset();
+            }
+
+            debug!(
+                "updated global output offset: {}x{}",
+                self.global_output_offset.x.value, self.global_output_offset.y.value
+            );
+            for (key, _) in self.output_keys.clone() {
+                let Some(object) = &mut self.objects.get_mut(key) else {
+                    continue;
+                };
+                let mut output: Output = object
+                    .0
+                    .take()
+                    .expect("Output object missing?")
+                    .try_into()
+                    .expect("Not an output?");
+                output.global_offset_updated(self);
+                self.objects[key].0.replace(output.into());
+            }
+            self.global_offset_updated = false;
         }
 
         {
@@ -914,6 +967,28 @@ impl<C: XConnection> ServerState<C> {
                     clipboard.source = Some(CopyPasteData::Foreign(foreign));
                 }
                 globals.cancelled = false;
+            }
+        }
+    }
+
+    fn calc_global_output_offset(&mut self) {
+        for (key, _) in &self.output_keys {
+            let Some(object) = &self.objects.get(key) else {
+                continue;
+            };
+
+            let output: &Output = object.as_ref();
+            if output.dimensions.x < self.global_output_offset.x.value {
+                self.global_output_offset.x = GlobalOutputOffsetDimension {
+                    owner: Some(key),
+                    value: output.dimensions.x,
+                }
+            }
+            if output.dimensions.y < self.global_output_offset.y.value {
+                self.global_output_offset.y = GlobalOutputOffsetDimension {
+                    owner: Some(key),
+                    value: output.dimensions.y,
+                }
             }
         }
     }

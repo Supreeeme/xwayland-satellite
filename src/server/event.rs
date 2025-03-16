@@ -131,8 +131,8 @@ impl SurfaceData {
                     win_data.update_output_offset(
                         key,
                         WindowOutputOffset {
-                            x: output.dimensions.x,
-                            y: output.dimensions.y,
+                            x: output.dimensions.x - state.global_output_offset.x.value,
+                            y: output.dimensions.y - state.global_output_offset.y.value,
                         },
                         state.connection.as_mut().unwrap(),
                     );
@@ -665,17 +665,23 @@ pub struct XdgOutput {
     pub server: ServerXdgOutput,
 }
 
-#[derive(Copy, Clone)]
 enum OutputDimensionsSource {
-    Wl,
+    // The data in this variant is the values needed for the wl_output.geometry event.
+    Wl {
+        physical_width: i32,
+        physical_height: i32,
+        subpixel: WEnum<client::wl_output::Subpixel>,
+        make: String,
+        model: String,
+        transform: WEnum<client::wl_output::Transform>,
+    },
     Xdg,
 }
 
-#[derive(Copy, Clone)]
 pub(super) struct OutputDimensions {
     source: OutputDimensionsSource,
-    x: i32,
-    y: i32,
+    pub x: i32,
+    pub y: i32,
     pub width: i32,
     pub height: i32,
 }
@@ -697,7 +703,14 @@ impl Output {
             xdg: None,
             windows: HashSet::new(),
             dimensions: OutputDimensions {
-                source: OutputDimensionsSource::Wl,
+                source: OutputDimensionsSource::Wl {
+                    physical_height: 0,
+                    physical_width: 0,
+                    subpixel: WEnum::Value(client::wl_output::Subpixel::Unknown),
+                    make: String::new(),
+                    model: String::new(),
+                    transform: WEnum::Value(client::wl_output::Transform::Normal),
+                },
                 x: 0,
                 y: 0,
                 width: 0,
@@ -738,27 +751,40 @@ impl HandleEvent for Output {
 }
 
 impl Output {
-    fn update_offset<C: XConnection>(
-        &mut self,
-        source: OutputDimensionsSource,
-        x: i32,
-        y: i32,
-        state: &mut ServerState<C>,
-    ) {
-        if matches!(source, OutputDimensionsSource::Wl)
-            && matches!(self.dimensions.source, OutputDimensionsSource::Xdg)
-        {
-            return;
-        }
+    pub(super) fn global_offset_updated(&mut self, state: &mut ServerState<impl XConnection>) {
+        let x = self.dimensions.x - state.global_output_offset.x.value;
+        let y = self.dimensions.y - state.global_output_offset.y.value;
 
-        self.dimensions.source = source;
-        self.dimensions.x = x;
-        self.dimensions.y = y;
-        let id = match source {
-            OutputDimensionsSource::Xdg => self.xdg.as_ref().unwrap().server.id(),
-            OutputDimensionsSource::Wl => self.server.id(),
-        };
-        debug!("moving {id} to {x}x{y}");
+        match &self.dimensions.source {
+            OutputDimensionsSource::Wl {
+                physical_width,
+                physical_height,
+                subpixel,
+                make,
+                model,
+                transform,
+            } => {
+                self.server.geometry(
+                    x,
+                    y,
+                    *physical_width,
+                    *physical_height,
+                    convert_wenum(*subpixel),
+                    make.clone(),
+                    model.clone(),
+                    convert_wenum(*transform),
+                );
+            }
+            OutputDimensionsSource::Xdg => {
+                self.xdg.as_ref().unwrap().server.logical_position(x, y);
+            }
+        }
+        self.server.done();
+
+        self.update_window_offsets(state);
+    }
+
+    fn update_window_offsets(&mut self, state: &mut ServerState<impl XConnection>) {
         self.windows.retain(|window| {
             let Some(data): Option<&mut WindowData> = state.windows.get_mut(window) else {
                 return false;
@@ -766,24 +792,93 @@ impl Output {
 
             data.update_output_offset(
                 self.server.data().copied().unwrap(),
-                WindowOutputOffset { x, y },
+                WindowOutputOffset {
+                    x: self.dimensions.x - state.global_output_offset.x.value,
+                    y: self.dimensions.y - state.global_output_offset.y.value,
+                },
                 state.connection.as_mut().unwrap(),
             );
 
             true
         });
     }
+
+    fn update_offset<C: XConnection>(
+        &mut self,
+        source: OutputDimensionsSource,
+        x: i32,
+        y: i32,
+        state: &mut ServerState<C>,
+    ) {
+        if matches!(source, OutputDimensionsSource::Wl { .. })
+            && matches!(self.dimensions.source, OutputDimensionsSource::Xdg)
+        {
+            return;
+        }
+
+        let key: ObjectKey = self.server.data().copied().unwrap();
+        let global_offset = &mut state.global_output_offset;
+        let mut maybe_update_dimension = |value, dim: &mut GlobalOutputOffsetDimension| {
+            if value < dim.value {
+                *dim = GlobalOutputOffsetDimension {
+                    owner: Some(key),
+                    value,
+                };
+                state.global_offset_updated = true;
+            } else if dim.owner == Some(key) && value > dim.value {
+                *dim = Default::default();
+                state.global_offset_updated = true;
+            }
+        };
+
+        maybe_update_dimension(x, &mut global_offset.x);
+        maybe_update_dimension(y, &mut global_offset.y);
+
+        self.dimensions.source = source;
+        self.dimensions.x = x;
+        self.dimensions.y = y;
+        let id = match self.dimensions.source {
+            OutputDimensionsSource::Xdg => self.xdg.as_ref().unwrap().server.id(),
+            OutputDimensionsSource::Wl { .. } => self.server.id(),
+        };
+        debug!("moving {id} to {x}x{y}");
+
+        self.update_window_offsets(state);
+    }
+
     fn wl_event<C: XConnection>(
         &mut self,
         event: client::wl_output::Event,
         state: &mut ServerState<C>,
     ) {
-        if let client::wl_output::Event::Geometry { x, y, .. } = event {
-            self.update_offset(OutputDimensionsSource::Wl, x, y, state);
+        if let client::wl_output::Event::Geometry {
+            x,
+            y,
+            physical_width,
+            physical_height,
+            subpixel,
+            make,
+            model,
+            transform,
+        } = &event
+        {
+            self.update_offset(
+                OutputDimensionsSource::Wl {
+                    physical_width: *physical_width,
+                    physical_height: *physical_height,
+                    subpixel: *subpixel,
+                    make: make.clone(),
+                    model: model.clone(),
+                    transform: *transform,
+                },
+                *x,
+                *y,
+                state,
+            );
         }
 
         if let client::wl_output::Event::Mode { width, height, .. } = event {
-            if matches!(self.dimensions.source, OutputDimensionsSource::Wl) {
+            if matches!(self.dimensions.source, OutputDimensionsSource::Wl { .. }) {
                 self.dimensions.width = width;
                 self.dimensions.height = height;
                 debug!("{} dimensions: {width}x{height} (wl)", self.server.id());
@@ -807,8 +902,12 @@ impl Output {
                 },
                 Scale { factor },
                 Geometry {
-                    x,
-                    y,
+                    |x| {
+                        x - state.global_output_offset.x.value
+                    },
+                    |y| {
+                        y - state.global_output_offset.y.value
+                    },
                     physical_width,
                     physical_height,
                     |subpixel| convert_wenum(subpixel),
@@ -838,7 +937,14 @@ impl Output {
         }
         simple_event_shunt! {
             xdg, event: zxdg_output_v1::Event => [
-                LogicalPosition { x, y },
+                LogicalPosition {
+                    |x| {
+                        x - state.global_output_offset.x.value
+                    },
+                    |y| {
+                        y - state.global_output_offset.y.value
+                    }
+                },
                 LogicalSize { width, height },
                 Done,
                 Name { name },
