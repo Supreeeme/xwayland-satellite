@@ -23,7 +23,6 @@ crate-type = ["lib"]
 
 [dependencies]
 bitflags = "2.5.0"
-paste = "1.0.14"
 rustix = { workspace = true, features = ["event"] }
 wayland-client.workspace = true
 wayland-protocols = { workspace = true, features = ["client", "server", "staging", "unstable"] }
