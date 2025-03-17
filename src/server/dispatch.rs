@@ -1134,7 +1134,7 @@ impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_ring_v2::ZwpTabletPadRing
                 ring.client.destroy();
                 state.objects.remove(*key);
             }
-            other => warn!("unhandled tablet pad ring requst: {other:?}"),
+            other => warn!("unhandled tablet pad ring request: {other:?}"),
         }
     }
 }
@@ -1163,7 +1163,7 @@ impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_strip_v2::ZwpTabletPadStr
                 strip.client.destroy();
                 state.objects.remove(*key);
             }
-            other => warn!("unhandled tablet pad strip requst: {other:?}"),
+            other => warn!("unhandled tablet pad strip request: {other:?}"),
         }
     }
 }

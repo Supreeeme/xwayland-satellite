@@ -127,7 +127,7 @@ impl Selection {
                 warn!("Failed to write selection data: {e:?}");
             } else if incr {
                 debug!(
-                    "recieved some incr data for {}",
+                    "received some incr data for {}",
                     get_atom_name(&self.connection, target)
                 );
                 pending.push(PendingSelectionData {
