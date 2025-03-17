@@ -1,6 +1,5 @@
 use super::{ServerState, WindowDims};
 use crate::xstate::{SetState, WmName};
-use paste::paste;
 use rustix::event::{poll, PollFd, PollFlags};
 use std::collections::HashMap;
 use std::io::Write;
@@ -71,7 +70,7 @@ macro_rules! with_optional {
             $(
                 $field:ident: $type:ty
             ),+$(,)?
-        }
+        } => $name_optional:ident
     ) => {
         $( #[$attr] )?
         struct $name$(<$($lifetimes),+>)? {
@@ -80,23 +79,19 @@ macro_rules! with_optional {
             ),+
         }
 
-        paste! {
-            #[derive(Default)]
-            struct [< $name Optional >] {
-                $(
-                    $field: Option<$type>
-                ),+
-            }
+        #[derive(Default)]
+        struct $name_optional {
+            $(
+                $field: Option<$type>
+            ),+
         }
 
-        paste! {
-            impl From<[<$name Optional>]> for $name {
-                fn from(opt: [<$name Optional>]) -> Self {
-                    Self {
-                        $(
-                            $field: opt.$field.expect(concat!("uninitialized field ", stringify!($field)))
-                        ),+
-                    }
+        impl From<$name_optional> for $name {
+            fn from(opt: $name_optional) -> Self {
+                Self {
+                    $(
+                        $field: opt.$field.expect(concat!("uninitialized field ", stringify!($field)))
+                    ),+
                 }
             }
         }
@@ -111,7 +106,7 @@ struct Compositor {
     shell: TestObject<XwaylandShellV1>,
     seat: TestObject<WlSeat>,
     tablet_man: TestObject<ZwpTabletManagerV2>
-}
+} => CompositorOptional
 
 }
 

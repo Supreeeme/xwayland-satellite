@@ -308,7 +308,7 @@ macro_rules! handle_event_enum {
         $(#[$meta:meta])*
         $pub:vis enum $name:ident {
             $( $variant:ident($ty:ty) ),+
-        }
+        } => $name_event:ident
     ) => {
         enum_try_from! {
             $(#[$meta])*
@@ -317,19 +317,15 @@ macro_rules! handle_event_enum {
             }
         }
 
-        paste::paste! {
-            enum_try_from! {
-                #[derive(Debug)]
-                $pub enum [<$name Event>] {
-                    $( $variant(<$ty as HandleEvent>::Event) ),+
-                }
+        enum_try_from! {
+            #[derive(Debug)]
+            $pub enum $name_event {
+                $( $variant(<$ty as HandleEvent>::Event) ),+
             }
         }
 
         impl HandleEvent for $name {
-            paste::paste! {
-                type Event = [<$name Event>];
-            }
+            type Event = $name_event;
 
             fn handle_event<C: XConnection>(&mut self, event: Self::Event, state: &mut ServerState<C>) {
                 match self {
@@ -370,7 +366,7 @@ pub(crate) enum Object {
     TabletPadGroup(TabletPadGroup),
     TabletPadRing(TabletPadRing),
     TabletPadStrip(TabletPadStrip)
-}
+} => ObjectEvent
 
 }
 
