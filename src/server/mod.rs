@@ -538,7 +538,7 @@ impl<C: XConnection> ServerState<C> {
 
         let activation_state = ActivationState::bind(&clientside.global_list, &qh)
             .inspect_err(|e| {
-                warn!("Could not bind xdg activation ({e:?}). Windows might not recive focus depending on compositor focus stealing policy.")
+                warn!("Could not bind xdg activation ({e:?}). Windows might not receive focus depending on compositor focus stealing policy.")
             })
             .ok();
 
