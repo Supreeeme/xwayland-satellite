@@ -6,7 +6,7 @@ mod tests;
 
 use self::event::*;
 use crate::clientside::*;
-use crate::xstate::{WindowDims, WmHints, WmName, WmNormalHints};
+use crate::xstate::{Decorations, WindowDims, WmHints, WmName, WmNormalHints};
 use crate::{X11Selection, XConnection};
 use log::{debug, warn};
 use rustix::event::{poll, PollFd, PollFlags};
@@ -22,6 +22,10 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::rc::{Rc, Weak};
 use wayland_client::{globals::Global, protocol as client, Proxy};
+use wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1;
+use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::{
+    self, ZxdgToplevelDecorationV1,
+};
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
@@ -87,6 +91,7 @@ pub struct WindowAttributes {
     pub title: Option<WmName>,
     pub class: Option<String>,
     pub group: Option<x::Window>,
+    pub decorations: Option<Decorations>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
@@ -244,6 +249,7 @@ struct ToplevelData {
     toplevel: XdgToplevel,
     xdg: XdgSurfaceData,
     fullscreen: bool,
+    decoration: Option<ZxdgToplevelDecorationV1>,
 }
 
 #[derive(Debug)]
@@ -509,6 +515,7 @@ pub struct ServerState<C: XConnection> {
     activation_state: Option<ActivationState>,
     global_output_offset: GlobalOutputOffset,
     global_offset_updated: bool,
+    decoration_manager: Option<ZxdgDecorationManagerV1>,
 }
 
 impl<C: XConnection> ServerState<C> {
@@ -539,6 +546,14 @@ impl<C: XConnection> ServerState<C> {
         let activation_state = ActivationState::bind(&clientside.global_list, &qh)
             .inspect_err(|e| {
                 warn!("Could not bind xdg activation ({e:?}). Windows might not receive focus depending on compositor focus stealing policy.")
+            })
+            .ok();
+
+        let decoration_manager = clientside
+            .global_list
+            .bind::<ZxdgDecorationManagerV1, _, _>(&qh, 1..=1, ())
+            .inspect_err(|e| {
+                warn!("Could not bind xdg decoration ({e:?}). Windows might not have decorations.")
             })
             .ok();
 
@@ -578,6 +593,7 @@ impl<C: XConnection> ServerState<C> {
                 },
             },
             global_offset_updated: false,
+            decoration_manager,
         }
     }
 
@@ -714,6 +730,35 @@ impl<C: XConnection> ServerState<C> {
                 }
             }
             win.attrs.size_hints = Some(hints);
+        }
+    }
+
+    pub fn set_win_decorations(&mut self, window: x::Window, decorations: Decorations) {
+        if self.decoration_manager.is_none() {
+            return;
+        };
+
+        let Some(win) = self.windows.get_mut(&window) else {
+            debug!("not setting decorations for unknown window {window:?}");
+            return;
+        };
+
+        if win.attrs.decorations != Some(decorations) {
+            debug!("setting {window:?} decorations {decorations:?}");
+            if let Some(key) = win.surface_key {
+                if let Some(object) = self.objects.get(key) {
+                    let surface: &SurfaceData = object.as_ref();
+                    if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
+                        data.decoration
+                            .as_ref()
+                            .unwrap()
+                            .set_mode(decorations.into());
+                    }
+                } else {
+                    warn!("could not set decorations on {window:?}: stale surface")
+                }
+            }
+            win.attrs.decorations = Some(decorations);
         }
     }
 
@@ -1224,6 +1269,17 @@ impl<C: XConnection> ServerState<C> {
             toplevel.set_fullscreen(None);
         }
 
+        let decoration = self.decoration_manager.as_ref().map(|decoration_manager| {
+            let decoration = decoration_manager.get_toplevel_decoration(&toplevel, &self.qh, ());
+            decoration.set_mode(
+                window
+                    .attrs
+                    .decorations
+                    .map_or(zxdg_toplevel_decoration_v1::Mode::ServerSide, From::from),
+            );
+            decoration
+        });
+
         let surface: &SurfaceData = self.objects[surface_key].as_ref();
         if let (Some(activation_state), Some(token)) = (
             self.activation_state.as_ref(),
@@ -1240,6 +1296,7 @@ impl<C: XConnection> ServerState<C> {
             },
             toplevel,
             fullscreen: false,
+            decoration,
         }
     }
 

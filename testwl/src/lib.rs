@@ -27,6 +27,10 @@ use wayland_protocols::{
             xdg_activation_token_v1::{self, XdgActivationTokenV1},
             xdg_activation_v1::{self, XdgActivationV1},
         },
+        decoration::zv1::server::{
+            zxdg_decoration_manager_v1::{self, ZxdgDecorationManagerV1},
+            zxdg_toplevel_decoration_v1::{self, ZxdgToplevelDecorationV1},
+        },
         shell::server::{
             xdg_popup::{self, XdgPopup},
             xdg_positioner::{self, XdgPositioner},
@@ -62,7 +66,7 @@ use wayland_server::{
         wl_shm_pool::WlShmPool,
         wl_surface::WlSurface,
     },
-    Client, Dispatch, Display, DisplayHandle, GlobalDispatch, Resource,
+    Client, Dispatch, Display, DisplayHandle, GlobalDispatch, Resource, WEnum,
 };
 use wl_drm::server::wl_drm::WlDrm;
 
@@ -123,6 +127,10 @@ pub struct Toplevel {
     pub closed: bool,
     pub title: Option<String>,
     pub app_id: Option<String>,
+    pub decoration: Option<(
+        ZxdgToplevelDecorationV1,
+        Option<zxdg_toplevel_decoration_v1::Mode>,
+    )>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -383,6 +391,7 @@ impl Server {
         dh.create_global::<State, WlDataDeviceManager, _>(3, ());
         dh.create_global::<State, ZwpTabletManagerV2, _>(1, ());
         dh.create_global::<State, XdgActivationV1, _>(1, ());
+        dh.create_global::<State, ZxdgDecorationManagerV1, _>(1, ());
         global_noop!(ZwpLinuxDmabufV1);
         global_noop!(ZwpRelativePointerManagerV1);
         global_noop!(WpViewporter);
@@ -733,6 +742,7 @@ simple_global_dispatch!(WlCompositor);
 simple_global_dispatch!(XdgWmBase);
 simple_global_dispatch!(ZxdgOutputManagerV1);
 simple_global_dispatch!(ZwpTabletManagerV2);
+simple_global_dispatch!(ZxdgDecorationManagerV1);
 
 impl Dispatch<ZwpTabletManagerV2, ()> for State {
     fn request(
@@ -1219,6 +1229,7 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                     closed: false,
                     title: None,
                     app_id: None,
+                    decoration: None,
                 };
                 let data = state.surfaces.get_mut(surface_id).unwrap();
                 data.role = Some(SurfaceRole::Toplevel(t));
@@ -1672,6 +1683,108 @@ impl Dispatch<XdgActivationTokenV1, Mutex<ActivationTokenData>> for State {
                 token.done(activation_token);
             }
             xdg_activation_token_v1::Request::Destroy => {}
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<ZxdgDecorationManagerV1, ()> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        resource: &ZxdgDecorationManagerV1,
+        request: <ZxdgDecorationManagerV1 as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            zxdg_decoration_manager_v1::Request::GetToplevelDecoration { id, toplevel } => {
+                let surface_id = *toplevel.data::<SurfaceId>().unwrap();
+                let data = state.surfaces.get_mut(&surface_id).unwrap();
+                let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
+                    unreachable!();
+                };
+                if toplevel.decoration.is_some() {
+                    resource.post_error(
+                        zxdg_toplevel_decoration_v1::Error::AlreadyConstructed,
+                        "Toplevel already has an decoration object",
+                    );
+                    return;
+                }
+                toplevel.decoration = Some((data_init.init(id, surface_id), None));
+            }
+            zxdg_decoration_manager_v1::Request::Destroy => {}
+            _ => todo!(),
+        }
+    }
+}
+
+impl Dispatch<ZxdgToplevelDecorationV1, SurfaceId> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        resource: &ZxdgToplevelDecorationV1,
+        request: <ZxdgToplevelDecorationV1 as Resource>::Request,
+        surface_id: &SurfaceId,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            zxdg_toplevel_decoration_v1::Request::SetMode { mode } => {
+                let WEnum::Value(mode) = mode else {
+                    resource.post_error(
+                        zxdg_toplevel_decoration_v1::Error::InvalidMode,
+                        "Invalid decoration mode",
+                    );
+                    return;
+                };
+                if let Some(data) = state.surfaces.get_mut(surface_id) {
+                    let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
+                        unreachable!();
+                    };
+                    *toplevel
+                        .decoration
+                        .as_mut()
+                        .map(|(_, decoration)| decoration)
+                        .unwrap() = Some(mode);
+                } else {
+                    resource.post_error(
+                        zxdg_toplevel_decoration_v1::Error::Orphaned,
+                        "Toplevel was destroyed",
+                    );
+                }
+            }
+            zxdg_toplevel_decoration_v1::Request::UnsetMode => {
+                if let Some(data) = state.surfaces.get_mut(surface_id) {
+                    let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
+                        unreachable!();
+                    };
+                    *toplevel
+                        .decoration
+                        .as_mut()
+                        .map(|(_, decoration)| decoration)
+                        .unwrap() = None;
+                } else {
+                    resource.post_error(
+                        zxdg_toplevel_decoration_v1::Error::Orphaned,
+                        "Toplevel was destroyed",
+                    );
+                }
+            }
+            zxdg_toplevel_decoration_v1::Request::Destroy => {
+                if let Some(data) = state.surfaces.get_mut(surface_id) {
+                    let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
+                        unreachable!();
+                    };
+                    toplevel.decoration = None;
+                } else {
+                    resource.post_error(
+                        zxdg_toplevel_decoration_v1::Error::Orphaned,
+                        "Toplevel was destroyed",
+                    );
+                }
+            }
             _ => unreachable!(),
         }
     }
