@@ -1,5 +1,6 @@
 mod selection;
 use selection::{Selection, SelectionData};
+use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
 
 use crate::{server::WindowAttributes, XConnection};
 use bitflags::bitflags;
@@ -246,7 +247,11 @@ impl XState {
 
         self.set_root_property(self.atoms.wm_check, x::ATOM_WINDOW, &[self.wm_window]);
         self.set_root_property(self.atoms.active_win, x::ATOM_WINDOW, &[x::Window::none()]);
-        self.set_root_property(self.atoms.supported, x::ATOM_ATOM, &[self.atoms.active_win]);
+        self.set_root_property(
+            self.atoms.supported,
+            x::ATOM_ATOM,
+            &[self.atoms.active_win, self.atoms.motif_wm_hints],
+        );
 
         self.connection
             .send_and_check_request(&x::ChangeProperty {
@@ -491,6 +496,7 @@ impl XState {
         let class = self.get_wm_class(window);
         let wm_hints = self.get_wm_hints(window);
         let size_hints = self.get_wm_size_hints(window);
+        let motif_wm_hints = self.get_motif_wm_hints(window);
 
         let geometry = self.connection.wait_for_reply(geometry)?;
         debug!("{window:?} geometry: {geometry:?}");
@@ -503,6 +509,7 @@ impl XState {
         let class = class.resolve()?;
         let wm_hints = wm_hints.resolve()?;
         let size_hints = size_hints.resolve()?;
+        let motif_wm_hints = motif_wm_hints.resolve()?;
 
         Ok(WindowAttributes {
             override_redirect: attrs.override_redirect(),
@@ -517,6 +524,7 @@ impl XState {
             class,
             group: wm_hints.and_then(|h| h.window_group),
             size_hints,
+            decorations: motif_wm_hints.and_then(|h| h.decorations),
         })
     }
 
@@ -534,6 +542,9 @@ impl XState {
         }
         if let Some(hints) = attrs.size_hints {
             server_state.set_size_hints(window, hints);
+        }
+        if let Some(decorations) = attrs.decorations {
+            server_state.set_win_decorations(window, decorations);
         }
     }
 
@@ -660,6 +671,28 @@ impl XState {
         }
     }
 
+    fn get_motif_wm_hints(
+        &self,
+        window: x::Window,
+    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = MotifWmHints>> {
+        let cookie = self.get_property_cookie(
+            window,
+            self.atoms.motif_wm_hints,
+            self.atoms.motif_wm_hints,
+            5,
+        );
+        let resolver = |reply: x::GetPropertyReply| {
+            let data: &[u32] = reply.value();
+            MotifWmHints::from(data)
+        };
+
+        PropertyCookieWrapper {
+            connection: &self.connection,
+            cookie,
+            resolver,
+        }
+    }
+
     fn get_pid(&self, window: x::Window) -> Option<u32> {
         let Some(pid) = self
             .connection
@@ -718,6 +751,13 @@ impl XState {
                     unwrap_or_skip_bad_window!(self.get_wm_class(window).resolve()).unwrap();
                 server_state.set_win_class(window, class);
             }
+            x if x == self.atoms.motif_wm_hints => {
+                let motif_hints =
+                    unwrap_or_skip_bad_window!(self.get_motif_wm_hints(window).resolve()).unwrap();
+                if let Some(decorations) = motif_hints.decorations {
+                    server_state.set_win_decorations(window, decorations);
+                }
+            }
             _ => {
                 if !self.handle_selection_property_change(&event)
                     && log::log_enabled!(log::Level::Debug)
@@ -750,6 +790,7 @@ xcb::atoms_struct! {
         active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
         supported => b"_NET_SUPPORTED" only_if_exists = false,
+        motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
         utf8_string => b"UTF8_STRING" only_if_exists = false,
         clipboard => b"CLIPBOARD" only_if_exists = false,
         targets => b"TARGETS" only_if_exists = false,
@@ -792,6 +833,12 @@ bitflags! {
     /// https://tronche.com/gui/x/icccm/sec-4.html#s-4.1.2.4
     pub struct WmHintsFlags: u32 {
         const WindowGroup = 64;
+    }
+}
+
+bitflags! {
+    pub struct MotifWmHintsFlags: u32 {
+        const Decorations = 2;
     }
 }
 
@@ -843,6 +890,52 @@ impl From<&[u32]> for WmHints {
         if flags.contains(WmHintsFlags::WindowGroup) {
             let window = unsafe { x::Window::new(value[8]) };
             ret.window_group = Some(window);
+        }
+
+        ret
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Decorations {
+    Client = 0,
+    Server = 1,
+}
+
+impl TryFrom<u32> for Decorations {
+    type Error = ();
+
+    fn try_from(value: u32) -> Result<Self, ()> {
+        match value {
+            0 => Ok(Self::Client),
+            1 => Ok(Self::Server),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<Decorations> for zxdg_toplevel_decoration_v1::Mode {
+    fn from(value: Decorations) -> Self {
+        match value {
+            Decorations::Client => zxdg_toplevel_decoration_v1::Mode::ClientSide,
+            Decorations::Server => zxdg_toplevel_decoration_v1::Mode::ServerSide,
+        }
+    }
+}
+
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct MotifWmHints {
+    pub decorations: Option<Decorations>,
+}
+
+impl From<&[u32]> for MotifWmHints {
+    fn from(value: &[u32]) -> Self {
+        let mut ret = Self::default();
+
+        let flags = MotifWmHintsFlags::from_bits_truncate(value[0]);
+
+        if flags.contains(MotifWmHintsFlags::Decorations) {
+            ret.decorations = value[2].try_into().ok();
         }
 
         ret

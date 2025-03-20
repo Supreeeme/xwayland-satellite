@@ -10,7 +10,9 @@ use std::sync::{
 };
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use wayland_protocols::xdg::shell::server::xdg_toplevel;
+use wayland_protocols::xdg::{
+    decoration::zv1::server::zxdg_toplevel_decoration_v1, shell::server::xdg_toplevel,
+};
 use wayland_server::Resource;
 use xcb::{x, Xid};
 use xwayland_satellite as xwls;
@@ -317,6 +319,7 @@ xcb::atoms_struct! {
         multiple => b"MULTIPLE",
         wm_state => b"WM_STATE",
         wm_check => b"_NET_SUPPORTING_WM_CHECK",
+        motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
         mime1 => b"text/plain" only_if_exists = false,
         mime2 => b"blah/blah" only_if_exists = false,
         incr => b"INCR",
@@ -1518,4 +1521,58 @@ fn negative_output_coordinates() {
     assert_eq!(ptr_reply.child(), window);
     assert_eq!(ptr_reply.win_x(), 30);
     assert_eq!(ptr_reply.win_y(), 40);
+}
+
+#[test]
+fn xdg_decorations() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, window);
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    // The default decoration mode in x11 is SDD
+    assert_eq!(
+        data.toplevel()
+            .decoration
+            .as_ref()
+            .and_then(|(_, decoration)| *decoration),
+        Some(zxdg_toplevel_decoration_v1::Mode::ServerSide)
+    );
+
+    // CSD
+    connection.set_property(
+        window,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[2u32, 0, 0, 0, 0],
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    f.testwl.dispatch();
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert_eq!(
+        data.toplevel()
+            .decoration
+            .as_ref()
+            .and_then(|(_, decoration)| *decoration),
+        Some(zxdg_toplevel_decoration_v1::Mode::ClientSide)
+    );
+
+    // SSD
+    connection.set_property(
+        window,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[2u32, 0, 1, 0, 0],
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    f.testwl.dispatch();
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert_eq!(
+        data.toplevel()
+            .decoration
+            .as_ref()
+            .and_then(|(_, decoration)| *decoration),
+        Some(zxdg_toplevel_decoration_v1::Mode::ServerSide)
+    );
 }
