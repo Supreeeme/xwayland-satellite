@@ -741,6 +741,7 @@ xcb::atoms_struct! {
         wm_protocols => b"WM_PROTOCOLS" only_if_exists = false,
         wm_delete_window => b"WM_DELETE_WINDOW" only_if_exists = false,
         wm_transient_for => b"WM_TRANSIENT_FOR" only_if_exists = false,
+        wm_state => b"WM_STATE" only_if_exists = false,
         wm_check => b"_NET_SUPPORTING_WM_CHECK" only_if_exists = false,
         net_wm_name => b"_NET_WM_NAME" only_if_exists = false,
         wm_pid => b"_NET_WM_PID" only_if_exists = false,
@@ -867,6 +868,25 @@ impl TryFrom<u32> for SetState {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum WmState {
+    Withdrawn = 0,
+    Normal = 1,
+    Iconic = 3,
+}
+
+impl TryFrom<u32> for WmState {
+    type Error = ();
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Withdrawn),
+            1 => Ok(Self::Normal),
+            3 => Ok(Self::Iconic),
+            _ => Err(()),
+        }
+    }
+}
+
 pub struct RealConnection {
     atoms: Atoms,
     connection: Rc<xcb::Connection>,
@@ -982,6 +1002,15 @@ impl XConnection for RealConnection {
             property: self.atoms.active_win,
             r#type: x::ATOM_WINDOW,
             data: &[window],
+        }) {
+            debug!("ChangeProperty failed ({:?}: {:?})", window, e);
+        }
+        if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty {
+            mode: x::PropMode::Replace,
+            window,
+            property: self.atoms.wm_state,
+            r#type: self.atoms.wm_state,
+            data: &[WmState::Normal as u32, 0],
         }) {
             debug!("ChangeProperty failed ({:?}: {:?})", window, e);
         }
