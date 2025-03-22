@@ -868,7 +868,7 @@ impl TryFrom<u32> for SetState {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WmState {
     Withdrawn = 0,
     Normal = 1,
