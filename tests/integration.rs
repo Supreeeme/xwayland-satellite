@@ -14,7 +14,7 @@ use wayland_protocols::xdg::shell::server::xdg_toplevel;
 use wayland_server::Resource;
 use xcb::{x, Xid};
 use xwayland_satellite as xwls;
-use xwayland_satellite::xstate::WmSizeHintsFlags;
+use xwayland_satellite::xstate::{WmSizeHintsFlags, WmState};
 
 #[derive(Default)]
 struct TestDataInner {
@@ -315,6 +315,7 @@ xcb::atoms_struct! {
         clipboard => b"CLIPBOARD",
         targets => b"TARGETS",
         multiple => b"MULTIPLE",
+        wm_state => b"WM_STATE",
         wm_check => b"_NET_SUPPORTING_WM_CHECK",
         mime1 => b"text/plain" only_if_exists = false,
         mime2 => b"blah/blah" only_if_exists = false,
@@ -736,6 +737,8 @@ fn input_focus() {
     let mut f = Fixture::new();
     let mut connection = Connection::new(&f.display);
 
+    let wm_state = connection.atoms.wm_state;
+
     let conn = std::cell::RefCell::new(&mut connection);
     let check_focus = |win: x::Window| {
         let connection = conn.borrow();
@@ -772,10 +775,29 @@ fn input_focus() {
     let (win2, surface2) = create_win();
     check_focus(win2);
 
+    // Simulate exclusive fullscreen clients that set window state to mimized on focus loss
+    conn.borrow()
+        .set_property(win1, wm_state, wm_state, &[WmState::Iconic as u32, 0]);
+
     f.testwl.focus_toplevel(surface1);
     // Seems the event doesn't get caught by wait_and_dispatch...
     std::thread::sleep(std::time::Duration::from_millis(10));
     check_focus(win1);
+    assert_eq!(
+        conn.borrow()
+            .get_reply(&x::GetProperty {
+                delete: false,
+                window: win1,
+                property: wm_state,
+                r#type: wm_state,
+                long_offset: 0,
+                long_length: 1,
+            })
+            .value::<u32>()
+            .get(0)
+            .and_then(|state| WmState::try_from(*state).ok()),
+        Some(WmState::Normal)
+    );
 
     f.testwl.unfocus_toplevel();
     std::thread::sleep(std::time::Duration::from_millis(10));
