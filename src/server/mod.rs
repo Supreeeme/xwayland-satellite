@@ -1043,12 +1043,15 @@ impl<C: XConnection> ServerState<C> {
         let globals = &mut self.clientside.globals;
 
         globals.pending_activations.retain(|(window, token)| {
-            if let Some(window) = self.windows.get(window) {
-                if let Some(key) = window.surface_key {
-                    let surface: &SurfaceData = self.objects[key].as_ref();
-                    activation_state.activate::<Self>(&surface.client, token.clone());
-                    return false;
-                }
+            if let Some(surface) = self
+                .windows
+                .get(window)
+                .and_then(|window| window.surface_key)
+                .and_then(|key| self.objects.get(key))
+                .map(AsRef::<SurfaceData>::as_ref)
+            {
+                activation_state.activate::<Self>(&surface.client, token.clone());
+                return false;
             }
             true
         });
