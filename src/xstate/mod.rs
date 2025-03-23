@@ -569,7 +569,7 @@ impl XState {
                 0
             };
             let mut data = data[class_start..].to_vec();
-            if data.last().copied().unwrap() != 0 {
+            if data.last().copied() != Some(0) {
                 data.push(0);
             }
             let class = CString::from_vec_with_nul(data).unwrap();
