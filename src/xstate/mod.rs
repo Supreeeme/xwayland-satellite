@@ -246,7 +246,11 @@ impl XState {
 
         self.set_root_property(self.atoms.wm_check, x::ATOM_WINDOW, &[self.wm_window]);
         self.set_root_property(self.atoms.active_win, x::ATOM_WINDOW, &[x::Window::none()]);
-        self.set_root_property(self.atoms.supported, x::ATOM_ATOM, &[self.atoms.active_win]);
+        self.set_root_property(
+            self.atoms.supported,
+            x::ATOM_ATOM,
+            &[self.atoms.active_win, self.atoms.wm_opacity],
+        );
 
         self.connection
             .send_and_check_request(&x::ChangeProperty {
@@ -491,6 +495,7 @@ impl XState {
         let class = self.get_wm_class(window);
         let wm_hints = self.get_wm_hints(window);
         let size_hints = self.get_wm_size_hints(window);
+        let opacity = self.get_wm_opacity(window);
 
         let geometry = self.connection.wait_for_reply(geometry)?;
         debug!("{window:?} geometry: {geometry:?}");
@@ -503,6 +508,7 @@ impl XState {
         let class = class.resolve()?;
         let wm_hints = wm_hints.resolve()?;
         let size_hints = size_hints.resolve()?;
+        let opacity = opacity.resolve()?;
 
         Ok(WindowAttributes {
             override_redirect: attrs.override_redirect(),
@@ -517,6 +523,7 @@ impl XState {
             class,
             group: wm_hints.and_then(|h| h.window_group),
             size_hints,
+            opacity,
         })
     }
 
@@ -534,6 +541,9 @@ impl XState {
         }
         if let Some(hints) = attrs.size_hints {
             server_state.set_size_hints(window, hints);
+        }
+        if let Some(opacity) = attrs.opacity {
+            server_state.set_win_opacity(window, opacity);
         }
     }
 
@@ -660,6 +670,20 @@ impl XState {
         }
     }
 
+    fn get_wm_opacity(
+        &self,
+        window: x::Window,
+    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = u32>> {
+        let cookie = self.get_property_cookie(window, self.atoms.wm_opacity, x::ATOM_CARDINAL, 1);
+        let resolver = |reply: x::GetPropertyReply| reply.value()[0];
+
+        PropertyCookieWrapper {
+            connection: &self.connection,
+            cookie,
+            resolver,
+        }
+    }
+
     fn get_pid(&self, window: x::Window) -> Option<u32> {
         let Some(pid) = self
             .connection
@@ -718,6 +742,11 @@ impl XState {
                     unwrap_or_skip_bad_window!(self.get_wm_class(window).resolve()).unwrap();
                 server_state.set_win_class(window, class);
             }
+            x if x == self.atoms.wm_opacity => {
+                let opacity =
+                    unwrap_or_skip_bad_window!(self.get_wm_opacity(window).resolve()).unwrap();
+                server_state.set_win_opacity(window, opacity);
+            }
             _ => {
                 if !self.handle_selection_property_change(&event)
                     && log::log_enabled!(log::Level::Debug)
@@ -749,6 +778,7 @@ xcb::atoms_struct! {
         wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
         active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
+        wm_opacity => b"_NET_WM_WINDOW_OPACITY" only_if_exists = false,
         supported => b"_NET_SUPPORTED" only_if_exists = false,
         utf8_string => b"UTF8_STRING" only_if_exists = false,
         clipboard => b"CLIPBOARD" only_if_exists = false,

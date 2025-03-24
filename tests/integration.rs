@@ -10,6 +10,7 @@ use std::sync::{
 };
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use std::u32;
 use wayland_protocols::xdg::shell::server::xdg_toplevel;
 use wayland_server::Resource;
 use xcb::{x, Xid};
@@ -316,6 +317,7 @@ xcb::atoms_struct! {
         targets => b"TARGETS",
         multiple => b"MULTIPLE",
         wm_state => b"WM_STATE",
+        wm_opacity => b"_NET_WM_WINDOW_OPACITY" only_if_exists = false,
         wm_check => b"_NET_SUPPORTING_WM_CHECK",
         mime1 => b"text/plain" only_if_exists = false,
         mime2 => b"blah/blah" only_if_exists = false,
@@ -1518,4 +1520,41 @@ fn negative_output_coordinates() {
     assert_eq!(ptr_reply.child(), window);
     assert_eq!(ptr_reply.win_x(), 30);
     assert_eq!(ptr_reply.win_y(), 40);
+}
+
+#[test]
+fn window_opacity() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, window);
+
+    connection.set_property(
+        window,
+        x::ATOM_CARDINAL,
+        connection.atoms.wm_opacity,
+        &[0u32],
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    f.testwl.dispatch();
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert_eq!(
+        data.opacity.as_ref().and_then(|(_, opacity)| *opacity),
+        Some(0)
+    );
+
+    connection.set_property(
+        window,
+        x::ATOM_CARDINAL,
+        connection.atoms.wm_opacity,
+        &[u32::MAX],
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    f.testwl.dispatch();
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert_eq!(
+        data.opacity.as_ref().and_then(|(_, opacity)| *opacity),
+        None
+    );
 }

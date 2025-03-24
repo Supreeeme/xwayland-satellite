@@ -15,6 +15,8 @@ use wayland_client::{
     globals::{registry_queue_init, Global, GlobalList, GlobalListContents},
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
 };
+use wayland_protocols::wp::alpha_modifier::v1::client::wp_alpha_modifier_surface_v1::WpAlphaModifierSurfaceV1;
+use wayland_protocols::wp::alpha_modifier::v1::client::wp_alpha_modifier_v1::WpAlphaModifierV1;
 use wayland_protocols::wp::relative_pointer::zv1::client::{
     zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
     zwp_relative_pointer_v1::ZwpRelativePointerV1,
@@ -140,6 +142,8 @@ delegate_noop!(Globals: ZxdgOutputManagerV1);
 delegate_noop!(Globals: ZwpPointerConstraintsV1);
 delegate_noop!(Globals: ZwpTabletManagerV2);
 delegate_noop!(Globals: XdgActivationV1);
+delegate_noop!(Globals: WpAlphaModifierV1);
+delegate_noop!(Globals: WpAlphaModifierSurfaceV1);
 
 impl Dispatch<WlRegistry, GlobalListContents> for Globals {
     fn event(

@@ -233,6 +233,7 @@ impl<C: XConnection>
 
                     SurfaceData {
                         client,
+                        alpha_modifier: None,
                         server,
                         key,
                         serial: Default::default(),

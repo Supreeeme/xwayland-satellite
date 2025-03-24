@@ -22,6 +22,8 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::rc::{Rc, Weak};
 use wayland_client::{globals::Global, protocol as client, Proxy};
+use wayland_protocols::wp::alpha_modifier::v1::client::wp_alpha_modifier_surface_v1::WpAlphaModifierSurfaceV1;
+use wayland_protocols::wp::alpha_modifier::v1::client::wp_alpha_modifier_v1::WpAlphaModifierV1;
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
@@ -87,6 +89,7 @@ pub struct WindowAttributes {
     pub title: Option<WmName>,
     pub class: Option<String>,
     pub group: Option<x::Window>,
+    pub opacity: Option<u32>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
@@ -174,6 +177,7 @@ struct SurfaceAttach {
 
 pub struct SurfaceData {
     client: client::wl_surface::WlSurface,
+    alpha_modifier: Option<WpAlphaModifierSurfaceV1>,
     server: WlSurface,
     key: ObjectKey,
     serial: Option<[u32; 2]>,
@@ -509,6 +513,7 @@ pub struct ServerState<C: XConnection> {
     activation_state: Option<ActivationState>,
     global_output_offset: GlobalOutputOffset,
     global_offset_updated: bool,
+    alpha_modifier: Option<WpAlphaModifierV1>,
 }
 
 impl<C: XConnection> ServerState<C> {
@@ -539,6 +544,14 @@ impl<C: XConnection> ServerState<C> {
         let activation_state = ActivationState::bind(&clientside.global_list, &qh)
             .inspect_err(|e| {
                 warn!("Could not bind xdg activation ({e:?}). Windows might not receive focus depending on compositor focus stealing policy.")
+            })
+            .ok();
+
+        let alpha_modifier = clientside
+            .global_list
+            .bind::<WpAlphaModifierV1, _, _>(&qh, 1..=1, ())
+            .inspect_err(|e| {
+                warn!("Could not bind alpha modifier ({e:?}). Window opacity won't work.")
             })
             .ok();
 
@@ -578,6 +591,7 @@ impl<C: XConnection> ServerState<C> {
                 },
             },
             global_offset_updated: false,
+            alpha_modifier,
         }
     }
 
@@ -714,6 +728,40 @@ impl<C: XConnection> ServerState<C> {
                 }
             }
             win.attrs.size_hints = Some(hints);
+        }
+    }
+
+    pub fn set_win_opacity(&mut self, window: x::Window, opacity: u32) {
+        let Some(alpha_modifier) = self.alpha_modifier.as_ref() else {
+            return;
+        };
+
+        let Some(win) = self.windows.get_mut(&window) else {
+            debug!("not setting opacity for unknown window {window:?}");
+            return;
+        };
+
+        let opacity = (opacity != u32::MAX).then_some(opacity);
+        if win.attrs.opacity != opacity {
+            debug!("setting {window:?} opacity {opacity:0x?}");
+            if let Some(key) = win.surface_key {
+                if let Some(object) = self.objects.get_mut(key) {
+                    let surface: &mut SurfaceData = object.as_mut();
+                    if let Some(opacity) = opacity {
+                        surface
+                            .alpha_modifier
+                            .get_or_insert_with(|| {
+                                alpha_modifier.get_surface(&surface.client, &self.qh, ())
+                            })
+                            .set_multiplier(opacity);
+                    } else if let Some(alpha_modifier) = surface.alpha_modifier.take() {
+                        alpha_modifier.destroy();
+                    }
+                } else {
+                    warn!("could not set opacity on {window:?}: stale surface")
+                }
+            }
+            win.attrs.opacity = opacity;
         }
     }
 
