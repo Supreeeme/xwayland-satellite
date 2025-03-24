@@ -5,6 +5,12 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
+use wayland_protocols::wp::alpha_modifier::v1::server::wp_alpha_modifier_surface_v1::{
+    self, WpAlphaModifierSurfaceV1,
+};
+use wayland_protocols::wp::alpha_modifier::v1::server::wp_alpha_modifier_v1::{
+    self, WpAlphaModifierV1,
+};
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::server::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
@@ -81,6 +87,7 @@ pub struct SurfaceData {
     pub last_damage: Option<BufferDamage>,
     pub role: Option<SurfaceRole>,
     pub last_enter_serial: Option<u32>,
+    pub opacity: Option<(WpAlphaModifierSurfaceV1, Option<u32>)>,
 }
 
 impl SurfaceData {
@@ -383,6 +390,7 @@ impl Server {
         dh.create_global::<State, WlDataDeviceManager, _>(3, ());
         dh.create_global::<State, ZwpTabletManagerV2, _>(1, ());
         dh.create_global::<State, XdgActivationV1, _>(1, ());
+        dh.create_global::<State, WpAlphaModifierV1, _>(1, ());
         global_noop!(ZwpLinuxDmabufV1);
         global_noop!(ZwpRelativePointerManagerV1);
         global_noop!(WpViewporter);
@@ -733,6 +741,7 @@ simple_global_dispatch!(WlCompositor);
 simple_global_dispatch!(XdgWmBase);
 simple_global_dispatch!(ZxdgOutputManagerV1);
 simple_global_dispatch!(ZwpTabletManagerV2);
+simple_global_dispatch!(WpAlphaModifierV1);
 
 impl Dispatch<ZwpTabletManagerV2, ()> for State {
     fn request(
@@ -1472,6 +1481,7 @@ impl Dispatch<WlCompositor, ()> for State {
                         last_damage: None,
                         role: None,
                         last_enter_serial: None,
+                        opacity: None,
                     },
                 );
                 state.last_surface_id = Some(SurfaceId(id));
@@ -1672,6 +1682,71 @@ impl Dispatch<XdgActivationTokenV1, Mutex<ActivationTokenData>> for State {
                 token.done(activation_token);
             }
             xdg_activation_token_v1::Request::Destroy => {}
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<WpAlphaModifierV1, ()> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        resource: &WpAlphaModifierV1,
+        request: <WpAlphaModifierV1 as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            wp_alpha_modifier_v1::Request::GetSurface { id, surface } => {
+                let surface_id = SurfaceId(surface.id().protocol_id());
+                let data = state.surfaces.get_mut(&surface_id).unwrap();
+                if data.opacity.is_some() {
+                    resource.post_error(
+                        wp_alpha_modifier_v1::Error::AlreadyConstructed,
+                        "Surface already has an alpha modifier",
+                    );
+                    return;
+                }
+                data.opacity = Some((data_init.init(id, surface_id), None));
+            }
+            wp_alpha_modifier_v1::Request::Destroy => {}
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<WpAlphaModifierSurfaceV1, SurfaceId> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        resource: &WpAlphaModifierSurfaceV1,
+        request: <WpAlphaModifierSurfaceV1 as Resource>::Request,
+        surface_id: &SurfaceId,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            wp_alpha_modifier_surface_v1::Request::SetMultiplier { factor } => {
+                if let Some(data) = state.surfaces.get_mut(surface_id) {
+                    *data.opacity.as_mut().map(|(_, opacity)| opacity).unwrap() = Some(factor);
+                } else {
+                    resource.post_error(
+                        wp_alpha_modifier_surface_v1::Error::NoSurface,
+                        "Surface was destroyed",
+                    );
+                }
+            }
+            wp_alpha_modifier_surface_v1::Request::Destroy => {
+                if let Some(data) = state.surfaces.get_mut(surface_id) {
+                    *data.opacity.as_mut().map(|(_, opacity)| opacity).unwrap() = None;
+                } else {
+                    resource.post_error(
+                        wp_alpha_modifier_surface_v1::Error::NoSurface,
+                        "Surface was destroyed",
+                    );
+                }
+            }
             _ => unreachable!(),
         }
     }
