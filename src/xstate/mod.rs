@@ -58,14 +58,14 @@ macro_rules! unwrap_or_skip_bad_window {
 /// Essentially a trait alias.
 trait PropertyResolver {
     type Output;
-    fn resolve(self, reply: x::GetPropertyReply) -> Self::Output;
+    fn resolve(self, reply: x::GetPropertyReply) -> Option<Self::Output>;
 }
 impl<T, Output> PropertyResolver for T
 where
-    T: FnOnce(x::GetPropertyReply) -> Output,
+    T: FnOnce(x::GetPropertyReply) -> Option<Output>,
 {
     type Output = Output;
-    fn resolve(self, reply: x::GetPropertyReply) -> Self::Output {
+    fn resolve(self, reply: x::GetPropertyReply) -> Option<Self::Output> {
         (self)(reply)
     }
 }
@@ -83,7 +83,7 @@ impl<F: PropertyResolver> PropertyCookieWrapper<'_, F> {
         if reply.r#type() == x::ATOM_NONE {
             Ok(None)
         } else {
-            Ok(Some(self.resolver.resolve(reply)))
+            Ok(self.resolver.resolve(reply))
         }
     }
 }
@@ -574,7 +574,7 @@ impl XState {
             }
             let class = CString::from_vec_with_nul(data).unwrap();
             trace!("{:?} class: {class:?}", window);
-            class.to_string_lossy().to_string()
+            Some(class.to_string_lossy().to_string())
         };
         PropertyCookieWrapper {
             connection: &self.connection,
@@ -594,7 +594,7 @@ impl XState {
             // https://github.com/Smithay/wayland-rs/issues/748
             let data = data.split(|byte| *byte == 0).next().unwrap();
             let name = String::from_utf8_lossy(data).to_string();
-            WmName::WmName(name)
+            Some(WmName::WmName(name))
         };
 
         PropertyCookieWrapper {
@@ -614,7 +614,7 @@ impl XState {
             let data: &[u8] = reply.value();
             let data = data.split(|byte| *byte == 0).next().unwrap();
             let name = String::from_utf8_lossy(data).to_string();
-            WmName::NetWmName(name)
+            Some(WmName::NetWmName(name))
         };
 
         PropertyCookieWrapper {
@@ -633,7 +633,7 @@ impl XState {
             let data: &[u32] = reply.value();
             let hints = WmHints::from(data);
             trace!("wm hints: {hints:?}");
-            hints
+            Some(hints)
         };
         PropertyCookieWrapper {
             connection: &self.connection,
@@ -650,7 +650,7 @@ impl XState {
             self.get_property_cookie(window, x::ATOM_WM_NORMAL_HINTS, x::ATOM_WM_SIZE_HINTS, 9);
         let resolver = |reply: x::GetPropertyReply| {
             let data: &[u32] = reply.value();
-            WmNormalHints::from(data)
+            Some(WmNormalHints::from(data))
         };
 
         PropertyCookieWrapper {
