@@ -6,7 +6,7 @@ mod tests;
 
 use self::event::*;
 use crate::clientside::*;
-use crate::xstate::{WindowDims, WmHints, WmName, WmNormalHints};
+use crate::xstate::{WindowDims, WmHints, WmIcon, WmName, WmNormalHints};
 use crate::{X11Selection, XConnection};
 use log::{debug, warn};
 use rustix::event::{poll, PollFd, PollFlags};
@@ -16,12 +16,16 @@ use smithay_client_toolkit::data_device_manager::{
     data_device::DataDevice, data_offer::SelectionOffer, data_source::CopyPasteSource,
     DataDeviceManagerState,
 };
+use smithay_client_toolkit::shm::slot::SlotPool;
+use smithay_client_toolkit::shm::Shm;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::rc::{Rc, Weak};
+use wayland_client::protocol::wl_shm::Format;
 use wayland_client::{globals::Global, protocol as client, Proxy};
+use wayland_protocols::xdg::toplevel_icon::v1::client::xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1;
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
@@ -87,6 +91,7 @@ pub struct WindowAttributes {
     pub title: Option<WmName>,
     pub class: Option<String>,
     pub group: Option<x::Window>,
+    pub icon: Option<WmIcon>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
@@ -503,18 +508,25 @@ pub struct ServerState<C: XConnection> {
     last_hovered: Option<x::Window>,
     pub connection: Option<C>,
 
+    shm: Shm,
+    slot_pool: SlotPool,
     xdg_wm_base: XdgWmBase,
     clipboard_data: Option<ClipboardData<C::X11Selection>>,
     last_kb_serial: Option<(client::wl_seat::WlSeat, u32)>,
     activation_state: Option<ActivationState>,
     global_output_offset: GlobalOutputOffset,
     global_offset_updated: bool,
+    toplevel_icon_manager: Option<XdgToplevelIconManagerV1>,
 }
 
 impl<C: XConnection> ServerState<C> {
     pub fn new(dh: DisplayHandle, server_connection: Option<UnixStream>) -> Self {
         let clientside = ClientState::new(server_connection);
         let qh = clientside.qh.clone();
+
+        let shm = Shm::bind(&clientside.global_list, &qh).expect("Could not bind shm");
+
+        let slot_pool = SlotPool::new(256 * 256 * 4, &shm).expect("Could not create slot pool");
 
         let xdg_wm_base = clientside
             .global_list
@@ -542,6 +554,14 @@ impl<C: XConnection> ServerState<C> {
             })
             .ok();
 
+        let toplevel_icon_manager = clientside
+            .global_list
+            .bind::<XdgToplevelIconManagerV1, _, _>(&qh, 1..=1, ())
+            .inspect_err(|e| {
+                warn!("Could not bind toplevel icon manager ({e:?}). Windows won't have icons.")
+            })
+            .ok();
+
         dh.create_global::<Self, XwaylandShellV1, _>(1, ());
         clientside
             .global_list
@@ -563,6 +583,8 @@ impl<C: XConnection> ServerState<C> {
             objects: Default::default(),
             output_keys: Default::default(),
             associated_windows: Default::default(),
+            shm,
+            slot_pool,
             xdg_wm_base,
             clipboard_data,
             last_kb_serial: None,
@@ -578,6 +600,7 @@ impl<C: XConnection> ServerState<C> {
                 },
             },
             global_offset_updated: false,
+            toplevel_icon_manager,
         }
     }
 
@@ -714,6 +737,65 @@ impl<C: XConnection> ServerState<C> {
                 }
             }
             win.attrs.size_hints = Some(hints);
+        }
+    }
+
+    pub fn set_win_icon(&mut self, window: x::Window, icon: Option<WmIcon>) {
+        let Some(toplevel_icon_manager) = self.toplevel_icon_manager.as_ref() else {
+            return;
+        };
+
+        let Some(win) = self.windows.get_mut(&window) else {
+            debug!("not setting icon for unknown window {window:?}");
+            return;
+        };
+
+        if win.attrs.icon != icon {
+            if icon.is_some() {
+                debug!("setting {window:?} icon {icon:?}");
+            } else {
+                debug!("unsetting {window:?} icon");
+            }
+            if let Some(key) = win.surface_key {
+                if let Some(object) = self.objects.get(key) {
+                    let surface: &SurfaceData = object.as_ref();
+                    if let Some(SurfaceRole::Toplevel(Some(ToplevelData { toplevel, .. }))) =
+                        &surface.role
+                    {
+                        if let Some(WmIcon {
+                            width,
+                            height,
+                            data,
+                        }) = icon.as_ref()
+                        {
+                            let icon = toplevel_icon_manager.create_icon(&self.qh, ());
+                            let (buffer, canvas) = match self.slot_pool.create_buffer(
+                                *width as i32,
+                                *height as i32,
+                                *width as i32,
+                                Format::Argb8888,
+                            ) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    warn!("failed to create buffer for window icon: {e:?}");
+                                    return;
+                                }
+                            };
+                            data.into_iter()
+                                .flat_map(|pixel| pixel.to_ne_bytes())
+                                .zip(canvas)
+                                .for_each(|(byte, slot)| *slot = byte);
+                            icon.add_buffer(buffer.wl_buffer(), 1);
+                            toplevel_icon_manager.set_icon(toplevel, Some(&icon));
+                        } else {
+                            toplevel_icon_manager.set_icon(toplevel, None);
+                        }
+                    }
+                } else {
+                    warn!("could not set icon on {window:?}: stale surface")
+                }
+            }
+            win.attrs.icon = icon;
         }
     }
 

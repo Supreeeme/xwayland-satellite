@@ -5,6 +5,10 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
+use wayland_protocols::xdg::toplevel_icon::v1::server::xdg_toplevel_icon_v1::XdgToplevelIconV1;
+use wayland_protocols::xdg::toplevel_icon::v1::server::{
+    xdg_toplevel_icon_manager_v1, xdg_toplevel_icon_v1,
+};
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::server::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
@@ -34,6 +38,7 @@ use wayland_protocols::{
             xdg_toplevel::{self, XdgToplevel},
             xdg_wm_base::{self, XdgWmBase},
         },
+        toplevel_icon::v1::server::xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1,
         xdg_output::zv1::server::{
             zxdg_output_manager_v1::{self, ZxdgOutputManagerV1},
             zxdg_output_v1::{self, ZxdgOutputV1},
@@ -123,6 +128,7 @@ pub struct Toplevel {
     pub closed: bool,
     pub title: Option<String>,
     pub app_id: Option<String>,
+    pub icon: Option<WlBuffer>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -192,7 +198,7 @@ struct State {
     surfaces: HashMap<SurfaceId, SurfaceData>,
     outputs: HashMap<WlOutput, Output>,
     positioners: HashMap<PositionerId, PositionerState>,
-    buffers: HashSet<WlBuffer>,
+    buffers: HashMap<WlBuffer, (i32, i32)>,
     begin: Instant,
     last_surface_id: Option<SurfaceId>,
     last_output: Option<WlOutput>,
@@ -207,6 +213,7 @@ struct State {
     xdg_activation: Option<XdgActivationV1>,
     valid_tokens: HashSet<String>,
     token_counter: u32,
+    toplevel_icon_manager: Option<XdgToplevelIconManagerV1>,
 }
 
 impl Default for State {
@@ -230,6 +237,7 @@ impl Default for State {
             xdg_activation: None,
             valid_tokens: HashSet::new(),
             token_counter: 0,
+            toplevel_icon_manager: None,
         }
     }
 }
@@ -383,6 +391,7 @@ impl Server {
         dh.create_global::<State, WlDataDeviceManager, _>(3, ());
         dh.create_global::<State, ZwpTabletManagerV2, _>(1, ());
         dh.create_global::<State, XdgActivationV1, _>(1, ());
+        dh.create_global::<State, XdgToplevelIconManagerV1, _>(1, ());
         global_noop!(ZwpLinuxDmabufV1);
         global_noop!(ZwpRelativePointerManagerV1);
         global_noop!(WpViewporter);
@@ -1219,6 +1228,7 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                     closed: false,
                     title: None,
                     app_id: None,
+                    icon: None,
                 };
                 let data = state.surfaces.get_mut(surface_id).unwrap();
                 data.role = Some(SurfaceRole::Toplevel(t));
@@ -1421,9 +1431,11 @@ impl Dispatch<WlShmPool, ()> for State {
     ) {
         use proto::wl_shm_pool::Request::*;
         match request {
-            CreateBuffer { id, .. } => {
+            CreateBuffer {
+                id, width, height, ..
+            } => {
                 let buf = data_init.init(id, ());
-                state.buffers.insert(buf);
+                state.buffers.insert(buf, (width, height));
             }
             Destroy => {}
             other => todo!("unhandled request {other:?}"),
@@ -1672,6 +1684,99 @@ impl Dispatch<XdgActivationTokenV1, Mutex<ActivationTokenData>> for State {
                 token.done(activation_token);
             }
             xdg_activation_token_v1::Request::Destroy => {}
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl GlobalDispatch<XdgToplevelIconManagerV1, ()> for State {
+    fn bind(
+        state: &mut Self,
+        _: &DisplayHandle,
+        _: &Client,
+        resource: wayland_server::New<XdgToplevelIconManagerV1>,
+        _: &(),
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        let toplevel_icon_manager = data_init.init(resource, ());
+        toplevel_icon_manager.icon_size(64);
+        toplevel_icon_manager.done();
+        state.toplevel_icon_manager = Some(toplevel_icon_manager);
+    }
+}
+
+impl Dispatch<XdgToplevelIconManagerV1, ()> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &XdgToplevelIconManagerV1,
+        request: <XdgToplevelIconManagerV1 as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            xdg_toplevel_icon_manager_v1::Request::CreateIcon { id } => {
+                data_init.init(id, Mutex::new(Some(None)));
+            }
+            xdg_toplevel_icon_manager_v1::Request::SetIcon { toplevel, icon } => {
+                let surface_id = *toplevel.data::<SurfaceId>().unwrap();
+                let data = state.surfaces.get_mut(&surface_id).unwrap();
+                let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
+                    unreachable!();
+                };
+                toplevel.icon = icon.and_then(|icon| {
+                    let data = icon
+                        .data::<Mutex<Option<Option<WlBuffer>>>>()
+                        .unwrap()
+                        .lock()
+                        .unwrap();
+                    data.clone().flatten()
+                });
+            }
+            xdg_toplevel_icon_manager_v1::Request::Destroy => {}
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<XdgToplevelIconV1, Mutex<Option<Option<WlBuffer>>>> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        icon: &XdgToplevelIconV1,
+        request: <XdgToplevelIconV1 as Resource>::Request,
+        data: &Mutex<Option<Option<WlBuffer>>>,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            request @ xdg_toplevel_icon_v1::Request::SetName { icon_name: _ } => {
+                todo!("unhandled request {request:?}")
+            }
+            xdg_toplevel_icon_v1::Request::AddBuffer { buffer, scale } => {
+                let mut data = data.lock().unwrap();
+                let Some(data) = data.as_mut() else {
+                    icon.post_error(
+                        xdg_toplevel_icon_v1::Error::Immutable,
+                        "Toplevel icon is immutable",
+                    );
+                    return;
+                };
+                if scale != 1 {
+                    todo!("icon scale is unsupported")
+                }
+                let (width, height) = state.buffers.get(&buffer).unwrap();
+                if width != height {
+                    icon.post_error(
+                        xdg_toplevel_icon_v1::Error::InvalidBuffer,
+                        "Toplevel icon must be square",
+                    );
+                    return;
+                }
+                *data = Some(buffer);
+            }
+            xdg_toplevel_icon_v1::Request::Destroy => {}
             _ => unreachable!(),
         }
     }

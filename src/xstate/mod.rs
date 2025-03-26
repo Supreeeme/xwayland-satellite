@@ -491,6 +491,7 @@ impl XState {
         let class = self.get_wm_class(window);
         let wm_hints = self.get_wm_hints(window);
         let size_hints = self.get_wm_size_hints(window);
+        let icon = self.get_wm_icon(window);
 
         let geometry = self.connection.wait_for_reply(geometry)?;
         debug!("{window:?} geometry: {geometry:?}");
@@ -503,6 +504,7 @@ impl XState {
         let class = class.resolve()?;
         let wm_hints = wm_hints.resolve()?;
         let size_hints = size_hints.resolve()?;
+        let icon = icon.resolve()?;
 
         Ok(WindowAttributes {
             override_redirect: attrs.override_redirect(),
@@ -517,6 +519,7 @@ impl XState {
             class,
             group: wm_hints.and_then(|h| h.window_group),
             size_hints,
+            icon,
         })
     }
 
@@ -660,6 +663,23 @@ impl XState {
         }
     }
 
+    fn get_wm_icon(
+        &self,
+        window: x::Window,
+    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = WmIcon>> {
+        let cookie = self.get_property_cookie(window, self.atoms.wm_icon, self.atoms.wm_icon, 1);
+        let resolver = |reply: x::GetPropertyReply| {
+            let data: &[u32] = reply.value();
+            WmIcon::try_from(data).ok()
+        };
+
+        PropertyCookieWrapper {
+            connection: &self.connection,
+            cookie,
+            resolver,
+        }
+    }
+
     fn get_pid(&self, window: x::Window) -> Option<u32> {
         let Some(pid) = self
             .connection
@@ -718,6 +738,10 @@ impl XState {
                     unwrap_or_skip_bad_window!(self.get_wm_class(window).resolve()).unwrap();
                 server_state.set_win_class(window, class);
             }
+            x if x == self.atoms.wm_icon => {
+                let icon = unwrap_or_skip_bad_window!(self.get_wm_icon(window).resolve());
+                server_state.set_win_icon(window, icon);
+            }
             _ => {
                 if !self.handle_selection_property_change(&event)
                     && log::log_enabled!(log::Level::Debug)
@@ -749,6 +773,7 @@ xcb::atoms_struct! {
         wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
         active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
+        wm_icon => b"_NET_WM_ICON" only_if_exists = false,
         supported => b"_NET_SUPPORTED" only_if_exists = false,
         utf8_string => b"UTF8_STRING" only_if_exists = false,
         clipboard => b"CLIPBOARD" only_if_exists = false,
@@ -884,6 +909,30 @@ impl TryFrom<u32> for WmState {
             3 => Ok(Self::Iconic),
             _ => Err(()),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WmIcon {
+    pub width: u32,
+    pub height: u32,
+    /// Pixels in ARGB format.
+    pub data: Vec<u32>,
+}
+
+impl TryFrom<&[u32]> for WmIcon {
+    type Error = ();
+    fn try_from(value: &[u32]) -> Result<Self, Self::Error> {
+        let width = *value.get(0).ok_or(())?;
+        let height = *value.get(1).ok_or(())?;
+        if value.len() - 2 != width as usize * height as usize {
+            return Err(());
+        }
+        Ok(Self {
+            width,
+            height,
+            data: value[2..].to_vec(),
+        })
     }
 }
 

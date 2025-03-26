@@ -1,4 +1,5 @@
 mod data_device;
+mod shm;
 pub mod xdg_activation;
 
 use crate::server::{ObjectEvent, ObjectKey};
@@ -19,6 +20,8 @@ use wayland_protocols::wp::relative_pointer::zv1::client::{
     zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
     zwp_relative_pointer_v1::ZwpRelativePointerV1,
 };
+use wayland_protocols::xdg::toplevel_icon::v1::client::xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1;
+use wayland_protocols::xdg::toplevel_icon::v1::client::xdg_toplevel_icon_v1::XdgToplevelIconV1;
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::client::{
@@ -140,6 +143,8 @@ delegate_noop!(Globals: ZxdgOutputManagerV1);
 delegate_noop!(Globals: ZwpPointerConstraintsV1);
 delegate_noop!(Globals: ZwpTabletManagerV2);
 delegate_noop!(Globals: XdgActivationV1);
+delegate_noop!(Globals: ignore XdgToplevelIconManagerV1);
+delegate_noop!(Globals: XdgToplevelIconV1);
 
 impl Dispatch<WlRegistry, GlobalListContents> for Globals {
     fn event(
