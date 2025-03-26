@@ -19,6 +19,8 @@ use wayland_protocols::wp::relative_pointer::zv1::client::{
     zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
     zwp_relative_pointer_v1::ZwpRelativePointerV1,
 };
+use wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1;
+use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1;
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::client::{
@@ -140,6 +142,8 @@ delegate_noop!(Globals: ZxdgOutputManagerV1);
 delegate_noop!(Globals: ZwpPointerConstraintsV1);
 delegate_noop!(Globals: ZwpTabletManagerV2);
 delegate_noop!(Globals: XdgActivationV1);
+delegate_noop!(Globals: ZxdgDecorationManagerV1);
+delegate_noop!(Globals: ignore ZxdgToplevelDecorationV1);
 
 impl Dispatch<WlRegistry, GlobalListContents> for Globals {
     fn event(
