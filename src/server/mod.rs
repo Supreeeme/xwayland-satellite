@@ -216,7 +216,10 @@ impl SurfaceData {
     fn destroy_role(&mut self) {
         if let Some(role) = self.role.take() {
             match role {
-                SurfaceRole::Toplevel(Some(t)) => {
+                SurfaceRole::Toplevel(Some(mut t)) => {
+                    if let Some(decoration) = t.decoration.take() {
+                        decoration.destroy();
+                    }
                     t.toplevel.destroy();
                     t.xdg.surface.destroy();
                 }
