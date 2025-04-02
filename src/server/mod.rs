@@ -8,7 +8,7 @@ use self::event::*;
 use crate::clientside::*;
 use crate::xstate::{Decorations, WindowDims, WmHints, WmName, WmNormalHints};
 use crate::{X11Selection, XConnection};
-use log::{debug, warn};
+use log::{debug, error, warn};
 use rustix::event::{poll, PollFd, PollFlags};
 use slotmap::{new_key_type, HopSlotMap, SparseSecondaryMap};
 use smithay_client_toolkit::activation::ActivationState;
@@ -1037,10 +1037,12 @@ impl<C: XConnection> ServerState<C> {
 
         self.handle_clipboard_events();
         self.handle_activations();
-        self.clientside
-            .queue
-            .flush()
-            .expect("Failed flushing clientside events");
+        match self.clientside.queue.flush() {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Error flushing client side queue: {e:?}");
+            }
+        };
     }
 
     pub fn new_selection(&mut self) -> Option<ForeignSelection> {
