@@ -711,6 +711,11 @@ impl TestFixture {
             );
             assert_eq!(pos.anchor, xdg_positioner::Anchor::TopLeft);
             assert_eq!(pos.gravity, xdg_positioner::Gravity::BottomRight);
+            assert_eq!(
+                pos.constraint_adjustment,
+                xdg_positioner::ConstraintAdjustment::SlideX
+                    | xdg_positioner::ConstraintAdjustment::SlideY,
+            );
         }
 
         self.testwl.configure_popup(popup_id);
