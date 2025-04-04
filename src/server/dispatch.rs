@@ -117,8 +117,7 @@ impl<C: XConnection> Dispatch<WlSurface, ObjectKey> for ServerState<C> {
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
         let surface: &SurfaceData = state.objects[*key].as_ref();
-        let configured =
-            surface.role.is_none() || surface.xdg().is_none() || surface.xdg().unwrap().configured;
+        let configured = surface.role.is_none() || surface.xdg().configured;
 
         match request {
             Request::<WlSurface>::Attach { buffer, x, y } => {

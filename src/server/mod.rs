@@ -191,44 +191,43 @@ pub struct SurfaceData {
 }
 
 impl SurfaceData {
-    fn xdg(&self) -> Option<&XdgSurfaceData> {
+    fn xdg(&self) -> &XdgSurfaceData {
         match self
             .role
             .as_ref()
             .expect("Tried to get XdgSurface for surface without role")
         {
-            SurfaceRole::Toplevel(ref t) => t.as_ref().map(|t| &t.xdg),
-            SurfaceRole::Popup(ref p) => p.as_ref().map(|p| &p.xdg),
+            SurfaceRole::Toplevel(ref t) => &t.xdg,
+            SurfaceRole::Popup(ref p) => &p.xdg,
         }
     }
 
-    fn xdg_mut(&mut self) -> Option<&mut XdgSurfaceData> {
+    fn xdg_mut(&mut self) -> &mut XdgSurfaceData {
         match self
             .role
             .as_mut()
             .expect("Tried to get XdgSurface for surface without role")
         {
-            SurfaceRole::Toplevel(ref mut t) => t.as_mut().map(|t| &mut t.xdg),
-            SurfaceRole::Popup(ref mut p) => p.as_mut().map(|p| &mut p.xdg),
+            SurfaceRole::Toplevel(ref mut t) => &mut t.xdg,
+            SurfaceRole::Popup(ref mut p) => &mut p.xdg,
         }
     }
 
     fn destroy_role(&mut self) {
         if let Some(role) = self.role.take() {
             match role {
-                SurfaceRole::Toplevel(Some(mut t)) => {
+                SurfaceRole::Toplevel(mut t) => {
                     if let Some(decoration) = t.decoration.take() {
                         decoration.destroy();
                     }
                     t.toplevel.destroy();
                     t.xdg.surface.destroy();
                 }
-                SurfaceRole::Popup(Some(p)) => {
+                SurfaceRole::Popup(p) => {
                     p.positioner.destroy();
                     p.popup.destroy();
                     p.xdg.surface.destroy();
                 }
-                _ => {}
             }
         }
     }
@@ -236,8 +235,8 @@ impl SurfaceData {
 
 #[derive(Debug)]
 enum SurfaceRole {
-    Toplevel(Option<ToplevelData>),
-    Popup(Option<PopupData>),
+    Toplevel(ToplevelData),
+    Popup(PopupData),
 }
 
 #[derive(Debug)]
@@ -673,7 +672,7 @@ impl<C: XConnection> ServerState<C> {
         if let Some(key) = win.surface_key {
             if let Some(object) = self.objects.get(key) {
                 let surface: &SurfaceData = object.as_ref();
-                if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
+                if let Some(SurfaceRole::Toplevel(data)) = &surface.role {
                     data.toplevel.set_title(title.name().to_string());
                 }
             } else {
@@ -692,7 +691,7 @@ impl<C: XConnection> ServerState<C> {
         if let Some(key) = win.surface_key {
             if let Some(object) = self.objects.get(key) {
                 let surface: &SurfaceData = object.as_ref();
-                if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
+                if let Some(SurfaceRole::Toplevel(data)) = &surface.role {
                     data.toplevel.set_app_id(class.to_string());
                 }
             } else {
@@ -720,7 +719,7 @@ impl<C: XConnection> ServerState<C> {
             if let Some(key) = win.surface_key {
                 if let Some(object) = self.objects.get(key) {
                     let surface: &SurfaceData = object.as_ref();
-                    if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
+                    if let Some(SurfaceRole::Toplevel(data)) = &surface.role {
                         if let Some(min_size) = &hints.min_size {
                             data.toplevel.set_min_size(min_size.width, min_size.height);
                         }
@@ -751,7 +750,7 @@ impl<C: XConnection> ServerState<C> {
             if let Some(key) = win.surface_key {
                 if let Some(object) = self.objects.get(key) {
                     let surface: &SurfaceData = object.as_ref();
-                    if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
+                    if let Some(SurfaceRole::Toplevel(data)) = &surface.role {
                         data.decoration
                             .as_ref()
                             .unwrap()
@@ -815,7 +814,7 @@ impl<C: XConnection> ServerState<C> {
         };
 
         match &data.role {
-            Some(SurfaceRole::Popup(Some(popup))) => {
+            Some(SurfaceRole::Popup(popup)) => {
                 popup.positioner.set_offset(
                     event.x() as i32 - win.output_offset.x,
                     event.y() as i32 - win.output_offset.y,
@@ -880,7 +879,7 @@ impl<C: XConnection> ServerState<C> {
             return;
         };
         let surface: &mut SurfaceData = object.as_mut();
-        let Some(SurfaceRole::Toplevel(Some(ref toplevel))) = surface.role else {
+        let Some(SurfaceRole::Toplevel(ref toplevel)) = surface.role else {
             warn!("Tried to set an unmapped toplevel or non toplevel fullscreen: {window:?}");
             return;
         };
@@ -1195,7 +1194,7 @@ impl<C: XConnection> ServerState<C> {
                 parent_window.attrs.dims.height as _,
             );
             let popup = xdg_surface.get_popup(
-                Some(&parent_surface.xdg().unwrap().surface),
+                Some(&parent_surface.xdg().surface),
                 &positioner,
                 &self.qh,
                 surface_key,
@@ -1209,10 +1208,10 @@ impl<C: XConnection> ServerState<C> {
                     pending: None,
                 },
             };
-            SurfaceRole::Popup(Some(popup))
+            SurfaceRole::Popup(popup)
         } else {
             let data = self.create_toplevel(window, surface_key, xdg_surface, fullscreen);
-            SurfaceRole::Toplevel(Some(data))
+            SurfaceRole::Toplevel(data)
         };
 
         let surface: &mut SurfaceData = self.objects[surface_key].as_mut();
