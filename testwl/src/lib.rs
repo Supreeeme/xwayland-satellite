@@ -1293,6 +1293,7 @@ pub struct PositionerState {
     pub offset: Vec2,
     pub anchor: xdg_positioner::Anchor,
     pub gravity: xdg_positioner::Gravity,
+    pub constraint_adjustment: xdg_positioner::ConstraintAdjustment,
 }
 
 impl Default for PositionerState {
@@ -1303,6 +1304,7 @@ impl Default for PositionerState {
             offset: Vec2 { x: 0, y: 0 },
             anchor: xdg_positioner::Anchor::None,
             gravity: xdg_positioner::Gravity::None,
+            constraint_adjustment: xdg_positioner::ConstraintAdjustment::None,
         }
     }
 }
@@ -1352,6 +1354,11 @@ impl Dispatch<XdgPositioner, ()> for State {
             }
             xdg_positioner::Request::SetGravity { gravity } => {
                 data.get_mut().gravity = gravity.into_result().unwrap();
+            }
+            xdg_positioner::Request::SetConstraintAdjustment {
+                constraint_adjustment,
+            } => {
+                data.get_mut().constraint_adjustment = constraint_adjustment.into_result().unwrap();
             }
             xdg_positioner::Request::Destroy => {
                 data.remove();

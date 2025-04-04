@@ -26,6 +26,7 @@ use wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1:
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::{
     self, ZxdgToplevelDecorationV1,
 };
+use wayland_protocols::xdg::shell::client::xdg_positioner::ConstraintAdjustment;
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
@@ -1193,6 +1194,9 @@ impl<C: XConnection> ServerState<C> {
                 0,
                 parent_window.attrs.dims.width as _,
                 parent_window.attrs.dims.height as _,
+            );
+            positioner.set_constraint_adjustment(
+                ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY,
             );
             let popup = xdg_surface.get_popup(
                 Some(&parent_surface.xdg().unwrap().surface),
