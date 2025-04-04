@@ -1,12 +1,12 @@
-use rustix::event::{poll, PollFd, PollFlags};
+use rustix::event::{PollFd, PollFlags, poll};
 use rustix::process::{Pid, Signal, WaitOptions};
 use std::io::Write;
 use std::mem::ManuallyDrop;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex, Once,
+    atomic::{AtomicBool, Ordering},
 };
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -14,7 +14,7 @@ use wayland_protocols::xdg::{
     decoration::zv1::server::zxdg_toplevel_decoration_v1, shell::server::xdg_toplevel,
 };
 use wayland_server::Resource;
-use xcb::{x, Xid};
+use xcb::{Xid, x};
 use xwayland_satellite as xwls;
 use xwayland_satellite::xstate::{WmSizeHintsFlags, WmState};
 

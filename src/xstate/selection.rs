@@ -1,4 +1,4 @@
-use super::{get_atom_name, XState};
+use super::{XState, get_atom_name};
 use crate::server::ForeignSelection;
 use crate::{RealServerState, X11Selection};
 use log::{debug, error, warn};
@@ -385,7 +385,10 @@ impl XState {
                         let Some(target) = mimes.iter().find(|t| t.atom == other) else {
                             if log::log_enabled!(log::Level::Debug) {
                                 let name = get_atom_name(&self.connection, other);
-                                debug!("refusing selection request because given atom could not be found ({})", name);
+                                debug!(
+                                    "refusing selection request because given atom could not be found ({})",
+                                    name
+                                );
                             }
                             refuse();
                             return true;

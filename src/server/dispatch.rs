@@ -40,6 +40,7 @@ use wayland_protocols::{
     },
 };
 use wayland_server::{
+    Dispatch, DisplayHandle, GlobalDispatch, Resource,
     protocol::{
         wl_buffer::WlBuffer,
         wl_callback::WlCallback,
@@ -54,7 +55,6 @@ use wayland_server::{
         wl_surface::WlSurface,
         wl_touch::WlTouch,
     },
-    Dispatch, DisplayHandle, GlobalDispatch, Resource,
 };
 
 macro_rules! only_destroy_request_impl {

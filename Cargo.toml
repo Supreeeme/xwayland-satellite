@@ -14,9 +14,7 @@ all = "deny"
 [package]
 name = "xwayland-satellite"
 version = "0.5.1"
-edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+edition = "2024"
 
 [lib]
 crate-type = ["lib"]

@@ -3,7 +3,7 @@ pub mod xdg_activation;
 
 use crate::server::{ObjectEvent, ObjectKey};
 use std::os::unix::net::UnixStream;
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, mpsc};
 use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
     wl_keyboard::WlKeyboard, wl_output::WlOutput, wl_pointer::WlPointer, wl_region::WlRegion,
@@ -11,9 +11,8 @@ use wayland_client::protocol::{
     wl_surface::WlSurface, wl_touch::WlTouch,
 };
 use wayland_client::{
-    delegate_noop, event_created_child,
-    globals::{registry_queue_init, Global, GlobalList, GlobalListContents},
-    Connection, Dispatch, EventQueue, Proxy, QueueHandle,
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop, event_created_child,
+    globals::{Global, GlobalList, GlobalListContents, registry_queue_init},
 };
 use wayland_protocols::wp::relative_pointer::zv1::client::{
     zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
@@ -35,13 +34,13 @@ use wayland_protocols::{
         },
         tablet::zv2::client::{
             zwp_tablet_manager_v2::ZwpTabletManagerV2,
-            zwp_tablet_pad_group_v2::{ZwpTabletPadGroupV2, EVT_RING_OPCODE, EVT_STRIP_OPCODE},
+            zwp_tablet_pad_group_v2::{EVT_RING_OPCODE, EVT_STRIP_OPCODE, ZwpTabletPadGroupV2},
             zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2,
             zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2,
-            zwp_tablet_pad_v2::{ZwpTabletPadV2, EVT_GROUP_OPCODE},
+            zwp_tablet_pad_v2::{EVT_GROUP_OPCODE, ZwpTabletPadV2},
             zwp_tablet_seat_v2::{
-                ZwpTabletSeatV2, EVT_PAD_ADDED_OPCODE, EVT_TABLET_ADDED_OPCODE,
-                EVT_TOOL_ADDED_OPCODE,
+                EVT_PAD_ADDED_OPCODE, EVT_TABLET_ADDED_OPCODE, EVT_TOOL_ADDED_OPCODE,
+                ZwpTabletSeatV2,
             },
             zwp_tablet_tool_v2::ZwpTabletToolV2,
             zwp_tablet_v2::ZwpTabletV2,

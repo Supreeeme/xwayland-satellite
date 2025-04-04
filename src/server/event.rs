@@ -4,7 +4,7 @@ use log::{debug, trace, warn};
 use macros::simple_event_shunt;
 use std::collections::HashSet;
 use std::os::fd::AsFd;
-use wayland_client::{protocol as client, Proxy};
+use wayland_client::{Proxy, protocol as client};
 use wayland_protocols::{
     wp::{
         pointer_constraints::zv1::{

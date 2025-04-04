@@ -9,19 +9,19 @@ use crate::clientside::*;
 use crate::xstate::{Decorations, WindowDims, WmHints, WmName, WmNormalHints};
 use crate::{X11Selection, XConnection};
 use log::{debug, warn};
-use rustix::event::{poll, PollFd, PollFlags};
-use slotmap::{new_key_type, HopSlotMap, SparseSecondaryMap};
+use rustix::event::{PollFd, PollFlags, poll};
+use slotmap::{HopSlotMap, SparseSecondaryMap, new_key_type};
 use smithay_client_toolkit::activation::ActivationState;
 use smithay_client_toolkit::data_device_manager::{
-    data_device::DataDevice, data_offer::SelectionOffer, data_source::CopyPasteSource,
-    DataDeviceManagerState,
+    DataDeviceManagerState, data_device::DataDevice, data_offer::SelectionOffer,
+    data_source::CopyPasteSource,
 };
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::rc::{Rc, Weak};
-use wayland_client::{globals::Global, protocol as client, Proxy};
+use wayland_client::{Proxy, globals::Global, protocol as client};
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1;
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::{
     self, ZxdgToplevelDecorationV1,
@@ -50,11 +50,11 @@ use wayland_protocols::{
 };
 use wayland_server::protocol::wl_seat::WlSeat;
 use wayland_server::{
+    Client, DisplayHandle, Resource, WEnum,
     protocol::{
         wl_callback::WlCallback, wl_compositor::WlCompositor, wl_output::WlOutput, wl_shm::WlShm,
         wl_surface::WlSurface,
     },
-    Client, DisplayHandle, Resource, WEnum,
 };
 use wl_drm::{client::wl_drm::WlDrm as WlDrmClient, server::wl_drm::WlDrm as WlDrmServer};
 use xcb::x;
@@ -197,8 +197,8 @@ impl SurfaceData {
             .as_ref()
             .expect("Tried to get XdgSurface for surface without role")
         {
-            SurfaceRole::Toplevel(ref t) => &t.xdg,
-            SurfaceRole::Popup(ref p) => &p.xdg,
+            SurfaceRole::Toplevel(t) => &t.xdg,
+            SurfaceRole::Popup(p) => &p.xdg,
         }
     }
 
@@ -208,8 +208,8 @@ impl SurfaceData {
             .as_mut()
             .expect("Tried to get XdgSurface for surface without role")
         {
-            SurfaceRole::Toplevel(ref mut t) => &mut t.xdg,
-            SurfaceRole::Popup(ref mut p) => &mut p.xdg,
+            SurfaceRole::Toplevel(t) => &mut t.xdg,
+            SurfaceRole::Popup(p) => &mut p.xdg,
         }
     }
 
@@ -531,7 +531,9 @@ impl<C: XConnection> ServerState<C> {
             .expect("Could not bind xdg_wm_base");
 
         if xdg_wm_base.version() < 3 {
-            warn!("xdg_wm_base version 2 detected. Popup repositioning will not work, and some popups may not work correctly.");
+            warn!(
+                "xdg_wm_base version 2 detected. Popup repositioning will not work, and some popups may not work correctly."
+            );
         }
 
         let manager = DataDeviceManagerState::bind(&clientside.global_list, &qh)
@@ -655,7 +657,9 @@ impl<C: XConnection> ServerState<C> {
         let new_title = match &mut win.attrs.title {
             Some(w) => {
                 if matches!(w, WmName::NetWmName(_)) && matches!(name, WmName::WmName(_)) {
-                    debug!("skipping setting window name to {name:?} because a _NET_WM_NAME title is already set");
+                    debug!(
+                        "skipping setting window name to {name:?} because a _NET_WM_NAME title is already set"
+                    );
                     None
                 } else {
                     debug!("setting {window:?} title to {name:?}");

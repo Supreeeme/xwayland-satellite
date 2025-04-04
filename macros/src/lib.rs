@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 
 use quote::{format_ident, quote};
 use syn::{
-    braced, bracketed, parse::Parse, parse_macro_input, parse_quote, punctuated::Punctuated, Token,
+    Token, braced, bracketed, parse::Parse, parse_macro_input, parse_quote, punctuated::Punctuated,
 };
 
 enum FieldOrClosure {

@@ -1,4 +1,4 @@
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map};
 use std::io::Read;
 use std::io::Write;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -45,9 +45,10 @@ use wayland_protocols::{
     },
 };
 use wayland_server::{
+    Client, Dispatch, Display, DisplayHandle, GlobalDispatch, Resource, WEnum,
     backend::{
-        protocol::{Interface, ProtocolError},
         GlobalHandler, ObjectData,
+        protocol::{Interface, ProtocolError},
     },
     protocol::{
         self as proto,
@@ -66,7 +67,6 @@ use wayland_server::{
         wl_shm_pool::WlShmPool,
         wl_surface::WlSurface,
     },
-    Client, Dispatch, Display, DisplayHandle, GlobalDispatch, Resource, WEnum,
 };
 use wl_drm::server::wl_drm::WlDrm;
 
@@ -90,21 +90,21 @@ pub struct SurfaceData {
 impl SurfaceData {
     pub fn xdg(&self) -> &XdgSurfaceData {
         match self.role.as_ref().expect("Surface missing role") {
-            SurfaceRole::Toplevel(ref t) => &t.xdg,
-            SurfaceRole::Popup(ref p) => &p.xdg,
+            SurfaceRole::Toplevel(t) => &t.xdg,
+            SurfaceRole::Popup(p) => &p.xdg,
             SurfaceRole::Cursor => panic!("cursor surface doesn't have an XdgSurface"),
         }
     }
 
     pub fn toplevel(&self) -> &Toplevel {
         match self.role.as_ref().expect("Surface missing role") {
-            SurfaceRole::Toplevel(ref t) => t,
+            SurfaceRole::Toplevel(t) => t,
             other => panic!("Surface role was not toplevel: {other:?}"),
         }
     }
     pub fn popup(&self) -> &Popup {
         match self.role.as_ref().expect("Surface missing role") {
-            SurfaceRole::Popup(ref p) => p,
+            SurfaceRole::Popup(p) => p,
             other => panic!("Surface role was not popup: {other:?}"),
         }
     }
