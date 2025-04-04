@@ -9,19 +9,19 @@ use crate::clientside::*;
 use crate::xstate::{Decorations, WindowDims, WmHints, WmName, WmNormalHints};
 use crate::{X11Selection, XConnection};
 use log::{debug, warn};
-use rustix::event::{poll, PollFd, PollFlags};
-use slotmap::{new_key_type, HopSlotMap, SparseSecondaryMap};
+use rustix::event::{PollFd, PollFlags, poll};
+use slotmap::{HopSlotMap, SparseSecondaryMap, new_key_type};
 use smithay_client_toolkit::activation::ActivationState;
 use smithay_client_toolkit::data_device_manager::{
-    data_device::DataDevice, data_offer::SelectionOffer, data_source::CopyPasteSource,
-    DataDeviceManagerState,
+    DataDeviceManagerState, data_device::DataDevice, data_offer::SelectionOffer,
+    data_source::CopyPasteSource,
 };
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::rc::{Rc, Weak};
-use wayland_client::{globals::Global, protocol as client, Proxy};
+use wayland_client::{Proxy, globals::Global, protocol as client};
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1;
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::{
     self, ZxdgToplevelDecorationV1,
@@ -50,11 +50,11 @@ use wayland_protocols::{
 };
 use wayland_server::protocol::wl_seat::WlSeat;
 use wayland_server::{
+    Client, DisplayHandle, Resource, WEnum,
     protocol::{
         wl_callback::WlCallback, wl_compositor::WlCompositor, wl_output::WlOutput, wl_shm::WlShm,
         wl_surface::WlSurface,
     },
-    Client, DisplayHandle, Resource, WEnum,
 };
 use wl_drm::{client::wl_drm::WlDrm as WlDrmClient, server::wl_drm::WlDrm as WlDrmServer};
 use xcb::x;
@@ -191,44 +191,43 @@ pub struct SurfaceData {
 }
 
 impl SurfaceData {
-    fn xdg(&self) -> Option<&XdgSurfaceData> {
+    fn xdg(&self) -> &XdgSurfaceData {
         match self
             .role
             .as_ref()
             .expect("Tried to get XdgSurface for surface without role")
         {
-            SurfaceRole::Toplevel(ref t) => t.as_ref().map(|t| &t.xdg),
-            SurfaceRole::Popup(ref p) => p.as_ref().map(|p| &p.xdg),
+            SurfaceRole::Toplevel(t) => &t.xdg,
+            SurfaceRole::Popup(p) => &p.xdg,
         }
     }
 
-    fn xdg_mut(&mut self) -> Option<&mut XdgSurfaceData> {
+    fn xdg_mut(&mut self) -> &mut XdgSurfaceData {
         match self
             .role
             .as_mut()
             .expect("Tried to get XdgSurface for surface without role")
         {
-            SurfaceRole::Toplevel(ref mut t) => t.as_mut().map(|t| &mut t.xdg),
-            SurfaceRole::Popup(ref mut p) => p.as_mut().map(|p| &mut p.xdg),
+            SurfaceRole::Toplevel(t) => &mut t.xdg,
+            SurfaceRole::Popup(p) => &mut p.xdg,
         }
     }
 
     fn destroy_role(&mut self) {
         if let Some(role) = self.role.take() {
             match role {
-                SurfaceRole::Toplevel(Some(mut t)) => {
+                SurfaceRole::Toplevel(mut t) => {
                     if let Some(decoration) = t.decoration.take() {
                         decoration.destroy();
                     }
                     t.toplevel.destroy();
                     t.xdg.surface.destroy();
                 }
-                SurfaceRole::Popup(Some(p)) => {
+                SurfaceRole::Popup(p) => {
                     p.positioner.destroy();
                     p.popup.destroy();
                     p.xdg.surface.destroy();
                 }
-                _ => {}
             }
         }
     }
@@ -236,8 +235,8 @@ impl SurfaceData {
 
 #[derive(Debug)]
 enum SurfaceRole {
-    Toplevel(Option<ToplevelData>),
-    Popup(Option<PopupData>),
+    Toplevel(ToplevelData),
+    Popup(PopupData),
 }
 
 #[derive(Debug)]
@@ -260,6 +259,8 @@ struct PopupData {
     popup: XdgPopup,
     positioner: XdgPositioner,
     xdg: XdgSurfaceData,
+    parent: ObjectKey,
+    children: HashSet<ObjectKey>,
 }
 
 pub(crate) trait HandleEvent {
@@ -532,7 +533,9 @@ impl<C: XConnection> ServerState<C> {
             .expect("Could not bind xdg_wm_base");
 
         if xdg_wm_base.version() < 3 {
-            warn!("xdg_wm_base version 2 detected. Popup repositioning will not work, and some popups may not work correctly.");
+            warn!(
+                "xdg_wm_base version 2 detected. Popup repositioning will not work, and some popups may not work correctly."
+            );
         }
 
         let manager = DataDeviceManagerState::bind(&clientside.global_list, &qh)
@@ -656,7 +659,9 @@ impl<C: XConnection> ServerState<C> {
         let new_title = match &mut win.attrs.title {
             Some(w) => {
                 if matches!(w, WmName::NetWmName(_)) && matches!(name, WmName::WmName(_)) {
-                    debug!("skipping setting window name to {name:?} because a _NET_WM_NAME title is already set");
+                    debug!(
+                        "skipping setting window name to {name:?} because a _NET_WM_NAME title is already set"
+                    );
                     None
                 } else {
                     debug!("setting {window:?} title to {name:?}");
@@ -673,7 +678,7 @@ impl<C: XConnection> ServerState<C> {
         if let Some(key) = win.surface_key {
             if let Some(object) = self.objects.get(key) {
                 let surface: &SurfaceData = object.as_ref();
-                if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
+                if let Some(SurfaceRole::Toplevel(data)) = &surface.role {
                     data.toplevel.set_title(title.name().to_string());
                 }
             } else {
@@ -692,7 +697,7 @@ impl<C: XConnection> ServerState<C> {
         if let Some(key) = win.surface_key {
             if let Some(object) = self.objects.get(key) {
                 let surface: &SurfaceData = object.as_ref();
-                if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
+                if let Some(SurfaceRole::Toplevel(data)) = &surface.role {
                     data.toplevel.set_app_id(class.to_string());
                 }
             } else {
@@ -720,7 +725,7 @@ impl<C: XConnection> ServerState<C> {
             if let Some(key) = win.surface_key {
                 if let Some(object) = self.objects.get(key) {
                     let surface: &SurfaceData = object.as_ref();
-                    if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
+                    if let Some(SurfaceRole::Toplevel(data)) = &surface.role {
                         if let Some(min_size) = &hints.min_size {
                             data.toplevel.set_min_size(min_size.width, min_size.height);
                         }
@@ -751,7 +756,7 @@ impl<C: XConnection> ServerState<C> {
             if let Some(key) = win.surface_key {
                 if let Some(object) = self.objects.get(key) {
                     let surface: &SurfaceData = object.as_ref();
-                    if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
+                    if let Some(SurfaceRole::Toplevel(data)) = &surface.role {
                         data.decoration
                             .as_ref()
                             .unwrap()
@@ -815,7 +820,7 @@ impl<C: XConnection> ServerState<C> {
         };
 
         match &data.role {
-            Some(SurfaceRole::Popup(Some(popup))) => {
+            Some(SurfaceRole::Popup(popup)) => {
                 popup.positioner.set_offset(
                     event.x() as i32 - win.output_offset.x,
                     event.y() as i32 - win.output_offset.y,
@@ -880,7 +885,7 @@ impl<C: XConnection> ServerState<C> {
             return;
         };
         let surface: &mut SurfaceData = object.as_mut();
-        let Some(SurfaceRole::Toplevel(Some(ref toplevel))) = surface.role else {
+        let Some(SurfaceRole::Toplevel(ref toplevel)) = surface.role else {
             warn!("Tried to set an unmapped toplevel or non toplevel fullscreen: {window:?}");
             return;
         };
@@ -1176,10 +1181,13 @@ impl<C: XConnection> ServerState<C> {
             );
 
             let parent_window = self.windows.get(&parent).unwrap();
-            let parent_surface: &SurfaceData =
-                self.objects[parent_window.surface_key.unwrap()].as_ref();
-            let parent_dims = parent_window.attrs.dims;
+            let parent_surface_key = parent_window.surface_key.unwrap();
+            let parent_surface: &mut SurfaceData = self.objects[parent_surface_key].as_mut();
+            if let Some(SurfaceRole::Popup(popup)) = parent_surface.role.as_mut() {
+                popup.children.insert(surface_key);
+            }
 
+            let parent_dims = parent_window.attrs.dims;
             let x = window.attrs.dims.x - parent_dims.x;
             let y = window.attrs.dims.y - parent_dims.y;
 
@@ -1195,7 +1203,7 @@ impl<C: XConnection> ServerState<C> {
                 parent_window.attrs.dims.height as _,
             );
             let popup = xdg_surface.get_popup(
-                Some(&parent_surface.xdg().unwrap().surface),
+                Some(&parent_surface.xdg().surface),
                 &positioner,
                 &self.qh,
                 surface_key,
@@ -1208,11 +1216,13 @@ impl<C: XConnection> ServerState<C> {
                     configured: false,
                     pending: None,
                 },
+                parent: parent_surface_key,
+                children: HashSet::new(),
             };
-            SurfaceRole::Popup(Some(popup))
+            SurfaceRole::Popup(popup)
         } else {
             let data = self.create_toplevel(window, surface_key, xdg_surface, fullscreen);
-            SurfaceRole::Toplevel(Some(data))
+            SurfaceRole::Toplevel(data)
         };
 
         let surface: &mut SurfaceData = self.objects[surface_key].as_mut();

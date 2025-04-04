@@ -2,14 +2,14 @@ mod selection;
 use selection::{Selection, SelectionData};
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
 
-use crate::{server::WindowAttributes, XConnection};
+use crate::{XConnection, server::WindowAttributes};
 use bitflags::bitflags;
 use log::{debug, trace, warn};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::rc::Rc;
-use xcb::{x, Xid, XidNew};
+use xcb::{Xid, XidNew, x};
 use xcb_util_cursor::{Cursor, CursorContext};
 
 // Sometimes we'll get events on windows that have already been destroyed
@@ -336,9 +336,10 @@ impl XState {
                 }
                 xcb::Event::X(x::Event::MapRequest(e)) => {
                     debug!("requested to map {:?}", e.window());
-                    unwrap_or_skip_bad_window_cont!(self
-                        .connection
-                        .send_and_check_request(&x::MapWindow { window: e.window() }));
+                    unwrap_or_skip_bad_window_cont!(
+                        self.connection
+                            .send_and_check_request(&x::MapWindow { window: e.window() })
+                    );
                 }
                 xcb::Event::X(x::Event::MapNotify(e)) => {
                     unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
@@ -1174,9 +1175,10 @@ impl XConnection for RealConnection {
     }
 
     fn unmap_window(&mut self, window: x::Window) {
-        unwrap_or_skip_bad_window!(self
-            .connection
-            .send_and_check_request(&x::UnmapWindow { window }));
+        unwrap_or_skip_bad_window!(
+            self.connection
+                .send_and_check_request(&x::UnmapWindow { window })
+        );
     }
 
     fn raise_to_top(&mut self, window: x::Window) {

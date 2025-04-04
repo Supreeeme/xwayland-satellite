@@ -1,12 +1,12 @@
-use rustix::event::{poll, PollFd, PollFlags};
+use rustix::event::{PollFd, PollFlags, poll};
 use rustix::process::{Pid, Signal, WaitOptions};
 use std::io::Write;
 use std::mem::ManuallyDrop;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex, Once,
+    atomic::{AtomicBool, Ordering},
 };
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -14,7 +14,7 @@ use wayland_protocols::xdg::{
     decoration::zv1::server::zxdg_toplevel_decoration_v1, shell::server::xdg_toplevel,
 };
 use wayland_server::Resource;
-use xcb::{x, Xid};
+use xcb::{Xid, x};
 use xwayland_satellite as xwls;
 use xwayland_satellite::xstate::{WmSizeHintsFlags, WmState};
 
@@ -1575,4 +1575,20 @@ fn xdg_decorations() {
             .and_then(|(_, decoration)| *decoration),
         Some(zxdg_toplevel_decoration_v1::Mode::ServerSide)
     );
+}
+
+#[test]
+fn filo_popup_destruction_order() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut connection, window);
+    let popup = connection.new_window(window, 0, 0, 20, 20, false);
+    f.map_as_popup(&mut connection, popup, 0, 0, 20, 20);
+    let nested_popup = connection.new_window(popup, 0, 0, 20, 20, false);
+    f.map_as_popup(&mut connection, nested_popup, 0, 0, 20, 20);
+
+    connection.destroy_window(popup);
+    f.wait_and_dispatch();
 }

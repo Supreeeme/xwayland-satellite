@@ -4,7 +4,7 @@ use log::{debug, trace, warn};
 use macros::simple_event_shunt;
 use std::collections::HashSet;
 use std::os::fd::AsFd;
-use wayland_client::{protocol as client, Proxy};
+use wayland_client::{Proxy, protocol as client};
 use wayland_protocols::{
     wp::{
         pointer_constraints::zv1::{
@@ -168,7 +168,7 @@ impl SurfaceData {
             unreachable!();
         };
 
-        let xdg = self.xdg_mut().unwrap();
+        let xdg = self.xdg_mut();
         xdg.surface.ack_configure(serial);
         xdg.configured = true;
 
@@ -226,7 +226,7 @@ impl SurfaceData {
                 states,
             } => {
                 debug!("configuring toplevel {width}x{height}, {states:?}");
-                if let Some(SurfaceRole::Toplevel(Some(toplevel))) = &mut self.role {
+                if let Some(SurfaceRole::Toplevel(toplevel)) = &mut self.role {
                     let prev_fs = toplevel.fullscreen;
                     toplevel.fullscreen =
                         states.contains(&(u32::from(xdg_toplevel::State::Fullscreen) as u8));
@@ -240,7 +240,7 @@ impl SurfaceData {
                     }
                 };
 
-                self.xdg_mut().unwrap().pending = Some(PendingSurfaceState {
+                self.xdg_mut().pending = Some(PendingSurfaceState {
                     width,
                     height,
                     ..Default::default()
@@ -263,7 +263,7 @@ impl SurfaceData {
                 height,
             } => {
                 trace!("popup configure: {x}x{y}, {width}x{height}");
-                self.xdg_mut().unwrap().pending = Some(PendingSurfaceState {
+                self.xdg_mut().pending = Some(PendingSurfaceState {
                     x,
                     y,
                     width,

@@ -1,4 +1,4 @@
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map};
 use std::io::Read;
 use std::io::Write;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -45,9 +45,10 @@ use wayland_protocols::{
     },
 };
 use wayland_server::{
+    Client, Dispatch, Display, DisplayHandle, GlobalDispatch, Resource, WEnum,
     backend::{
-        protocol::{Interface, ProtocolError},
         GlobalHandler, ObjectData,
+        protocol::{Interface, ProtocolError},
     },
     protocol::{
         self as proto,
@@ -66,7 +67,6 @@ use wayland_server::{
         wl_shm_pool::WlShmPool,
         wl_surface::WlSurface,
     },
-    Client, Dispatch, Display, DisplayHandle, GlobalDispatch, Resource, WEnum,
 };
 use wl_drm::server::wl_drm::WlDrm;
 
@@ -90,21 +90,21 @@ pub struct SurfaceData {
 impl SurfaceData {
     pub fn xdg(&self) -> &XdgSurfaceData {
         match self.role.as_ref().expect("Surface missing role") {
-            SurfaceRole::Toplevel(ref t) => &t.xdg,
-            SurfaceRole::Popup(ref p) => &p.xdg,
+            SurfaceRole::Toplevel(t) => &t.xdg,
+            SurfaceRole::Popup(p) => &p.xdg,
             SurfaceRole::Cursor => panic!("cursor surface doesn't have an XdgSurface"),
         }
     }
 
     pub fn toplevel(&self) -> &Toplevel {
         match self.role.as_ref().expect("Surface missing role") {
-            SurfaceRole::Toplevel(ref t) => t,
+            SurfaceRole::Toplevel(t) => t,
             other => panic!("Surface role was not toplevel: {other:?}"),
         }
     }
     pub fn popup(&self) -> &Popup {
         match self.role.as_ref().expect("Surface missing role") {
-            SurfaceRole::Popup(ref p) => p,
+            SurfaceRole::Popup(p) => p,
             other => panic!("Surface role was not popup: {other:?}"),
         }
     }
@@ -139,6 +139,7 @@ pub struct Popup {
     pub parent: XdgSurface,
     pub popup: XdgPopup,
     pub positioner_state: PositionerState,
+    pub children: usize,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
@@ -1104,14 +1105,37 @@ impl Dispatch<XdgPopup, SurfaceId> for State {
     fn request(
         state: &mut Self,
         _: &Client,
-        _: &XdgPopup,
+        resource: &XdgPopup,
         request: <XdgPopup as Resource>::Request,
         surface_id: &SurfaceId,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
         match request {
-            xdg_popup::Request::Destroy => {}
+            xdg_popup::Request::Destroy => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                let Some(SurfaceRole::Popup(p)) = data.role.take() else {
+                    unreachable!();
+                };
+
+                if p.children > 0 {
+                    resource.post_error(
+                        xdg_wm_base::Error::NotTheTopmostPopup,
+                        "Destroyed non topmost popup",
+                    );
+                    return;
+                }
+
+                if let Some(SurfaceRole::Popup(popup)) = state
+                    .surfaces
+                    .get_mut(p.parent.data::<SurfaceId>().unwrap())
+                    .unwrap()
+                    .role
+                    .as_mut()
+                {
+                    popup.children -= 1;
+                }
+            }
             xdg_popup::Request::Reposition { positioner, token } => {
                 let data = state.surfaces.get_mut(surface_id).unwrap();
                 let Some(SurfaceRole::Popup(p)) = &mut data.role else {
@@ -1240,13 +1264,24 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                 positioner,
             } => {
                 let popup = data_init.init(id, *surface_id);
+                let parent = parent.unwrap();
+                if let Some(SurfaceRole::Popup(popup)) = state
+                    .surfaces
+                    .get_mut(parent.data::<SurfaceId>().unwrap())
+                    .unwrap()
+                    .role
+                    .as_mut()
+                {
+                    popup.children += 1;
+                }
                 let p = Popup {
                     xdg: XdgSurfaceData::new(resource.clone()),
                     popup,
-                    parent: parent.unwrap(),
+                    parent,
                     positioner_state: state.positioners
                         [&PositionerId(positioner.id().protocol_id())]
                         .clone(),
+                    children: 0,
                 };
                 let data = state.surfaces.get_mut(surface_id).unwrap();
                 data.role = Some(SurfaceRole::Popup(p));

@@ -5,7 +5,7 @@ pub mod xstate;
 use crate::server::{PendingSurfaceState, ServerState};
 use crate::xstate::{RealConnection, XState};
 use log::{error, info};
-use rustix::event::{poll, PollFd, PollFlags};
+use rustix::event::{PollFd, PollFlags, poll};
 use smithay_client_toolkit::data_device_manager::WritePipe;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
