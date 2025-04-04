@@ -163,17 +163,55 @@ impl<C: XConnection> Dispatch<WlSurface, ObjectKey> for ServerState<C> {
                 }
             }
             Request::<WlSurface>::Destroy => {
-                let mut object = state.objects.remove(*key).unwrap();
-                let surface: &mut SurfaceData = object.as_mut();
-                if let Some(window_data) = surface.window.and_then(|w| state.windows.get_mut(&w)) {
-                    window_data.surface_key.take();
+                let surface: &mut SurfaceData = state.objects.get_mut(*key).unwrap().as_mut();
+                if !matches!(surface.role, Some(SurfaceRole::Popup(_))) {
+                    if let Some(window_data) =
+                        surface.window.and_then(|w| state.windows.get_mut(&w))
+                    {
+                        window_data.surface_key.take();
+                    }
+                    surface.destroy_role();
+                    surface.client.destroy();
+                    debug!(
+                        "deleting key: {key:?} (surface {:?})",
+                        surface.server.id().protocol_id()
+                    );
+                    state.objects.remove(*key);
+                    return;
                 }
-                surface.destroy_role();
-                surface.client.destroy();
-                debug!(
-                    "deleting key: {key:?} (surface {:?})",
-                    surface.server.id().protocol_id()
-                );
+
+                let mut key = *key;
+                loop {
+                    let surface: &mut SurfaceData = state.objects.get_mut(key).unwrap().as_mut();
+                    let parent_key = if let Some(SurfaceRole::Popup(popup)) = surface.role.as_ref()
+                    {
+                        if !popup.children.is_empty() {
+                            return;
+                        }
+                        popup.parent
+                    } else {
+                        return;
+                    };
+                    if let Some(window_data) =
+                        surface.window.and_then(|w| state.windows.get_mut(&w))
+                    {
+                        window_data.surface_key.take();
+                    }
+                    surface.destroy_role();
+                    surface.client.destroy();
+                    debug!(
+                        "deleting key: {key:?} (surface {:?})",
+                        surface.server.id().protocol_id()
+                    );
+                    state.objects.remove(key);
+
+                    let parent: &mut SurfaceData =
+                        state.objects.get_mut(parent_key).unwrap().as_mut();
+                    if let Some(SurfaceRole::Popup(popup)) = parent.role.as_mut() {
+                        popup.children.remove(&key);
+                    };
+                    key = parent_key;
+                }
             }
             Request::<WlSurface>::SetBufferScale { scale } => {
                 surface.client.set_buffer_scale(scale);

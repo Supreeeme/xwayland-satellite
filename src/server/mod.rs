@@ -259,6 +259,8 @@ struct PopupData {
     popup: XdgPopup,
     positioner: XdgPositioner,
     xdg: XdgSurfaceData,
+    parent: ObjectKey,
+    children: HashSet<ObjectKey>,
 }
 
 pub(crate) trait HandleEvent {
@@ -1179,10 +1181,13 @@ impl<C: XConnection> ServerState<C> {
             );
 
             let parent_window = self.windows.get(&parent).unwrap();
-            let parent_surface: &SurfaceData =
-                self.objects[parent_window.surface_key.unwrap()].as_ref();
-            let parent_dims = parent_window.attrs.dims;
+            let parent_surface_key = parent_window.surface_key.unwrap();
+            let parent_surface: &mut SurfaceData = self.objects[parent_surface_key].as_mut();
+            if let Some(SurfaceRole::Popup(popup)) = parent_surface.role.as_mut() {
+                popup.children.insert(surface_key);
+            }
 
+            let parent_dims = parent_window.attrs.dims;
             let x = window.attrs.dims.x - parent_dims.x;
             let y = window.attrs.dims.y - parent_dims.y;
 
@@ -1211,6 +1216,8 @@ impl<C: XConnection> ServerState<C> {
                     configured: false,
                     pending: None,
                 },
+                parent: parent_surface_key,
+                children: HashSet::new(),
             };
             SurfaceRole::Popup(popup)
         } else {
