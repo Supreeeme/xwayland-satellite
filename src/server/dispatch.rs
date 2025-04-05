@@ -366,7 +366,11 @@ impl<C: XConnection> Dispatch<WlPointer, ObjectKey> for ServerState<C> {
                 surface,
             } => {
                 let c_surface = surface.and_then(|s| state.get_client_surface_from_server(s));
-                c_pointer.set_cursor(serial, c_surface, hotspot_x, hotspot_y);
+                if state.cursor_shape_device.is_none() {
+                    c_pointer.set_cursor(serial, c_surface, hotspot_x, hotspot_y);
+                }
+                state.client_cursor =
+                    c_surface.map(|surface| (surface.clone(), hotspot_x, hotspot_y));
             }
             Request::<WlPointer>::Release => {
                 c_pointer.release();
@@ -436,6 +440,11 @@ impl<C: XConnection> Dispatch<WlSeat, ObjectKey> for ServerState<C> {
                     .insert_from_other_objects([*key], |[seat_obj], key| {
                         let Seat { client, .. }: &Seat = seat_obj.try_into().unwrap();
                         let client = client.get_pointer(&state.qh, key);
+                        if let Some(cursor_shape_manager) = state.cursor_shape_manager.as_ref() {
+                            state.cursor_shape_device =
+                                Some(cursor_shape_manager.get_shape_device(&client, &state.qh));
+                        }
+                        state.clientside.globals.pointer = Some(client.clone());
                         let server = data_init.init(id, key);
                         trace!("new pointer: {server:?}");
                         Pointer::new(server, client).into()

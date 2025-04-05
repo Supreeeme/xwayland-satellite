@@ -10,7 +10,6 @@ use std::ffi::CString;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::rc::Rc;
 use xcb::{x, Xid, XidNew};
-use xcb_util_cursor::{Cursor, CursorContext};
 
 // Sometimes we'll get events on windows that have already been destroyed
 #[derive(Debug)]
@@ -165,7 +164,7 @@ impl XState {
         // negotiate xfixes version
         let reply = connection
             .wait_for_reply(connection.send_request(&xcb::xfixes::QueryVersion {
-                client_major_version: 1,
+                client_major_version: 6,
                 client_minor_version: 0,
             }))
             .unwrap();
@@ -174,7 +173,7 @@ impl XState {
             reply.major_version(),
             reply.minor_version()
         );
-        use xcb::xfixes::SelectionEventMask;
+        use xcb::xfixes::{CursorNotifyMask, SelectionEventMask};
         connection
             .send_and_check_request(&xcb::xfixes::SelectSelectionInput {
                 window: root,
@@ -184,10 +183,18 @@ impl XState {
                     | SelectionEventMask::SELECTION_CLIENT_CLOSE,
             })
             .unwrap();
+        connection
+            .send_and_check_request(&xcb::xfixes::SelectCursorInput {
+                window: root,
+                event_mask: CursorNotifyMask::DISPLAY_CURSOR,
+            })
+            .unwrap();
+
+        #[cfg(feature = "client-cursors")]
         {
             // Setup default cursor theme
-            let ctx = CursorContext::new(&connection, screen).unwrap();
-            let left_ptr = ctx.load_cursor(Cursor::LeftPtr);
+            let ctx = xcb_util_cursor::CursorContext::new(&connection, screen).unwrap();
+            let left_ptr = ctx.load_cursor(xcb_util_cursor::Cursor::LeftPtr);
             connection
                 .send_and_check_request(&x::ChangeWindowAttributes {
                     window: root,
@@ -466,6 +473,21 @@ impl XState {
                     t => warn!("unrecognized message: {t:?}"),
                 },
                 xcb::Event::X(x::Event::MappingNotify(_)) => {}
+                xcb::Event::XFixes(xcb::xfixes::Event::CursorNotify(e)) => {
+                    let cursor = unwrap_or_skip_bad_window_cont!(self.connection.wait_for_reply(
+                        self.connection
+                            .send_request(&xcb::xfixes::GetCursorImageAndName {})
+                    ));
+                    server_state.set_cursor(if e.cursor_serial() == 1 {
+                        crate::server::Cursor::Default
+                    } else if cursor.cursor_atom().resource_id() == x::CURSOR_NONE.resource_id() {
+                        crate::server::Cursor::Hidden
+                    } else if let Ok(cursor) = cursor.name().try_as_ascii() {
+                        crate::server::Cursor::Named(cursor)
+                    } else {
+                        crate::server::Cursor::Unset
+                    });
+                }
                 xcb::Event::RandR(xcb::randr::Event::Notify(e))
                     if matches!(e.u(), xcb::randr::NotifyData::Rc(_)) =>
                 {

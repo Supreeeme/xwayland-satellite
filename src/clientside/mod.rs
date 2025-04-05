@@ -1,3 +1,4 @@
+mod cursor_shape;
 mod data_device;
 pub mod xdg_activation;
 
@@ -67,6 +68,7 @@ pub struct Globals {
     events: Vec<(ObjectKey, ObjectEvent)>,
     queued_events: Vec<mpsc::Receiver<(ObjectKey, ObjectEvent)>>,
     pub new_globals: Vec<Global>,
+    pub pointer: Option<wayland_client::protocol::wl_pointer::WlPointer>,
     pub selection: Option<wayland_client::protocol::wl_data_device::WlDataDevice>,
     pub selection_requests: Vec<(
         String,
