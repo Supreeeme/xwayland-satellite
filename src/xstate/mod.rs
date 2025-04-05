@@ -10,7 +10,6 @@ use std::ffi::CString;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::rc::Rc;
 use xcb::{x, Xid, XidNew};
-use xcb_util_cursor::{Cursor, CursorContext};
 
 // Sometimes we'll get events on windows that have already been destroyed
 #[derive(Debug)]
@@ -190,10 +189,12 @@ impl XState {
                 event_mask: CursorNotifyMask::DISPLAY_CURSOR,
             })
             .unwrap();
+
+        #[cfg(feature = "client-cursors")]
         {
             // Setup default cursor theme
-            let ctx = CursorContext::new(&connection, screen).unwrap();
-            let left_ptr = ctx.load_cursor(Cursor::LeftPtr);
+            let ctx = xcb_util_cursor::CursorContext::new(&connection, screen).unwrap();
+            let left_ptr = ctx.load_cursor(xcb_util_cursor::Cursor::LeftPtr);
             connection
                 .send_and_check_request(&x::ChangeWindowAttributes {
                     window: root,
@@ -477,9 +478,15 @@ impl XState {
                         self.connection
                             .send_request(&xcb::xfixes::GetCursorImageAndName {})
                     ));
-                    if let Ok(cursor) = cursor.name().try_as_ascii() {
-                        server_state.set_cursor(cursor);
-                    }
+                    server_state.set_cursor(if e.cursor_serial() == 1 {
+                        crate::server::Cursor::Default
+                    } else if cursor.cursor_atom().resource_id() == x::CURSOR_NONE.resource_id() {
+                        crate::server::Cursor::Hidden
+                    } else if let Ok(cursor) = cursor.name().try_as_ascii() {
+                        crate::server::Cursor::Named(cursor)
+                    } else {
+                        crate::server::Cursor::Unset
+                    });
                 }
                 xcb::Event::RandR(xcb::randr::Event::Notify(e))
                     if matches!(e.u(), xcb::randr::NotifyData::Rc(_)) =>

@@ -35,15 +35,16 @@ log = "0.4.21"
 env_logger = "0.11.3"
 pretty_env_logger = "0.5.0"
 slotmap = "1.0.7"
-xcb-util-cursor = "0.3.2"
 smithay-client-toolkit = { version = "0.19.1", default-features = false }
 
 sd-notify = { version = "0.4.2", optional = true }
+xcb-util-cursor = { version = "0.3.2", optional = true }
 macros = { version = "0.1.0", path = "macros" }
 
 [features]
-default = []
+default = ["client-cursors"]
 systemd = ["dep:sd-notify"]
+client-cursors = ["dep:xcb-util-cursor"]
 
 [dev-dependencies]
 rustix = { workspace = true, features = ["fs"] }

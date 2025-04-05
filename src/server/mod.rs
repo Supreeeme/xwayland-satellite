@@ -959,7 +959,7 @@ impl<C: XConnection> ServerState<C> {
         let _ = self.windows.remove(&window);
     }
 
-    pub fn set_cursor(&mut self, cursor: &str) {
+    pub fn set_cursor(&mut self, cursor: Cursor) {
         if self.cursor_shape_manager.is_none() {
             return;
         };
@@ -971,13 +971,8 @@ impl<C: XConnection> ServerState<C> {
             warn!("No last pointer enter serial, skipping setting cursor shape");
             return;
         };
-        if let Some(shape) = cursor_name_to_shape(cursor) {
-            self.cursor_shape = Some(shape);
-            cursor_shape_device.set_shape(last_pointer_enter_serial, shape);
-        } else {
-            if !cursor.is_empty() {
-                warn!("Unknown cursor: {cursor}");
-            }
+
+        let mut unset_cursor = || {
             self.cursor_shape = None;
             if let Some((surface, hotspot_x, hotspot_y)) = self.client_cursor.take() {
                 let Some(pointer) = self.clientside.globals.pointer.as_ref() else {
@@ -993,6 +988,31 @@ impl<C: XConnection> ServerState<C> {
             } else {
                 cursor_shape_device.set_shape(last_pointer_enter_serial, Shape::Default);
             }
+        };
+        match cursor {
+            Cursor::Named(name) => {
+                if let Some(shape) = cursor_name_to_shape(name) {
+                    self.cursor_shape = Some(shape);
+                    cursor_shape_device.set_shape(last_pointer_enter_serial, shape);
+                } else {
+                    if !name.is_empty() {
+                        warn!("Unknown cursor: {name}");
+                    }
+                    unset_cursor();
+                }
+            }
+            Cursor::Default => {
+                self.cursor_shape = Some(Shape::Default);
+                cursor_shape_device.set_shape(last_pointer_enter_serial, Shape::Default);
+            }
+            Cursor::Hidden => {
+                let Some(pointer) = self.clientside.globals.pointer.as_ref() else {
+                    warn!("No pointer found, cannot hide cursor");
+                    return;
+                };
+                pointer.set_cursor(last_pointer_enter_serial, None, 0, 0);
+            }
+            Cursor::Unset => unset_cursor(),
         }
     }
 
@@ -1397,6 +1417,13 @@ pub struct PendingSurfaceState {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+}
+
+pub enum Cursor<'a> {
+    Named(&'a str),
+    Default,
+    Hidden,
+    Unset,
 }
 
 struct ClipboardData<X: X11Selection> {
