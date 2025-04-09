@@ -842,13 +842,13 @@ bitflags! {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WinSize {
     pub width: i32,
     pub height: i32,
 }
 
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq)]
 pub struct WmNormalHints {
     pub min_size: Option<WinSize>,
     pub max_size: Option<WinSize>,

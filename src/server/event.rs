@@ -108,6 +108,34 @@ impl SurfaceData {
         output_name
     }
 
+    fn update_viewport(&self, dims: WindowDims, size_hints: Option<WmNormalHints>) {
+        let width = dims.width as i32 / self.scale_factor;
+        let height = dims.height as i32 / self.scale_factor;
+        self.viewport.set_destination(width, height);
+        debug!("{} viewport: {width}x{height}", self.server.id());
+        if let Some(hints) = size_hints {
+            let Some(SurfaceRole::Toplevel(Some(data))) = &self.role else {
+                warn!(
+                    "Trying to update size hints on {}, but toplevel role data is missing",
+                    self.server.id()
+                );
+                return;
+            };
+            if let Some(min) = hints.min_size {
+                data.toplevel.set_min_size(
+                    min.width / self.scale_factor,
+                    min.height / self.scale_factor,
+                );
+            }
+            if let Some(max) = hints.max_size {
+                data.toplevel.set_max_size(
+                    max.width / self.scale_factor,
+                    max.height / self.scale_factor,
+                );
+            }
+        }
+    }
+
     fn surface_event<C: XConnection>(
         &mut self,
         event: client::wl_surface::Event,
@@ -122,12 +150,14 @@ impl SurfaceData {
                     return;
                 };
                 let output: &mut Output = object.as_mut();
-
                 self.server.enter(&output.server);
+                self.scale_factor = output.scale;
                 self.output_key = Some(key);
                 debug!("{} entered {}", self.server.id(), output.server.id());
+
                 let windows = &mut state.windows;
                 if let Some(win_data) = self.window.as_ref().and_then(|win| windows.get_mut(win)) {
+                    self.update_viewport(win_data.attrs.dims, win_data.attrs.size_hints);
                     win_data.update_output_offset(
                         key,
                         WindowOutputOffset {
@@ -157,7 +187,7 @@ impl SurfaceData {
                     self.output_key = None;
                 }
             }
-            Event::PreferredBufferScale { factor } => self.server.preferred_buffer_scale(factor),
+            Event::PreferredBufferScale { .. } => {}
             other => warn!("unhandled surface request: {other:?}"),
         }
     }
@@ -175,19 +205,23 @@ impl SurfaceData {
         if let Some(pending) = xdg.pending.take() {
             let window = state.associated_windows[self.key];
             let window = state.windows.get_mut(&window).unwrap();
-            let x = pending.x + window.output_offset.x;
-            let y = pending.y + window.output_offset.y;
+            let x = pending.x * self.scale_factor + window.output_offset.x;
+            let y = pending.y * self.scale_factor + window.output_offset.y;
             let width = if pending.width > 0 {
-                pending.width as u16
+                (pending.width * self.scale_factor) as u16
             } else {
                 window.attrs.dims.width
             };
             let height = if pending.height > 0 {
-                pending.height as u16
+                (pending.height * self.scale_factor) as u16
             } else {
                 window.attrs.dims.height
             };
-            debug!("configuring {:?}: {x}x{y}, {width}x{height}", window.window);
+            debug!(
+                "configuring {} ({:?}): {x}x{y}, {width}x{height}",
+                self.server.id(),
+                window.window
+            );
             connection.set_window_dims(
                 window.window,
                 PendingSurfaceState {
@@ -203,6 +237,7 @@ impl SurfaceData {
                 width,
                 height,
             };
+            self.update_viewport(window.attrs.dims, window.attrs.size_hints);
         }
 
         if let Some(SurfaceAttach { buffer, x, y }) = self.attach.take() {
@@ -225,7 +260,10 @@ impl SurfaceData {
                 height,
                 states,
             } => {
-                debug!("configuring toplevel {width}x{height}, {states:?}");
+                debug!(
+                    "configuring toplevel {} {width}x{height}, {states:?}",
+                    self.server.id()
+                );
                 if let Some(SurfaceRole::Toplevel(Some(toplevel))) = &mut self.role {
                     let prev_fs = toplevel.fullscreen;
                     toplevel.fullscreen =
@@ -250,6 +288,9 @@ impl SurfaceData {
                 let window = state.associated_windows[self.key];
                 state.close_x_window(window);
             }
+            // TODO: support capabilities (minimize, maximize, etc)
+            xdg_toplevel::Event::WmCapabilities { .. } => {}
+            xdg_toplevel::Event::ConfigureBounds { .. } => {}
             ref other => warn!("unhandled xdgtoplevel event: {other:?}"),
         }
     }
@@ -262,7 +303,10 @@ impl SurfaceData {
                 width,
                 height,
             } => {
-                trace!("popup configure: {x}x{y}, {width}x{height}");
+                trace!(
+                    "popup configure {}: {x}x{y}, {width}x{height}",
+                    self.server.id()
+                );
                 self.xdg_mut().unwrap().pending = Some(PendingSurfaceState {
                     x,
                     y,
@@ -350,6 +394,7 @@ pub struct Pointer {
     server: WlPointer,
     pub client: client::wl_pointer::WlPointer,
     pending_enter: PendingEnter,
+    scale: i32,
 }
 
 impl Pointer {
@@ -358,6 +403,7 @@ impl Pointer {
             server,
             client,
             pending_enter: PendingEnter(None),
+            scale: 1,
         }
     }
 }
@@ -393,10 +439,15 @@ impl HandleEvent for Pointer {
                     break 'enter;
                 };
 
+                self.scale = surface_data.scale_factor;
                 let mut do_enter = || {
-                    debug!("entering surface ({serial})");
-                    self.server
-                        .enter(serial, &surface_data.server, surface_x, surface_y);
+                    debug!("pointer entering {} ({serial})", surface_data.server.id());
+                    self.server.enter(
+                        serial,
+                        &surface_data.server,
+                        surface_x * self.scale as f64,
+                        surface_y * self.scale as f64,
+                    );
                     let window = surface_data.window.unwrap();
                     state.connection.as_mut().unwrap().raise_to_top(window);
                     state.last_hovered = Some(window);
@@ -473,7 +524,11 @@ impl HandleEvent for Pointer {
                         warn!("could not move pointer to surface ({serial}): stale surface");
                     }
                 } else {
-                    self.server.motion(time, surface_x, surface_y);
+                    self.server.motion(
+                        time,
+                        surface_x * self.scale as f64,
+                        surface_y * self.scale as f64,
+                    );
                 }
             }
             _ => simple_event_shunt! {
@@ -715,6 +770,7 @@ pub struct Output {
     windows: HashSet<x::Window>,
     pub(super) dimensions: OutputDimensions,
     name: String,
+    scale: i32,
 }
 
 impl Output {
@@ -739,6 +795,7 @@ impl Output {
                 height: 0,
             },
             name: "<unknown>".to_string(),
+            scale: 1,
         }
     }
 }
@@ -873,72 +930,90 @@ impl Output {
         event: client::wl_output::Event,
         state: &mut ServerState<C>,
     ) {
-        if let client::wl_output::Event::Geometry {
-            x,
-            y,
-            physical_width,
-            physical_height,
-            subpixel,
-            make,
-            model,
-            transform,
-        } = &event
-        {
-            self.update_offset(
-                OutputDimensionsSource::Wl {
-                    physical_width: *physical_width,
-                    physical_height: *physical_height,
-                    subpixel: *subpixel,
-                    make: make.clone(),
-                    model: model.clone(),
-                    transform: *transform,
-                },
-                *x,
-                *y,
-                state,
-            );
-        }
-
-        if let client::wl_output::Event::Mode { width, height, .. } = event {
-            if matches!(self.dimensions.source, OutputDimensionsSource::Wl { .. }) {
-                self.dimensions.width = width;
-                self.dimensions.height = height;
-                debug!("{} dimensions: {width}x{height} (wl)", self.server.id());
-            }
-        }
-
-        simple_event_shunt! {
-            self.server, event: client::wl_output::Event => [
-                Name {
-                    |name| {
-                        self.name = name.clone();
-                        name
-                    }
-                },
-                Description { description },
-                Mode {
-                    |flags| convert_wenum(flags),
-                    width,
-                    height,
-                    refresh
-                },
-                Scale { factor },
-                Geometry {
-                    |x| {
-                        x - state.global_output_offset.x.value
+        use client::wl_output::Event;
+        match event {
+            Event::Geometry {
+                x,
+                y,
+                physical_width,
+                physical_height,
+                subpixel,
+                make,
+                model,
+                transform,
+            } => {
+                self.update_offset(
+                    OutputDimensionsSource::Wl {
+                        physical_width,
+                        physical_height,
+                        subpixel,
+                        make: make.clone(),
+                        model: model.clone(),
+                        transform,
                     },
-                    |y| {
-                        y - state.global_output_offset.y.value
-                    },
+                    x,
+                    y,
+                    state,
+                );
+                self.server.geometry(
+                    x - state.global_output_offset.x.value,
+                    y - state.global_output_offset.y.value,
                     physical_width,
                     physical_height,
-                    |subpixel| convert_wenum(subpixel),
+                    convert_wenum(subpixel),
                     make,
                     model,
-                    |transform| convert_wenum(transform)
-                },
-                Done
-            ]
+                    convert_wenum(transform),
+                );
+            }
+            Event::Mode {
+                flags,
+                width,
+                height,
+                refresh,
+            } => {
+                if matches!(self.dimensions.source, OutputDimensionsSource::Wl { .. }) {
+                    self.dimensions.width = width;
+                    self.dimensions.height = height;
+                    debug!("{} dimensions: {width}x{height} (wl)", self.server.id());
+                }
+                self.server
+                    .mode(convert_wenum(flags), width, height, refresh);
+            }
+            Event::Scale { factor } => {
+                debug!("{} scale: {factor}", self.server.id());
+                self.scale = factor;
+                self.windows.retain(|window| {
+                    let Some(data): Option<&WindowData> = state.windows.get(window) else {
+                        return false;
+                    };
+
+                    if let Some::<&mut SurfaceData>(surface) = data
+                        .surface_key
+                        .and_then(|key| state.objects.get_mut(key))
+                        .map(AsMut::as_mut)
+                    {
+                        surface.scale_factor = factor;
+                        surface.update_viewport(data.attrs.dims, data.attrs.size_hints);
+                    }
+
+                    true
+                });
+
+                self.server.scale(factor);
+            }
+            _ => simple_event_shunt! {
+                self.server, event: Event => [
+                    Name {
+                        |name| {
+                            self.name = name.clone();
+                            name
+                        }
+                    },
+                    Description { description },
+                    Done
+                ]
+            },
         }
     }
 
@@ -947,31 +1022,27 @@ impl Output {
         event: zxdg_output_v1::Event,
         state: &mut ServerState<C>,
     ) {
-        if let zxdg_output_v1::Event::LogicalPosition { x, y } = event {
-            self.update_offset(OutputDimensionsSource::Xdg, x, y, state);
-        }
+        use zxdg_output_v1::Event;
+
         let xdg = &self.xdg.as_ref().unwrap().server;
-        if let zxdg_output_v1::Event::LogicalSize { width, height } = event {
-            self.dimensions.source = OutputDimensionsSource::Xdg;
-            self.dimensions.width = width;
-            self.dimensions.height = height;
-            debug!("{} dimensions: {width}x{height} (xdg)", self.server.id());
-        }
-        simple_event_shunt! {
-            xdg, event: zxdg_output_v1::Event => [
-                LogicalPosition {
-                    |x| {
-                        x - state.global_output_offset.x.value
-                    },
-                    |y| {
-                        y - state.global_output_offset.y.value
-                    }
-                },
-                LogicalSize { width, height },
-                Done,
-                Name { name },
-                Description { description }
-            ]
+        match event {
+            Event::LogicalPosition { x, y } => {
+                self.update_offset(OutputDimensionsSource::Xdg, x, y, state);
+                self.xdg.as_ref().unwrap().server.logical_position(
+                    x - state.global_output_offset.x.value,
+                    y - state.global_output_offset.y.value,
+                );
+            }
+            Event::LogicalSize { .. } => {
+                xdg.logical_size(self.dimensions.width, self.dimensions.height);
+            }
+            _ => simple_event_shunt! {
+                xdg, event: zxdg_output_v1::Event => [
+                    Done,
+                    Name { name },
+                    Description { description }
+                ]
+            },
         }
     }
 }

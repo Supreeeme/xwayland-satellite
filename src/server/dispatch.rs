@@ -23,7 +23,6 @@ use wayland_protocols::{
             server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1 as RelativePointerManServer,
         },
         tablet::zv2::{client as c_tablet, server as s_tablet},
-        viewporter::{client as c_vp, server as s_vp},
     },
     xdg::xdg_output::zv1::{
         client::zxdg_output_manager_v1::ZxdgOutputManagerV1 as OutputManClient,
@@ -228,6 +227,7 @@ impl<C: XConnection>
                 state.objects.insert_with_key(|key| {
                     let client = client.create_surface(&state.qh, key);
                     let server = data_init.init(id, key);
+                    let viewport = state.viewporter.get_viewport(&client, &state.qh, ());
                     surface_id = Some(server.id().protocol_id());
                     debug!("new surface with key {key:?} ({surface_id:?})");
 
@@ -242,6 +242,8 @@ impl<C: XConnection>
                         xwl: None,
                         window: None,
                         output_key: None,
+                        scale_factor: 1,
+                        viewport,
                     }
                     .into()
                 });
@@ -775,60 +777,6 @@ impl<C: XConnection> Dispatch<WlDrmServer, ObjectKey> for ServerState<C> {
     }
 }
 
-impl<C: XConnection> Dispatch<s_vp::wp_viewport::WpViewport, c_vp::wp_viewport::WpViewport>
-    for ServerState<C>
-{
-    fn request(
-        _: &mut Self,
-        _: &wayland_server::Client,
-        _: &s_vp::wp_viewport::WpViewport,
-        request: <s_vp::wp_viewport::WpViewport as Resource>::Request,
-        c_viewport: &c_vp::wp_viewport::WpViewport,
-        _: &DisplayHandle,
-        _: &mut wayland_server::DataInit<'_, Self>,
-    ) {
-        simple_event_shunt! {
-            c_viewport, request: s_vp::wp_viewport::Request => [
-                SetSource { x, y, width, height },
-                SetDestination { width, height },
-                Destroy
-            ]
-        }
-    }
-}
-
-impl<C: XConnection>
-    Dispatch<
-        s_vp::wp_viewporter::WpViewporter,
-        ClientGlobalWrapper<c_vp::wp_viewporter::WpViewporter>,
-    > for ServerState<C>
-{
-    fn request(
-        state: &mut Self,
-        _: &wayland_server::Client,
-        _: &s_vp::wp_viewporter::WpViewporter,
-        request: <s_vp::wp_viewporter::WpViewporter as Resource>::Request,
-        client: &ClientGlobalWrapper<c_vp::wp_viewporter::WpViewporter>,
-        _: &DisplayHandle,
-        data_init: &mut wayland_server::DataInit<'_, Self>,
-    ) {
-        use s_vp::wp_viewporter;
-        match request {
-            wp_viewporter::Request::GetViewport { id, surface } => 'get_viewport: {
-                let Some(c_surface) = state.get_client_surface_from_server(surface) else {
-                    break 'get_viewport;
-                };
-                let c_viewport = client.get_viewport(c_surface, &state.qh, ());
-                data_init.init(id, c_viewport);
-            }
-            wp_viewporter::Request::Destroy => {
-                client.destroy();
-            }
-            _ => unreachable!(),
-        }
-    }
-}
-
 impl<C: XConnection> Dispatch<XdgOutputServer, ObjectKey> for ServerState<C> {
     fn request(
         state: &mut Self,
@@ -1255,10 +1203,6 @@ global_dispatch_no_events!(
     c_dmabuf::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1
 );
 global_dispatch_no_events!(OutputManServer, OutputManClient);
-global_dispatch_no_events!(
-    s_vp::wp_viewporter::WpViewporter,
-    c_vp::wp_viewporter::WpViewporter
-);
 global_dispatch_no_events!(PointerConstraintsServer, PointerConstraintsClient);
 global_dispatch_no_events!(
     s_tablet::zwp_tablet_manager_v2::ZwpTabletManagerV2,

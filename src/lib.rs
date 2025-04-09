@@ -67,6 +67,7 @@ pub fn main(data: impl RunData) -> Option<()> {
     let mut xwayland = xwayland
         .args([
             "-rootless",
+            "-force-xrandr-emulation",
             "-wm",
             &xsock_xwl.as_raw_fd().to_string(),
             "-displayfd",

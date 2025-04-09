@@ -239,10 +239,6 @@ impl Fixture {
         &mut self,
         connection: &mut Connection,
         window: x::Window,
-        x: i16,
-        y: i16,
-        width: u16,
-        height: u16,
     ) -> testwl::SurfaceId {
         connection.map_window(window);
         self.wait_and_dispatch();
@@ -258,15 +254,6 @@ impl Fixture {
         );
         self.testwl.configure_popup(surface);
         self.wait_and_dispatch();
-        let geometry = connection.get_reply(&x::GetGeometry {
-            drawable: x::Drawable::Window(window),
-        });
-
-        assert_eq!(geometry.x(), x);
-        assert_eq!(geometry.y(), y);
-        assert_eq!(geometry.width(), width);
-        assert_eq!(geometry.height(), height);
-
         surface
     }
 
@@ -796,8 +783,7 @@ fn input_focus() {
                 long_offset: 0,
                 long_length: 1,
             })
-            .value::<u32>()
-            .get(0)
+            .value::<u32>().first()
             .and_then(|state| WmState::try_from(*state).ok()),
         Some(WmState::Normal)
     );
@@ -1475,7 +1461,15 @@ fn popup_done() {
     f.map_as_toplevel(&mut conn, toplevel);
 
     let popup = conn.new_window(conn.root, 0, 0, 20, 20, true);
-    let surface = f.map_as_popup(&mut conn, popup, 0, 0, 20, 20);
+    let surface = f.map_as_popup(&mut conn, popup);
+    let geometry = conn.get_reply(&x::GetGeometry {
+        drawable: x::Drawable::Window(popup),
+    });
+
+    assert_eq!(geometry.x(), 0);
+    assert_eq!(geometry.y(), 0);
+    assert_eq!(geometry.width(), 20);
+    assert_eq!(geometry.height(), 20);
 
     f.testwl.popup_done(surface);
     f.wait_and_dispatch();
@@ -1575,4 +1569,75 @@ fn xdg_decorations() {
             .and_then(|(_, decoration)| *decoration),
         Some(zxdg_toplevel_decoration_v1::Mode::ServerSide)
     );
+}
+
+#[test]
+fn forced_1x_scale_consistent_x11_size() {
+    let mut f = Fixture::new();
+    f.testwl.enable_xdg_output_manager();
+    let output = f.create_output(0, 0);
+    output.scale(2);
+    output.done();
+
+    let mut conn = Connection::new(&f.display);
+    let window = conn.new_window(conn.root, 0, 0, 200, 200, false);
+    let surface = f.map_as_toplevel(&mut conn, window);
+    f.testwl.move_surface_to_output(surface, &output);
+    f.testwl.move_pointer_to(surface, 30.0, 40.0);
+    f.wait_and_dispatch();
+
+    let tree = conn.get_reply(&x::QueryTree { window });
+    let geo = conn.get_reply(&x::GetGeometry {
+        drawable: x::Drawable::Window(window),
+    });
+    let reply = conn.get_reply(&x::TranslateCoordinates {
+        src_window: tree.parent(),
+        dst_window: conn.root,
+        src_x: geo.x(),
+        src_y: geo.y(),
+    });
+
+    assert!(reply.same_screen());
+    assert_eq!(reply.dst_x(), 0);
+    assert_eq!(reply.dst_y(), 0);
+
+    let ptr_reply = conn.get_reply(&x::QueryPointer { window: conn.root });
+    assert!(ptr_reply.same_screen());
+    assert_eq!(ptr_reply.child(), window);
+    assert_eq!(ptr_reply.win_x(), 60);
+    assert_eq!(ptr_reply.win_y(), 80);
+
+    // Update scale
+    output.scale(3);
+    output.done();
+    f.testwl
+        .configure_toplevel(surface, 100, 100, vec![xdg_toplevel::State::Activated]);
+    f.testwl.focus_toplevel(surface);
+    f.testwl.move_pointer_to(surface, 30.0, 40.0);
+    f.wait_and_dispatch();
+
+    let ptr_reply = conn.get_reply(&x::QueryPointer { window: conn.root });
+    assert!(ptr_reply.same_screen());
+    assert_eq!(ptr_reply.child(), window);
+    assert_eq!(ptr_reply.win_x(), 90);
+    assert_eq!(ptr_reply.win_y(), 120);
+
+    // Popup
+    let popup = conn.new_window(conn.root, 60, 60, 30, 30, true);
+    f.map_as_popup(&mut conn, popup);
+    let tree = conn.get_reply(&x::QueryTree { window: popup });
+    let geo = conn.get_reply(&x::GetGeometry {
+        drawable: x::Drawable::Window(popup),
+    });
+    let reply = conn.get_reply(&x::TranslateCoordinates {
+        src_window: tree.parent(),
+        dst_window: conn.root,
+        src_x: geo.x(),
+        src_y: geo.y(),
+    });
+
+    assert_eq!(reply.dst_x(), 60);
+    assert_eq!(reply.dst_y(), 60);
+    assert_eq!(geo.width(), 30);
+    assert_eq!(geo.height(), 30);
 }

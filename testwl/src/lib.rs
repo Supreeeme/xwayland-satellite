@@ -20,7 +20,10 @@ use wayland_protocols::{
             zwp_tablet_tool_v2::{self, ZwpTabletToolV2},
             zwp_tablet_v2::ZwpTabletV2,
         },
-        viewporter::server::wp_viewporter::WpViewporter,
+        viewporter::server::{
+            wp_viewport::WpViewport,
+            wp_viewporter::{self, WpViewporter},
+        },
     },
     xdg::{
         activation::v1::server::{
@@ -392,9 +395,9 @@ impl Server {
         dh.create_global::<State, ZwpTabletManagerV2, _>(1, ());
         dh.create_global::<State, XdgActivationV1, _>(1, ());
         dh.create_global::<State, ZxdgDecorationManagerV1, _>(1, ());
+        dh.create_global::<State, WpViewporter, _>(1, ());
         global_noop!(ZwpLinuxDmabufV1);
         global_noop!(ZwpRelativePointerManagerV1);
-        global_noop!(WpViewporter);
         global_noop!(ZwpPointerConstraintsV1);
 
         struct HandlerData;
@@ -1239,14 +1242,33 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                 parent,
                 positioner,
             } => {
+                let positioner_state =
+                    state.positioners[&PositionerId(positioner.id().protocol_id())].clone();
+                if positioner_state
+                    .size
+                    .is_none_or(|size| size.x <= 0 || size.y <= 0)
+                {
+                    // TODO: figure out why the client.kill here doesn't make satellite print the error message
+                    let message =
+                        format!("positioner had an invalid size {:?}", positioner_state.size);
+                    eprintln!("{message}");
+                    client.kill(
+                        dh,
+                        ProtocolError {
+                            code: xdg_surface::Error::InvalidSize.into(),
+                            object_id: resource.id().protocol_id(),
+                            object_interface: XdgSurface::interface().name.to_string(),
+                            message,
+                        },
+                    );
+                    return;
+                }
                 let popup = data_init.init(id, *surface_id);
                 let p = Popup {
                     xdg: XdgSurfaceData::new(resource.clone()),
                     popup,
                     parent: parent.unwrap(),
-                    positioner_state: state.positioners
-                        [&PositionerId(positioner.id().protocol_id())]
-                        .clone(),
+                    positioner_state,
                 };
                 let data = state.surfaces.get_mut(surface_id).unwrap();
                 data.role = Some(SurfaceRole::Popup(p));
@@ -1787,5 +1809,52 @@ impl Dispatch<ZxdgToplevelDecorationV1, SurfaceId> for State {
             }
             _ => unreachable!(),
         }
+    }
+}
+
+impl GlobalDispatch<WpViewporter, ()> for State {
+    fn bind(
+        _: &mut Self,
+        _: &DisplayHandle,
+        _: &Client,
+        resource: wayland_server::New<WpViewporter>,
+        _: &(),
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+    }
+}
+
+impl Dispatch<WpViewporter, ()> for State {
+    fn request(
+        _: &mut Self,
+        _: &Client,
+        _: &WpViewporter,
+        request: <WpViewporter as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            wp_viewporter::Request::GetViewport { surface: _, id } => {
+                data_init.init(id, ());
+            }
+            wp_viewporter::Request::Destroy => {}
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<WpViewport, ()> for State {
+    fn request(
+        _: &mut Self,
+        _: &Client,
+        _: &WpViewport,
+        _: <WpViewport as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        //todo!()
     }
 }
