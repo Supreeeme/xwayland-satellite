@@ -35,3 +35,4 @@ Additionally, satellite can *optionally* take advantage of the following protoco
 - XDG foreign
 - Pointer constraints
 - Tablet input
+- Fractional scale

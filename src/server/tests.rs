@@ -1,6 +1,7 @@
 use super::{ServerState, WindowDims};
 use crate::xstate::{SetState, WinSize, WmName};
 use rustix::event::{poll, PollFd, PollFlags};
+use smithay_client_toolkit::compositor::Surface;
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -23,6 +24,7 @@ use wayland_client::{
     },
     Connection, Proxy, WEnum,
 };
+use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
 
 use wayland_protocols::{
     wp::{
@@ -269,7 +271,7 @@ struct PopupBuilder {
     parent_window: Window,
     parent_surface: testwl::SurfaceId,
     dims: WindowDims,
-    scale: i32,
+    scale: f64,
     check_size_and_pos: bool,
 }
 
@@ -285,7 +287,7 @@ impl PopupBuilder {
                 width: 50,
                 height: 50,
             },
-            scale: 1,
+            scale: 1.0,
             check_size_and_pos: true,
         }
     }
@@ -315,14 +317,14 @@ impl PopupBuilder {
         self
     }
 
-    fn scale(mut self, scale: i32) -> Self {
-        self.scale = scale;
+    fn scale(mut self, scale: impl Into<f64>) -> Self {
+        self.scale = scale.into();
         self
     }
 }
 
 impl TestFixture {
-    fn new() -> Self {
+    fn new_pre_connect(pre_connect: impl FnOnce(&mut testwl::Server)) -> Self {
         INIT.call_once(|| {
             env_logger::builder()
                 .is_test(true)
@@ -332,6 +334,7 @@ impl TestFixture {
 
         let (client_s, server_s) = UnixStream::pair().unwrap();
         let mut testwl = testwl::Server::new(true);
+        pre_connect(&mut testwl);
         let display = Display::<FakeServerState>::new().unwrap();
         testwl.connect(server_s);
         // Handle initial globals roundtrip setup requirement
@@ -367,6 +370,10 @@ impl TestFixture {
         };
         f.run();
         f
+    }
+
+    fn new() -> Self {
+        Self::new_pre_connect(|_| {})
     }
 
     fn new_with_compositor() -> (Self, Compositor) {
@@ -510,6 +517,39 @@ impl TestFixture {
         );
         self.run();
         (output, self.testwl.last_created_output())
+    }
+
+    fn enable_fractional_scale(&mut self) -> TestObject<WpFractionalScaleManagerV1> {
+        self.testwl.enable_fractional_scale();
+        self.run();
+        self.run();
+
+        let mut events = std::mem::take(&mut *self.registry.data.events.lock().unwrap());
+        assert_eq!(
+            events.len(),
+            1,
+            "Unexpected number of global events after enabling fractional scale"
+        );
+        let event = events.pop().unwrap();
+        let Ev::<WlRegistry>::Global {
+            name,
+            interface,
+            version,
+        } = event
+        else {
+            panic!("Unexpected event: {event:?}");
+        };
+
+        assert_eq!(interface, WpFractionalScaleManagerV1::interface().name);
+        let man = TestObject::<WpFractionalScaleManagerV1>::from_request(
+            &self.registry.obj,
+            Req::<WlRegistry>::Bind {
+                name,
+                id: (WpFractionalScaleManagerV1::interface(), version),
+            },
+        );
+        self.run();
+        man
     }
 
     fn enable_xdg_output(&mut self) -> TestObject<ZxdgOutputManagerV1> {
@@ -755,8 +795,8 @@ impl TestFixture {
                 assert_eq!(
                     pos.size.as_ref().unwrap(),
                     &testwl::Vec2 {
-                        x: 50 / scale,
-                        y: 50 / scale
+                        x: (dims.width as f64 / scale) as i32,
+                        y: (dims.height as f64 / scale) as i32
                     }
                 );
 
@@ -765,8 +805,8 @@ impl TestFixture {
                     pos.anchor_rect.as_ref().unwrap(),
                     &testwl::Rect {
                         size: testwl::Vec2 {
-                            x: parent_win.dims.width as i32 / scale,
-                            y: parent_win.dims.height as i32 / scale
+                            x: (parent_win.dims.width as f64 / scale) as i32,
+                            y: (parent_win.dims.height as f64 / scale) as i32
                         },
                         offset: testwl::Vec2::default()
                     }
@@ -774,8 +814,8 @@ impl TestFixture {
                 assert_eq!(
                     pos.offset,
                     testwl::Vec2 {
-                        x: (dims.x - parent_win.dims.x) as i32 / scale,
-                        y: (dims.y - parent_win.dims.y) as i32 / scale
+                        x: ((dims.x - parent_win.dims.x) as f64 / scale) as i32,
+                        y: ((dims.y - parent_win.dims.y) as f64 / scale) as i32
                     }
                 );
             }
@@ -1947,6 +1987,45 @@ fn scaled_output_popup() {
     let initial_dims = builder.dims;
     let (_, popup_id) = f.create_popup(&comp, builder);
     f.testwl.move_surface_to_output(popup_id, &output);
+    f.run();
+    assert_eq!(
+        initial_dims,
+        f.connection().window(popup).dims,
+        "X11 dimensions changed after configure"
+    );
+}
+
+#[test]
+fn fractional_scale_popup() {
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let comp = f.compositor();
+
+    let toplevel = unsafe { Window::new(1) };
+    let (_, toplevel_id) = f.create_toplevel(&comp, toplevel);
+    let surface_data = f
+        .testwl
+        .get_surface_data(toplevel_id)
+        .expect("No surface data");
+    let fractional = surface_data
+        .fractional
+        .as_ref()
+        .expect("No fractional scale for surface");
+
+    fractional.preferred_scale(180); // 1.5 scale
+    f.run();
+    f.run();
+
+    let popup = unsafe { Window::new(2) };
+    let builder = PopupBuilder::new(popup, toplevel, toplevel_id)
+        .x(60)
+        .y(60)
+        .width(60)
+        .height(60)
+        .scale(1.5);
+    let initial_dims = builder.dims;
+    f.create_popup(&comp, builder);
     f.run();
     assert_eq!(
         initial_dims,

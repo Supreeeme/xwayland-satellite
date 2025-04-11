@@ -23,6 +23,10 @@ use wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1:
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1;
 use wayland_protocols::{
     wp::{
+        fractional_scale::v1::client::{
+            wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+            wp_fractional_scale_v1::WpFractionalScaleV1,
+        },
         linux_dmabuf::zv1::client::{
             self as dmabuf,
             zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1 as DmabufFeedback,
@@ -143,6 +147,7 @@ delegate_noop!(Globals: ZwpPointerConstraintsV1);
 delegate_noop!(Globals: ZwpTabletManagerV2);
 delegate_noop!(Globals: XdgActivationV1);
 delegate_noop!(Globals: ZxdgDecorationManagerV1);
+delegate_noop!(Globals: WpFractionalScaleManagerV1);
 delegate_noop!(Globals: ignore ZxdgToplevelDecorationV1);
 
 impl Dispatch<WlRegistry, GlobalListContents> for Globals {
@@ -232,6 +237,7 @@ push_events!(XdgOutput);
 push_events!(WlTouch);
 push_events!(ZwpConfinedPointerV1);
 push_events!(ZwpLockedPointerV1);
+push_events!(WpFractionalScaleV1);
 
 pub(crate) struct LateInitObjectKey<P: Proxy> {
     key: OnceLock<ObjectKey>,

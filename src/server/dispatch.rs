@@ -230,6 +230,10 @@ impl<C: XConnection>
                     let viewport = state.viewporter.get_viewport(&client, &state.qh, ());
                     surface_id = Some(server.id().protocol_id());
                     debug!("new surface with key {key:?} ({surface_id:?})");
+                    let fractional = state
+                        .fractional_scale
+                        .as_ref()
+                        .map(|f| f.get_fractional_scale(&client, &state.qh, key));
 
                     SurfaceData {
                         client,
@@ -242,8 +246,9 @@ impl<C: XConnection>
                         xwl: None,
                         window: None,
                         output_key: None,
-                        scale_factor: 1,
+                        scale_factor: 1.0,
                         viewport,
+                        fractional,
                     }
                     .into()
                 });

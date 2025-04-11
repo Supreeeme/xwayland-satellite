@@ -7,6 +7,7 @@ use std::os::fd::AsFd;
 use wayland_client::{protocol as client, Proxy};
 use wayland_protocols::{
     wp::{
+        fractional_scale::v1::client::wp_fractional_scale_v1,
         pointer_constraints::zv1::{
             client::{
                 zwp_confined_pointer_v1::{self, ZwpConfinedPointerV1 as ConfinedPointerClient},
@@ -63,6 +64,7 @@ pub(crate) enum SurfaceEvents {
     XdgSurface(xdg_surface::Event),
     Toplevel(xdg_toplevel::Event),
     Popup(xdg_popup::Event),
+    FractionalScale(wp_fractional_scale_v1::Event),
 }
 macro_rules! impl_from {
     ($type:ty, $variant:ident) => {
@@ -77,6 +79,7 @@ impl_from!(client::wl_surface::Event, WlSurface);
 impl_from!(xdg_surface::Event, XdgSurface);
 impl_from!(xdg_toplevel::Event, Toplevel);
 impl_from!(xdg_popup::Event, Popup);
+impl_from!(wp_fractional_scale_v1::Event, FractionalScale);
 
 impl HandleEvent for SurfaceData {
     type Event = SurfaceEvents;
@@ -86,6 +89,20 @@ impl HandleEvent for SurfaceData {
             SurfaceEvents::XdgSurface(event) => self.xdg_event(event, state),
             SurfaceEvents::Toplevel(event) => self.toplevel_event(event, state),
             SurfaceEvents::Popup(event) => self.popup_event(event, state),
+            SurfaceEvents::FractionalScale(event) => match event {
+                wp_fractional_scale_v1::Event::PreferredScale { scale } => {
+                    self.scale_factor = scale as f64 / 120.0;
+                    log::debug!("{} scale factor: {}", self.server.id(), self.scale_factor);
+                    if let Some(win_data) = self
+                        .window
+                        .as_ref()
+                        .and_then(|win| state.windows.get_mut(win))
+                    {
+                        self.update_viewport(win_data.attrs.dims, win_data.attrs.size_hints);
+                    }
+                }
+                _ => unreachable!(),
+            },
         }
     }
 }
@@ -109,8 +126,8 @@ impl SurfaceData {
     }
 
     fn update_viewport(&self, dims: WindowDims, size_hints: Option<WmNormalHints>) {
-        let width = dims.width as i32 / self.scale_factor;
-        let height = dims.height as i32 / self.scale_factor;
+        let width = (dims.width as f64 / self.scale_factor) as i32;
+        let height = (dims.height as f64 / self.scale_factor) as i32;
         self.viewport.set_destination(width, height);
         debug!("{} viewport: {width}x{height}", self.server.id());
         if let Some(hints) = size_hints {
@@ -121,16 +138,17 @@ impl SurfaceData {
                 );
                 return;
             };
+
             if let Some(min) = hints.min_size {
                 data.toplevel.set_min_size(
-                    min.width / self.scale_factor,
-                    min.height / self.scale_factor,
+                    (min.width as f64 / self.scale_factor) as i32,
+                    (min.height as f64 / self.scale_factor) as i32,
                 );
             }
             if let Some(max) = hints.max_size {
                 data.toplevel.set_max_size(
-                    max.width / self.scale_factor,
-                    max.height / self.scale_factor,
+                    (max.width as f64 / self.scale_factor) as i32,
+                    (max.height as f64 / self.scale_factor) as i32,
                 );
             }
         }
@@ -151,13 +169,17 @@ impl SurfaceData {
                 };
                 let output: &mut Output = object.as_mut();
                 self.server.enter(&output.server);
-                self.scale_factor = output.scale;
+                if state.fractional_scale.is_none() {
+                    self.scale_factor = output.scale as f64;
+                }
                 self.output_key = Some(key);
                 debug!("{} entered {}", self.server.id(), output.server.id());
 
                 let windows = &mut state.windows;
                 if let Some(win_data) = self.window.as_ref().and_then(|win| windows.get_mut(win)) {
-                    self.update_viewport(win_data.attrs.dims, win_data.attrs.size_hints);
+                    if state.fractional_scale.is_none() {
+                        self.update_viewport(win_data.attrs.dims, win_data.attrs.size_hints);
+                    }
                     win_data.update_output_offset(
                         key,
                         WindowOutputOffset {
@@ -205,15 +227,15 @@ impl SurfaceData {
         if let Some(pending) = xdg.pending.take() {
             let window = state.associated_windows[self.key];
             let window = state.windows.get_mut(&window).unwrap();
-            let x = pending.x * self.scale_factor + window.output_offset.x;
-            let y = pending.y * self.scale_factor + window.output_offset.y;
+            let x = (pending.x as f64 * self.scale_factor) as i32 + window.output_offset.x;
+            let y = (pending.y as f64 * self.scale_factor) as i32 + window.output_offset.y;
             let width = if pending.width > 0 {
-                (pending.width * self.scale_factor) as u16
+                (pending.width as f64 * self.scale_factor) as u16
             } else {
                 window.attrs.dims.width
             };
             let height = if pending.height > 0 {
-                (pending.height * self.scale_factor) as u16
+                (pending.height as f64 * self.scale_factor) as u16
             } else {
                 window.attrs.dims.height
             };
@@ -394,7 +416,7 @@ pub struct Pointer {
     server: WlPointer,
     pub client: client::wl_pointer::WlPointer,
     pending_enter: PendingEnter,
-    scale: i32,
+    scale: f64,
 }
 
 impl Pointer {
@@ -403,7 +425,7 @@ impl Pointer {
             server,
             client,
             pending_enter: PendingEnter(None),
-            scale: 1,
+            scale: 1.0,
         }
     }
 }
@@ -445,8 +467,8 @@ impl HandleEvent for Pointer {
                     self.server.enter(
                         serial,
                         &surface_data.server,
-                        surface_x * self.scale as f64,
-                        surface_y * self.scale as f64,
+                        surface_x * self.scale,
+                        surface_y * self.scale,
                     );
                     let window = surface_data.window.unwrap();
                     state.connection.as_mut().unwrap().raise_to_top(window);
@@ -524,11 +546,8 @@ impl HandleEvent for Pointer {
                         warn!("could not move pointer to surface ({serial}): stale surface");
                     }
                 } else {
-                    self.server.motion(
-                        time,
-                        surface_x * self.scale as f64,
-                        surface_y * self.scale as f64,
-                    );
+                    self.server
+                        .motion(time, surface_x * self.scale, surface_y * self.scale);
                 }
             }
             _ => simple_event_shunt! {
@@ -983,24 +1002,26 @@ impl Output {
             Event::Scale { factor } => {
                 debug!("{} scale: {factor}", self.server.id());
                 self.scale = factor;
-                self.windows.retain(|window| {
-                    let Some(data): Option<&WindowData> = state.windows.get(window) else {
-                        return false;
-                    };
+                if state.fractional_scale.is_none() {
+                    self.windows.retain(|window| {
+                        let Some(data): Option<&WindowData> = state.windows.get(window) else {
+                            return false;
+                        };
 
-                    if let Some::<&mut SurfaceData>(surface) = data
-                        .surface_key
-                        .and_then(|key| state.objects.get_mut(key))
-                        .map(AsMut::as_mut)
-                    {
-                        surface.scale_factor = factor;
-                        surface.update_viewport(data.attrs.dims, data.attrs.size_hints);
-                    }
+                        if let Some::<&mut SurfaceData>(surface) = data
+                            .surface_key
+                            .and_then(|key| state.objects.get_mut(key))
+                            .map(AsMut::as_mut)
+                        {
+                            surface.scale_factor = factor as f64;
+                            surface.update_viewport(data.attrs.dims, data.attrs.size_hints);
+                        }
 
-                    true
-                });
+                        true
+                    });
 
-                self.server.scale(factor);
+                    self.server.scale(factor);
+                }
             }
             _ => simple_event_shunt! {
                 self.server, event: Event => [

@@ -22,12 +22,14 @@ use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::rc::{Rc, Weak};
 use wayland_client::{globals::Global, protocol as client, Proxy};
+use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1;
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1;
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::{
     self, ZxdgToplevelDecorationV1,
 };
 use wayland_protocols::{
     wp::{
+        fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
         pointer_constraints::zv1::server::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
         relative_pointer::zv1::server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
@@ -188,8 +190,9 @@ pub struct SurfaceData {
     xwl: Option<XwaylandSurfaceV1>,
     window: Option<x::Window>,
     output_key: Option<ObjectKey>,
-    scale_factor: i32,
+    scale_factor: f64,
     viewport: WpViewport,
+    fractional: Option<WpFractionalScaleV1>,
 }
 
 impl SurfaceData {
@@ -515,6 +518,7 @@ pub struct ServerState<C: XConnection> {
 
     xdg_wm_base: XdgWmBase,
     viewporter: WpViewporter,
+    fractional_scale: Option<WpFractionalScaleManagerV1>,
     clipboard_data: Option<ClipboardData<C::X11Selection>>,
     last_kb_serial: Option<(client::wl_seat::WlSeat, u32)>,
     activation_state: Option<ActivationState>,
@@ -541,6 +545,10 @@ impl<C: XConnection> ServerState<C> {
             .global_list
             .bind::<WpViewporter, _, _>(&qh, 1..=1, ())
             .expect("Could not bind wp_viewporter");
+
+        let fractional_scale = clientside.global_list.bind::<WpFractionalScaleManagerV1, _, _>(&qh, 1..=1, ())
+            .inspect_err(|e| warn!("Couldn't bind fractional scale manager: {e}. Fractional scaling will not work."))
+            .ok();
 
         let manager = DataDeviceManagerState::bind(&clientside.global_list, &qh)
             .inspect_err(|e| {
@@ -590,6 +598,7 @@ impl<C: XConnection> ServerState<C> {
             associated_windows: Default::default(),
             xdg_wm_base,
             viewporter,
+            fractional_scale,
             clipboard_data,
             last_kb_serial: None,
             activation_state,
@@ -731,14 +740,14 @@ impl<C: XConnection> ServerState<C> {
                     if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
                         if let Some(min_size) = &hints.min_size {
                             data.toplevel.set_min_size(
-                                min_size.width / surface.scale_factor,
-                                min_size.height / surface.scale_factor,
+                                (min_size.width as f64 / surface.scale_factor) as i32,
+                                (min_size.height as f64 / surface.scale_factor) as i32,
                             );
                         }
                         if let Some(max_size) = &hints.max_size {
                             data.toplevel.set_max_size(
-                                max_size.width / surface.scale_factor,
-                                max_size.height / surface.scale_factor,
+                                (max_size.width as f64 / surface.scale_factor) as i32,
+                                (max_size.height as f64 / surface.scale_factor) as i32,
                             );
                         }
                     }
@@ -831,12 +840,12 @@ impl<C: XConnection> ServerState<C> {
         match &data.role {
             Some(SurfaceRole::Popup(Some(popup))) => {
                 popup.positioner.set_offset(
-                    (event.x() as i32 - win.output_offset.x) / data.scale_factor,
-                    (event.y() as i32 - win.output_offset.y) / data.scale_factor,
+                    ((event.x() as i32 - win.output_offset.x) as f64 / data.scale_factor) as i32,
+                    ((event.y() as i32 - win.output_offset.y) as f64 / data.scale_factor) as i32,
                 );
                 popup.positioner.set_size(
-                    event.width() as i32 / data.scale_factor,
-                    event.height() as i32 / data.scale_factor,
+                    (event.width() as f64 / data.scale_factor) as i32,
+                    (event.height() as f64 / data.scale_factor) as i32,
                 );
                 popup.popup.reposition(&popup.positioner, 0);
             }
@@ -1199,19 +1208,19 @@ impl<C: XConnection> ServerState<C> {
 
             let positioner = self.xdg_wm_base.create_positioner(&self.qh, ());
             positioner.set_size(
-                1.max(window.attrs.dims.width as i32 / initial_scale),
-                1.max(window.attrs.dims.height as i32 / initial_scale),
+                1.max((window.attrs.dims.width as f64 / initial_scale) as i32),
+                1.max((window.attrs.dims.height as f64 / initial_scale) as i32),
             );
-            let x = (window.attrs.dims.x - parent_dims.x) as i32 / initial_scale;
-            let y = (window.attrs.dims.y - parent_dims.y) as i32 / initial_scale;
+            let x = ((window.attrs.dims.x - parent_dims.x) as f64 / initial_scale) as i32;
+            let y = ((window.attrs.dims.y - parent_dims.y) as f64 / initial_scale) as i32;
             positioner.set_offset(x, y);
             positioner.set_anchor(Anchor::TopLeft);
             positioner.set_gravity(Gravity::BottomRight);
             positioner.set_anchor_rect(
                 0,
                 0,
-                parent_window.attrs.dims.width as i32 / initial_scale,
-                parent_window.attrs.dims.height as i32 / initial_scale,
+                (parent_window.attrs.dims.width as f64 / initial_scale) as i32,
+                (parent_window.attrs.dims.height as f64 / initial_scale) as i32,
             );
             let popup = xdg_surface.get_popup(
                 Some(&parent_surface.xdg().unwrap().surface),
@@ -1230,7 +1239,7 @@ impl<C: XConnection> ServerState<C> {
             };
             SurfaceRole::Popup(Some(popup))
         } else {
-            initial_scale = 1;
+            initial_scale = 1.0;
             let data = self.create_toplevel(window, surface_key, xdg_surface, fullscreen);
             SurfaceRole::Toplevel(Some(data))
         };

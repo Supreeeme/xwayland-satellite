@@ -7,6 +7,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use wayland_protocols::{
     wp::{
+        fractional_scale::v1::server::{
+            wp_fractional_scale_manager_v1::{self, WpFractionalScaleManagerV1},
+            wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+        },
         linux_dmabuf::zv1::server::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
         pointer_constraints::zv1::server::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
         relative_pointer::zv1::server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
@@ -88,6 +92,7 @@ pub struct SurfaceData {
     pub last_damage: Option<BufferDamage>,
     pub role: Option<SurfaceRole>,
     pub last_enter_serial: Option<u32>,
+    pub fractional: Option<WpFractionalScaleV1>,
 }
 
 impl SurfaceData {
@@ -732,6 +737,12 @@ impl Server {
         xdg.done();
         self.display.flush_clients().unwrap();
     }
+
+    pub fn enable_fractional_scale(&mut self) {
+        self.dh
+            .create_global::<State, WpFractionalScaleManagerV1, _>(1, ());
+        self.display.flush_clients().unwrap();
+    }
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -746,6 +757,8 @@ simple_global_dispatch!(XdgWmBase);
 simple_global_dispatch!(ZxdgOutputManagerV1);
 simple_global_dispatch!(ZwpTabletManagerV2);
 simple_global_dispatch!(ZxdgDecorationManagerV1);
+simple_global_dispatch!(WpViewporter);
+simple_global_dispatch!(WpFractionalScaleManagerV1);
 
 impl Dispatch<ZwpTabletManagerV2, ()> for State {
     fn request(
@@ -1505,6 +1518,7 @@ impl Dispatch<WlCompositor, ()> for State {
                         last_damage: None,
                         role: None,
                         last_enter_serial: None,
+                        fractional: None,
                     },
                 );
                 state.last_surface_id = Some(SurfaceId(id));
@@ -1812,19 +1826,6 @@ impl Dispatch<ZxdgToplevelDecorationV1, SurfaceId> for State {
     }
 }
 
-impl GlobalDispatch<WpViewporter, ()> for State {
-    fn bind(
-        _: &mut Self,
-        _: &DisplayHandle,
-        _: &Client,
-        resource: wayland_server::New<WpViewporter>,
-        _: &(),
-        data_init: &mut wayland_server::DataInit<'_, Self>,
-    ) {
-        data_init.init(resource, ());
-    }
-}
-
 impl Dispatch<WpViewporter, ()> for State {
     fn request(
         _: &mut Self,
@@ -1856,5 +1857,48 @@ impl Dispatch<WpViewport, ()> for State {
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
         //todo!()
+    }
+}
+
+impl Dispatch<WpFractionalScaleManagerV1, ()> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &WpFractionalScaleManagerV1,
+        request: <WpFractionalScaleManagerV1 as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            wp_fractional_scale_manager_v1::Request::GetFractionalScale { id, surface } => {
+                let surface_id = SurfaceId(surface.id().protocol_id());
+                let fractional = data_init.init(id, surface_id);
+                let surface_data = state.surfaces.get_mut(&surface_id).unwrap();
+                surface_data.fractional = Some(fractional);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<WpFractionalScaleV1, SurfaceId> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &WpFractionalScaleV1,
+        request: <WpFractionalScaleV1 as Resource>::Request,
+        data: &SurfaceId,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            wp_fractional_scale_v1::Request::Destroy => {
+                if let Some(surface_data) = state.surfaces.get_mut(data) {
+                    surface_data.fractional.take();
+                }
+            }
+            _ => unreachable!(),
+        }
     }
 }
