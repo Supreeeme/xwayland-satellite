@@ -25,7 +25,7 @@ use wayland_protocols::{
             zwp_tablet_v2::ZwpTabletV2,
         },
         viewporter::server::{
-            wp_viewport::WpViewport,
+            wp_viewport::{self, WpViewport},
             wp_viewporter::{self, WpViewporter},
         },
     },
@@ -86,6 +86,13 @@ pub struct BufferDamage {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub struct Viewport {
+    pub width: i32,
+    pub height: i32,
+    viewport: WpViewport,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct SurfaceData {
     pub surface: WlSurface,
     pub buffer: Option<WlBuffer>,
@@ -93,6 +100,7 @@ pub struct SurfaceData {
     pub role: Option<SurfaceRole>,
     pub last_enter_serial: Option<u32>,
     pub fractional: Option<WpFractionalScaleV1>,
+    pub viewport: Option<Viewport>,
 }
 
 impl SurfaceData {
@@ -1519,6 +1527,7 @@ impl Dispatch<WlCompositor, ()> for State {
                         role: None,
                         last_enter_serial: None,
                         fractional: None,
+                        viewport: None,
                     },
                 );
                 state.last_surface_id = Some(SurfaceId(id));
@@ -1828,7 +1837,7 @@ impl Dispatch<ZxdgToplevelDecorationV1, SurfaceId> for State {
 
 impl Dispatch<WpViewporter, ()> for State {
     fn request(
-        _: &mut Self,
+        state: &mut Self,
         _: &Client,
         _: &WpViewporter,
         request: <WpViewporter as Resource>::Request,
@@ -1837,8 +1846,18 @@ impl Dispatch<WpViewporter, ()> for State {
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
         match request {
-            wp_viewporter::Request::GetViewport { surface: _, id } => {
-                data_init.init(id, ());
+            wp_viewporter::Request::GetViewport { surface, id } => {
+                let surface_id = SurfaceId(surface.id().protocol_id());
+                let viewport = data_init.init(id, surface_id);
+                state
+                    .surfaces
+                    .get_mut(&surface_id)
+                    .expect("Unknown surface")
+                    .viewport = Some(Viewport {
+                    viewport,
+                    width: -1,
+                    height: -1,
+                })
             }
             wp_viewporter::Request::Destroy => {}
             _ => unreachable!(),
@@ -1846,17 +1865,41 @@ impl Dispatch<WpViewporter, ()> for State {
     }
 }
 
-impl Dispatch<WpViewport, ()> for State {
+impl Dispatch<WpViewport, SurfaceId> for State {
     fn request(
-        _: &mut Self,
+        state: &mut Self,
         _: &Client,
-        _: &WpViewport,
-        _: <WpViewport as Resource>::Request,
-        _: &(),
+        viewport: &WpViewport,
+        request: <WpViewport as Resource>::Request,
+        surface_id: &SurfaceId,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        //todo!()
+        match request {
+            wp_viewport::Request::SetDestination { width, height } => {
+                if width == 0 || width < -1 || height == 0 || height < -1 {
+                    panic!(
+                        "Bad viewport width/height ({width}x{height}) - {}",
+                        viewport.id()
+                    );
+                }
+                let viewport = state
+                    .surfaces
+                    .get_mut(surface_id)
+                    .unwrap_or_else(|| panic!("Missing surface id {surface_id:?}"))
+                    .viewport
+                    .as_mut()
+                    .unwrap();
+                viewport.width = width;
+                viewport.height = height;
+            }
+            wp_viewport::Request::Destroy => {
+                if let Some(surface) = state.surfaces.get_mut(surface_id) {
+                    surface.viewport.take();
+                }
+            }
+            _ => unimplemented!("{request:?}"),
+        }
     }
 }
 

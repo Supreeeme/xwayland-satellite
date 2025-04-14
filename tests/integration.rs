@@ -783,7 +783,8 @@ fn input_focus() {
                 long_offset: 0,
                 long_length: 1,
             })
-            .value::<u32>().first()
+            .value::<u32>()
+            .first()
             .and_then(|state| WmState::try_from(*state).ok()),
         Some(WmState::Normal)
     );

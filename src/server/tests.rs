@@ -1,7 +1,6 @@
 use super::{ServerState, WindowDims};
 use crate::xstate::{SetState, WinSize, WmName};
 use rustix::event::{poll, PollFd, PollFlags};
-use smithay_client_toolkit::compositor::Surface;
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -24,8 +23,6 @@ use wayland_client::{
     },
     Connection, Proxy, WEnum,
 };
-use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1;
-
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::client::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
@@ -517,39 +514,6 @@ impl TestFixture {
         );
         self.run();
         (output, self.testwl.last_created_output())
-    }
-
-    fn enable_fractional_scale(&mut self) -> TestObject<WpFractionalScaleManagerV1> {
-        self.testwl.enable_fractional_scale();
-        self.run();
-        self.run();
-
-        let mut events = std::mem::take(&mut *self.registry.data.events.lock().unwrap());
-        assert_eq!(
-            events.len(),
-            1,
-            "Unexpected number of global events after enabling fractional scale"
-        );
-        let event = events.pop().unwrap();
-        let Ev::<WlRegistry>::Global {
-            name,
-            interface,
-            version,
-        } = event
-        else {
-            panic!("Unexpected event: {event:?}");
-        };
-
-        assert_eq!(interface, WpFractionalScaleManagerV1::interface().name);
-        let man = TestObject::<WpFractionalScaleManagerV1>::from_request(
-            &self.registry.obj,
-            Req::<WlRegistry>::Bind {
-                name,
-                id: (WpFractionalScaleManagerV1::interface(), version),
-            },
-        );
-        self.run();
-        man
     }
 
     fn enable_xdg_output(&mut self) -> TestObject<ZxdgOutputManagerV1> {
@@ -2055,7 +2019,6 @@ fn scaled_output_small_popup() {
         .y(50)
         .width(1)
         .height(1)
-        .scale(2)
         .check_size_and_pos(false);
 
     let (_, popup_id) = f.create_popup(&comp, builder);
@@ -2066,6 +2029,50 @@ fn scaled_output_small_popup() {
 
     assert!(dims.width > 0);
     assert!(dims.height > 0);
+}
+
+#[test]
+fn fractional_scale_small_popup() {
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let comp = f.compositor();
+
+    let toplevel = unsafe { Window::new(1) };
+    let (_, toplevel_id) = f.create_toplevel(&comp, toplevel);
+    let data = f.testwl.get_surface_data(toplevel_id).unwrap();
+    let fractional = data
+        .fractional
+        .as_ref()
+        .expect("Missing fracitonal scale data");
+    fractional.preferred_scale(180); // 1.5 scale
+    f.run();
+    f.run();
+
+    {
+        let data = f.testwl.get_surface_data(toplevel_id).unwrap();
+        let viewport = data.viewport.as_ref().expect("Missing viewport");
+        assert_eq!(viewport.width, 66);
+        assert_eq!(viewport.height, 66);
+    }
+
+    let popup = unsafe { Window::new(2) };
+    let builder = PopupBuilder::new(popup, toplevel, toplevel_id)
+        .width(1)
+        .height(1)
+        .check_size_and_pos(false);
+
+    let (_, popup_id) = f.create_popup(&comp, builder);
+    let dims = f.connection().window(popup).dims;
+    assert!(dims.width > 0);
+    assert!(dims.height > 0);
+
+    let data = f
+        .testwl
+        .get_surface_data(popup_id)
+        .expect("Missing popup data");
+    let pos = &data.popup().positioner_state;
+    assert_eq!(pos.size.unwrap(), testwl::Vec2 { x: 1, y: 1 });
 }
 
 #[test]

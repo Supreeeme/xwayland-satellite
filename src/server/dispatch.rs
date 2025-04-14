@@ -170,6 +170,10 @@ impl<C: XConnection> Dispatch<WlSurface, ObjectKey> for ServerState<C> {
                 }
                 surface.destroy_role();
                 surface.client.destroy();
+                surface.viewport.destroy();
+                if let Some(f) = &mut surface.fractional {
+                    f.destroy();
+                }
                 debug!(
                     "deleting key: {key:?} (surface {:?})",
                     surface.server.id().protocol_id()

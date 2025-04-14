@@ -128,7 +128,9 @@ impl SurfaceData {
     fn update_viewport(&self, dims: WindowDims, size_hints: Option<WmNormalHints>) {
         let width = (dims.width as f64 / self.scale_factor) as i32;
         let height = (dims.height as f64 / self.scale_factor) as i32;
-        self.viewport.set_destination(width, height);
+        if width > 0 && height > 0 {
+            self.viewport.set_destination(width, height);
+        }
         debug!("{} viewport: {width}x{height}", self.server.id());
         if let Some(hints) = size_hints {
             let Some(SurfaceRole::Toplevel(Some(data))) = &self.role else {
