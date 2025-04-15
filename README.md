@@ -14,14 +14,30 @@ Because xwayland-satellite is a Wayland client (in addition to being a Wayland c
 
 ## Building
 ```
+# dev build
 cargo build
-cargo run
+# release build
+cargo build --release
+
+# run - will also build if not already built
+cargo run # --release
 ```
 
 ## Systemd support
-xwayland-satellite can be built with systemd support - simply add `-F systemd` to your build command - i.e. `cargo build --release -F systemd`.  
-With systemd support, satellite will send a state change notification when Xwayland has been initialized, allowing for having services dependent on satellite's startup.  
-An example service file is located in `resources/xwayland-satellite.service` - be sure to replace the `ExecStart` line with the proper location before using it. It can be placed in a systemd user unit directory (i.e. `$XDG_CONFIG_HOME/systemd/user` or `/etc/systemd/user`), and be launched and enabled with `systemctl --user enable --now xwayland-satellite`. It will be started when the `graphical-session.target` is reached, which is likely after your compositor is started if it supports systemd.
+xwayland-satellite can be built with systemd support - simply add `-F systemd` to your build command - i.e. `cargo build --release -F systemd`.
+
+With systemd support, satellite will send a state change notification when Xwayland has been initialized, allowing for having services dependent on satellite's startup.
+
+An example service file is located in `resources/xwayland-satellite.service` - be sure to replace the `ExecStart` line with the proper location before using it.
+It can be placed in a systemd user unit directory (i.e. `$XDG_CONFIG_HOME/systemd/user` or `/etc/systemd/user`),
+and be launched and enabled with `systemctl --user enable --now xwayland-satellite`.
+It will be started when the `graphical-session.target` is reached,
+which is likely after your compositor is started if it supports systemd.
+
+## Scaling/HiDPI
+On HiDPI displays, xwayland-satellite windows may have small text. Because HiDPI on X11 is very application dependent and hard to solve,
+xwayland-satellite doesn't make an attempt to do it for you. However, the same methods that would normally work on X11 should also work
+with satellite. See [the Arch Wiki on HiDPI](https://wiki.archlinux.org/title/HiDPI) for a good place start.
 
 ## Wayland protocols used
 The host compositor **must** implement the following protocols/interfaces for satellite to function:
