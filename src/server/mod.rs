@@ -27,6 +27,7 @@ use wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1:
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::{
     self, ZxdgToplevelDecorationV1,
 };
+use wayland_protocols::xdg::shell::client::xdg_positioner::ConstraintAdjustment;
 use wayland_protocols::{
     wp::{
         fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
@@ -1221,6 +1222,9 @@ impl<C: XConnection> ServerState<C> {
                 0,
                 (parent_window.attrs.dims.width as f64 / initial_scale) as i32,
                 (parent_window.attrs.dims.height as f64 / initial_scale) as i32,
+            );
+            positioner.set_constraint_adjustment(
+                ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY,
             );
             let popup = xdg_surface.get_popup(
                 Some(&parent_surface.xdg().unwrap().surface),
