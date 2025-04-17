@@ -47,7 +47,7 @@ pub trait RunData {
 }
 
 pub fn main(data: impl RunData) -> Option<()> {
-    let socket = ListeningSocket::bind_auto("wayland", 1..=128).unwrap();
+    let socket = ListeningSocket::bind_auto("xwls", 1..=128).unwrap();
     let mut display = Display::<RealServerState>::new().unwrap();
     let dh = display.handle();
     data.created_server();
