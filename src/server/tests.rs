@@ -703,6 +703,7 @@ impl TestFixture {
         (surface, id)
     }
 
+    #[track_caller]
     fn create_popup(
         &mut self,
         comp: &Compositor,
@@ -746,13 +747,13 @@ impl TestFixture {
                 surface_data.role
             );
 
-            let toplevel_xdg = &self
+            let parent_xdg = &self
                 .testwl
                 .get_surface_data(parent_surface)
                 .unwrap()
                 .xdg()
                 .surface;
-            assert_eq!(&surface_data.popup().parent, toplevel_xdg);
+            assert_eq!(surface_data.popup().parent.id(), parent_xdg.id());
 
             let pos = &surface_data.popup().positioner_state;
             if check_size_and_pos {
@@ -2144,6 +2145,43 @@ fn toplevel_size_limits_scaled() {
     let toplevel = data.toplevel();
     assert_eq!(toplevel.min_size, Some(testwl::Vec2 { x: 20, y: 20 }));
     assert_eq!(toplevel.max_size, Some(testwl::Vec2 { x: 100, y: 100 }));
+}
+
+#[test]
+fn subpopup_positioning() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+    let win_toplevel = unsafe { Window::new(1) };
+    let (_, id_toplevel) = f.create_toplevel(&comp, win_toplevel);
+
+    f.testwl.move_pointer_to(id_toplevel, 0.0, 0.0);
+    f.run();
+
+    let win_popup = unsafe { Window::new(2) };
+    let (_, id_popup) = f.create_popup(
+        &comp,
+        PopupBuilder::new(win_popup, win_toplevel, id_toplevel)
+            .x(25)
+            .y(25),
+    );
+
+    f.testwl.move_pointer_to(id_popup, 1.0, 1.0);
+    f.run();
+
+    println!("{:?}", f.satellite.last_hovered);
+
+    let win_subpopup = unsafe { Window::new(3) };
+
+    f.create_popup(
+        &comp,
+        PopupBuilder::new(win_subpopup, win_toplevel, id_toplevel)
+            .x(50)
+            .y(50),
+    );
+
+    let dims = f.connection().window(win_subpopup).dims;
+    assert_eq!(dims.x, 50);
+    assert_eq!(dims.y, 50);
 }
 
 /// See Pointer::handle_event for an explanation.

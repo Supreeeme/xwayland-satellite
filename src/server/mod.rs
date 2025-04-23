@@ -1202,8 +1202,8 @@ impl<C: XConnection> ServerState<C> {
 
             initial_scale = parent_surface.scale_factor;
             debug!(
-                "creating popup ({:?}) {:?} {:?} {:?} {surface_key:?} (scale: {initial_scale})",
-                window.window, parent, window.attrs.dims, surface_id
+                "creating popup ({:?}) {:?} {:?} {:?} {:?} {surface_key:?} (scale: {initial_scale})",
+                window.window, parent, window.attrs.dims, surface_id, xdg_surface.id()
             );
 
             let positioner = self.xdg_wm_base.create_positioner(&self.qh, ());
