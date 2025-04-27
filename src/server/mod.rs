@@ -85,15 +85,14 @@ where
 }
 
 #[derive(Default, Debug)]
-pub struct WindowAttributes {
-    pub override_redirect: bool,
-    pub popup_for: Option<x::Window>,
-    pub dims: WindowDims,
-    pub size_hints: Option<WmNormalHints>,
-    pub title: Option<WmName>,
-    pub class: Option<String>,
-    pub group: Option<x::Window>,
-    pub decorations: Option<Decorations>,
+struct WindowAttributes {
+    is_popup: bool,
+    dims: WindowDims,
+    size_hints: Option<WmNormalHints>,
+    title: Option<WmName>,
+    class: Option<String>,
+    group: Option<x::Window>,
+    decorations: Option<Decorations>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
@@ -119,7 +118,6 @@ impl WindowData {
         window: x::Window,
         override_redirect: bool,
         dims: WindowDims,
-        parent: Option<x::Window>,
         activation_token: Option<String>,
     ) -> Self {
         Self {
@@ -128,9 +126,8 @@ impl WindowData {
             surface_serial: None,
             mapped: false,
             attrs: WindowAttributes {
-                override_redirect,
+                is_popup: override_redirect,
                 dims,
-                popup_for: parent,
                 ..Default::default()
             },
             output_offset: WindowOutputOffset::default(),
@@ -643,7 +640,6 @@ impl<C: XConnection> ServerState<C> {
         window: x::Window,
         override_redirect: bool,
         dims: WindowDims,
-        parent: Option<x::Window>,
         pid: Option<u32>,
     ) {
         let activation_token = pid
@@ -657,8 +653,17 @@ impl<C: XConnection> ServerState<C> {
             });
         self.windows.insert(
             window,
-            WindowData::new(window, override_redirect, dims, parent, activation_token),
+            WindowData::new(window, override_redirect, dims, activation_token),
         );
+    }
+
+    pub fn set_popup(&mut self, window: x::Window) {
+        let Some(win) = self.windows.get_mut(&window) else {
+            debug!("not setting popup for unknown window {window:?}");
+            return;
+        };
+
+        win.attrs.is_popup = true;
     }
 
     pub fn set_win_title(&mut self, window: x::Window, name: WmName) {
@@ -798,7 +803,7 @@ impl<C: XConnection> ServerState<C> {
             return true;
         };
 
-        !win.mapped || win.attrs.override_redirect
+        !win.mapped || win.attrs.is_popup
     }
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
@@ -1149,13 +1154,7 @@ impl<C: XConnection> ServerState<C> {
     }
 
     fn create_role_window(&mut self, window: x::Window, surface_key: ObjectKey) {
-        // Temporarily remove surface to placate borrow checker
-        let mut surface: SurfaceData = self.objects[surface_key]
-            .0
-            .take()
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let surface: &mut SurfaceData = self.objects.get_mut(surface_key).unwrap().as_mut();
         surface.window = Some(window);
         surface.client.attach(None, 0, 0);
         surface.client.commit();
@@ -1164,77 +1163,28 @@ impl<C: XConnection> ServerState<C> {
             .xdg_wm_base
             .get_xdg_surface(&surface.client, &self.qh, surface_key);
 
-        let window_data = self.windows.get_mut(&window).unwrap();
-        if window_data.attrs.override_redirect {
-            // Override redirect is hard to convert to Wayland!
-            if let Some(win) = self.last_hovered {
-                window_data.attrs.popup_for = Some(win);
-            } else if let Some(win) = self.last_focused_toplevel {
-                window_data.attrs.popup_for = Some(win);
-            }
+        let window = self.windows.get(&window).unwrap();
+        let mut popup_for = None;
+        if window.attrs.is_popup {
+            popup_for = self.last_hovered.or(self.last_focused_toplevel);
         }
 
         let mut fullscreen = false;
-        let (width, height) = (window_data.attrs.dims.width, window_data.attrs.dims.height);
+        let (width, height) = (window.attrs.dims.width, window.attrs.dims.height);
         for (key, _) in &self.output_keys {
             let output: &Output = self.objects[key].as_ref();
             if output.dimensions.width == width as i32 && output.dimensions.height == height as i32
             {
                 fullscreen = true;
-                window_data.attrs.popup_for = None;
+                popup_for = None;
             }
         }
 
-        let surface_id = surface.client.id();
-        // Reinsert surface
-        self.objects[surface_key].0 = Some(surface.into());
-        let window = self.windows.get(&window).unwrap();
-
         let initial_scale;
-        let role = if let Some(parent) = window.attrs.popup_for {
-            let parent_window = self.windows.get(&parent).unwrap();
-            let parent_surface: &SurfaceData =
-                self.objects[parent_window.surface_key.unwrap()].as_ref();
-            let parent_dims = parent_window.attrs.dims;
-
-            initial_scale = parent_surface.scale_factor;
-            debug!(
-                "creating popup ({:?}) {:?} {:?} {:?} {:?} {surface_key:?} (scale: {initial_scale})",
-                window.window, parent, window.attrs.dims, surface_id, xdg_surface.id()
-            );
-
-            let positioner = self.xdg_wm_base.create_positioner(&self.qh, ());
-            positioner.set_size(
-                1.max((window.attrs.dims.width as f64 / initial_scale) as i32),
-                1.max((window.attrs.dims.height as f64 / initial_scale) as i32),
-            );
-            let x = ((window.attrs.dims.x - parent_dims.x) as f64 / initial_scale) as i32;
-            let y = ((window.attrs.dims.y - parent_dims.y) as f64 / initial_scale) as i32;
-            positioner.set_offset(x, y);
-            positioner.set_anchor(Anchor::TopLeft);
-            positioner.set_gravity(Gravity::BottomRight);
-            positioner.set_anchor_rect(
-                0,
-                0,
-                (parent_window.attrs.dims.width as f64 / initial_scale) as i32,
-                (parent_window.attrs.dims.height as f64 / initial_scale) as i32,
-            );
-            let popup = xdg_surface.get_popup(
-                Some(&parent_surface.xdg().unwrap().surface),
-                &positioner,
-                &self.qh,
-                surface_key,
-            );
-            let popup = PopupData {
-                popup,
-                positioner,
-                xdg: XdgSurfaceData {
-                    surface: xdg_surface,
-                    configured: false,
-                    pending: None,
-                },
-            };
-            SurfaceRole::Popup(Some(popup))
+        let role = if let Some(parent) = popup_for {
+            let data;
+            (initial_scale, data) = self.create_popup(window, surface_key, xdg_surface, parent);
+            SurfaceRole::Popup(Some(data))
         } else {
             initial_scale = 1.0;
             let data = self.create_toplevel(window, surface_key, xdg_surface, fullscreen);
@@ -1328,6 +1278,64 @@ impl<C: XConnection> ServerState<C> {
             fullscreen: false,
             decoration,
         }
+    }
+
+    fn create_popup(
+        &self,
+        window: &WindowData,
+        surface_key: ObjectKey,
+        xdg: XdgSurface,
+        parent: x::Window,
+    ) -> (f64, PopupData) {
+        let parent_window = self.windows.get(&parent).unwrap();
+        let parent_surface: &SurfaceData =
+            self.objects[parent_window.surface_key.unwrap()].as_ref();
+        let parent_dims = parent_window.attrs.dims;
+        let initial_scale = parent_surface.scale_factor;
+
+        debug!(
+            "creating popup ({:?}) {:?} {:?} {:?} {surface_key:?} (scale: {initial_scale})",
+            window.window,
+            parent,
+            window.attrs.dims,
+            xdg.id()
+        );
+
+        let positioner = self.xdg_wm_base.create_positioner(&self.qh, ());
+        positioner.set_size(
+            1.max((window.attrs.dims.width as f64 / initial_scale) as i32),
+            1.max((window.attrs.dims.height as f64 / initial_scale) as i32),
+        );
+        let x = ((window.attrs.dims.x - parent_dims.x) as f64 / initial_scale) as i32;
+        let y = ((window.attrs.dims.y - parent_dims.y) as f64 / initial_scale) as i32;
+        positioner.set_offset(x, y);
+        positioner.set_anchor(Anchor::TopLeft);
+        positioner.set_gravity(Gravity::BottomRight);
+        positioner.set_anchor_rect(
+            0,
+            0,
+            (parent_window.attrs.dims.width as f64 / initial_scale) as i32,
+            (parent_window.attrs.dims.height as f64 / initial_scale) as i32,
+        );
+        let popup = xdg.get_popup(
+            Some(&parent_surface.xdg().unwrap().surface),
+            &positioner,
+            &self.qh,
+            surface_key,
+        );
+
+        (
+            initial_scale,
+            PopupData {
+                popup,
+                positioner,
+                xdg: XdgSurfaceData {
+                    surface: xdg,
+                    configured: false,
+                    pending: None,
+                },
+            },
+        )
     }
 
     fn get_server_surface_from_client(

@@ -572,17 +572,11 @@ impl TestFixture {
             .insert(window, data);
     }
 
-    fn new_window(
-        &mut self,
-        window: Window,
-        override_redirect: bool,
-        data: WindowData,
-        parent: Option<Window>,
-    ) {
+    fn new_window(&mut self, window: Window, override_redirect: bool, data: WindowData) {
         let dims = data.dims;
         self.register_window(window, data);
         self.satellite
-            .new_window(window, override_redirect, dims, parent, None);
+            .new_window(window, override_redirect, dims, None);
     }
 
     fn map_window(
@@ -654,7 +648,7 @@ impl TestFixture {
             fullscreen: false,
         };
 
-        self.new_window(window, false, data, None);
+        self.new_window(window, false, data);
         self.map_window(comp, window, &surface.obj, &buffer);
         self.run();
         let id = self.check_new_surface();
@@ -724,7 +718,7 @@ impl TestFixture {
             dims,
             fullscreen: false,
         };
-        self.new_window(window, true, data, None);
+        self.new_window(window, true, data);
         self.map_window(comp, window, &surface.obj, &buffer);
         self.run();
 
@@ -1093,7 +1087,7 @@ fn override_redirect_window_after_toplevel_close() {
 
     let win2 = unsafe { Window::new(2) };
     let (buffer, surface) = comp.create_surface();
-    f.new_window(win2, true, WindowData::default(), None);
+    f.new_window(win2, true, WindowData::default());
     f.map_window(&comp, win2, &surface.obj, &buffer);
     let second = f.check_new_surface();
     let data = f.testwl.get_surface_data(second).unwrap();
@@ -1194,7 +1188,6 @@ fn window_group_properties() {
             ..Default::default()
         },
         None,
-        None,
     );
     f.satellite
         .set_win_title(prop_win, WmName::WmName("window".into()));
@@ -1214,7 +1207,7 @@ fn window_group_properties() {
     let (_, surface) = comp.create_surface();
     let dims = data.dims;
     f.register_window(win, data);
-    f.satellite.new_window(win, false, dims, None, None);
+    f.satellite.new_window(win, false, dims, None);
     f.satellite.set_win_hints(
         win,
         super::WmHints {
@@ -1415,7 +1408,6 @@ fn override_redirect_choose_hover_window() {
             },
             ..Default::default()
         },
-        None,
     );
     f.map_window(&comp, win3, &surface.obj, &buffer);
     f.run();
@@ -1765,7 +1757,7 @@ fn fullscreen_heuristic() {
             },
             fullscreen: false,
         };
-        f.new_window(window, override_redirect, data, None);
+        f.new_window(window, override_redirect, data);
         f.map_window(&comp, window, &surface.obj, &buffer);
         f.run();
         let id = f.check_new_surface();
@@ -2097,7 +2089,7 @@ fn toplevel_size_limits_scaled() {
         },
         fullscreen: false,
     };
-    f.new_window(window, false, data, None);
+    f.new_window(window, false, data);
     f.satellite.set_size_hints(
         window,
         super::WmNormalHints {

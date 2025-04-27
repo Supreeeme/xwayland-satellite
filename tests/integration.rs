@@ -301,6 +301,9 @@ xcb::atoms_struct! {
         wm_protocols => b"WM_PROTOCOLS",
         net_active_window => b"_NET_ACTIVE_WINDOW",
         wm_delete_window => b"WM_DELETE_WINDOW",
+        net_wm_state => b"_NET_WM_STATE",
+        skip_taskbar => b"_NET_WM_STATE_SKIP_TASKBAR",
+        transient_for => b"WM_TRANSIENT_FOR",
         clipboard => b"CLIPBOARD",
         targets => b"TARGETS",
         multiple => b"MULTIPLE",
@@ -1641,4 +1644,22 @@ fn forced_1x_scale_consistent_x11_size() {
     assert_eq!(reply.dst_y(), 60);
     assert_eq!(geo.width(), 30);
     assert_eq!(geo.height(), 30);
+}
+
+#[test]
+fn popup_properties() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let win_toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut connection, win_toplevel);
+
+    let win_popup_dialog = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        win_popup_dialog,
+        x::ATOM_ATOM,
+        connection.atoms.net_wm_state,
+        &[connection.atoms.skip_taskbar],
+    );
+    f.map_as_popup(&mut connection, win_popup_dialog);
 }

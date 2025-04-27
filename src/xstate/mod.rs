@@ -2,7 +2,7 @@ mod selection;
 use selection::{Selection, SelectionData};
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
 
-use crate::{server::WindowAttributes, XConnection};
+use crate::XConnection;
 use bitflags::bitflags;
 use log::{debug, trace, warn};
 use std::collections::HashMap;
@@ -301,33 +301,39 @@ impl XState {
             match event {
                 xcb::Event::X(x::Event::CreateNotify(e)) => {
                     debug!("new window: {:?}", e);
-                    let parent = e.parent();
-                    let parent = if parent.is_none() || parent == self.root {
-                        None
-                    } else {
-                        Some(parent)
-                    };
                     server_state.new_window(
                         e.window(),
                         e.override_redirect(),
                         (&e).into(),
-                        parent,
                         self.get_pid(e.window()),
                     );
                 }
                 xcb::Event::X(x::Event::ReparentNotify(e)) => {
                     debug!("reparent event: {e:?}");
                     if e.parent() == self.root {
+                        let geometry = self.connection.send_request(&x::GetGeometry {
+                            drawable: x::Drawable::Window(e.window()),
+                        });
+                        let attrs = self
+                            .connection
+                            .send_request(&x::GetWindowAttributes { window: e.window() });
+                        let geometry = unwrap_or_skip_bad_window_cont!(self
+                            .connection
+                            .wait_for_reply(geometry));
                         let attrs =
-                            unwrap_or_skip_bad_window_cont!(self.get_window_attributes(e.window()));
+                            unwrap_or_skip_bad_window_cont!(self.connection.wait_for_reply(attrs));
+
                         server_state.new_window(
                             e.window(),
-                            attrs.override_redirect,
-                            attrs.dims,
-                            None,
+                            attrs.override_redirect(),
+                            WindowDims {
+                                x: geometry.x(),
+                                y: geometry.y(),
+                                width: geometry.width(),
+                                height: geometry.height(),
+                            },
                             self.get_pid(e.window()),
                         );
-                        self.handle_window_attributes(server_state, e.window(), attrs);
                     } else {
                         debug!("destroying window since its parent is no longer root!");
                         server_state.destroy_window(e.window());
@@ -347,9 +353,9 @@ impl XState {
                             value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
                         }
                     ));
-                    let attrs =
-                        unwrap_or_skip_bad_window_cont!(self.get_window_attributes(e.window()));
-                    self.handle_window_attributes(server_state, e.window(), attrs);
+                    unwrap_or_skip_bad_window_cont!(
+                        self.handle_window_properties(server_state, e.window())
+                    );
                     server_state.map_window(e.window());
                 }
                 xcb::Event::X(x::Event::ConfigureNotify(e)) => {
@@ -484,68 +490,49 @@ impl XState {
         }
     }
 
-    fn get_window_attributes(&self, window: x::Window) -> XResult<WindowAttributes> {
-        let geometry = self.connection.send_request(&x::GetGeometry {
-            drawable: x::Drawable::Window(window),
-        });
-        let attrs = self
-            .connection
-            .send_request(&x::GetWindowAttributes { window });
-
+    fn handle_window_properties(
+        &self,
+        server_state: &mut super::RealServerState,
+        window: x::Window,
+    ) -> XResult<()> {
         let name = self.get_net_wm_name(window);
         let class = self.get_wm_class(window);
-        let wm_hints = self.get_wm_hints(window);
         let size_hints = self.get_wm_size_hints(window);
         let motif_wm_hints = self.get_motif_wm_hints(window);
+        let window_state = PropertyCookieWrapper {
+            connection: &self.connection,
+            cookie: self.get_property_cookie(window, self.atoms.net_wm_state, x::ATOM_ATOM, 10),
+            resolver: |reply: x::GetPropertyReply| reply.value::<x::Atom>().to_vec(),
+        };
 
-        let geometry = self.connection.wait_for_reply(geometry)?;
-        debug!("{window:?} geometry: {geometry:?}");
-        let attrs = self.connection.wait_for_reply(attrs)?;
         let mut title = name.resolve()?;
         if title.is_none() {
             title = self.get_wm_name(window).resolve()?;
         }
 
-        let class = class.resolve()?;
-        let wm_hints = wm_hints.resolve()?;
-        let size_hints = size_hints.resolve()?;
-        let motif_wm_hints = motif_wm_hints.resolve()?;
-
-        Ok(WindowAttributes {
-            override_redirect: attrs.override_redirect(),
-            popup_for: None,
-            dims: WindowDims {
-                x: geometry.x(),
-                y: geometry.y(),
-                width: geometry.width(),
-                height: geometry.height(),
-            },
-            title,
-            class,
-            group: wm_hints.and_then(|h| h.window_group),
-            size_hints,
-            decorations: motif_wm_hints.and_then(|h| h.decorations),
-        })
-    }
-
-    fn handle_window_attributes(
-        &self,
-        server_state: &mut super::RealServerState,
-        window: x::Window,
-        attrs: WindowAttributes,
-    ) {
-        if let Some(name) = attrs.title {
+        if let Some(name) = title {
             server_state.set_win_title(window, name);
         }
-        if let Some(class) = attrs.class {
+        if let Some(class) = class.resolve()? {
             server_state.set_win_class(window, class);
         }
-        if let Some(hints) = attrs.size_hints {
+        if let Some(hints) = size_hints.resolve()? {
             server_state.set_size_hints(window, hints);
         }
-        if let Some(decorations) = attrs.decorations {
+        if let Some(decorations) = motif_wm_hints.resolve()?.and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
         }
+
+        let mut is_popup = false;
+        if let Some(states) = window_state.resolve()? {
+            is_popup = states.contains(&self.atoms.skip_taskbar);
+        }
+
+        if is_popup {
+            server_state.set_popup(window);
+        }
+
+        Ok(())
     }
 
     fn get_property_cookie(
@@ -787,6 +774,7 @@ xcb::atoms_struct! {
         wm_pid => b"_NET_WM_PID" only_if_exists = false,
         net_wm_state => b"_NET_WM_STATE" only_if_exists = false,
         wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
+        skip_taskbar => b"_NET_WM_STATE_SKIP_TASKBAR" only_if_exists = false,
         active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
         supported => b"_NET_SUPPORTED" only_if_exists = false,
@@ -803,12 +791,13 @@ xcb::atoms_struct! {
 }
 
 xcb::atoms_struct! {
-    pub struct WindowTypes {
-        pub normal => b"_NET_WM_WINDOW_TYPE_NORMAL" only_if_exists = false,
-        pub dialog => b"_NET_WM_WINDOW_TYPE_DIALOG" only_if_exists = false,
-        pub splash => b"_NET_WM_WINDOW_TYPE_SPLASH" only_if_exists = false,
-        pub menu => b"_NET_WM_WINDOW_TYPE_MENU" only_if_exists = false,
-        pub utility => b"_NET_WM_WINDOW_TYPE_UTILITY" only_if_exists = false,
+    struct WindowTypes {
+        ty => b"_NET_WM_WINDOW_TYPE" only_if_exists = false,
+        normal => b"_NET_WM_WINDOW_TYPE_NORMAL" only_if_exists = false,
+        dialog => b"_NET_WM_WINDOW_TYPE_DIALOG" only_if_exists = false,
+        splash => b"_NET_WM_WINDOW_TYPE_SPLASH" only_if_exists = false,
+        menu => b"_NET_WM_WINDOW_TYPE_MENU" only_if_exists = false,
+        utility => b"_NET_WM_WINDOW_TYPE_UTILITY" only_if_exists = false,
     }
 }
 
