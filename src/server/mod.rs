@@ -655,9 +655,6 @@ impl<C: XConnection> ServerState<C> {
                     .find_map(|line| line.strip_prefix(b"XDG_ACTIVATION_TOKEN="))
                     .and_then(|token| String::from_utf8(token.to_vec()).ok())
             });
-        if activation_token.is_none() {
-            self.activate_window(window);
-        }
         self.windows.insert(
             window,
             WindowData::new(window, override_redirect, dims, parent, activation_token),
