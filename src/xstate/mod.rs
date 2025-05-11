@@ -250,7 +250,12 @@ impl XState {
         self.set_root_property(
             self.atoms.supported,
             x::ATOM_ATOM,
-            &[self.atoms.active_win, self.atoms.motif_wm_hints],
+            &[
+                self.atoms.active_win,
+                self.atoms.motif_wm_hints,
+                self.atoms.net_wm_state,
+                self.atoms.wm_fullscreen,
+            ],
         );
 
         self.connection
