@@ -125,7 +125,7 @@ impl SurfaceData {
         output_name
     }
 
-    fn update_viewport(&self, dims: WindowDims, size_hints: Option<WmNormalHints>) {
+    pub(super) fn update_viewport(&self, dims: WindowDims, size_hints: Option<WmNormalHints>) {
         let width = (dims.width as f64 / self.scale_factor) as i32;
         let height = (dims.height as f64 / self.scale_factor) as i32;
         if width > 0 && height > 0 {

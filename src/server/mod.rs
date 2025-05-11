@@ -798,8 +798,8 @@ impl<C: XConnection> ServerState<C> {
         win.surface_serial = Some(serial);
     }
 
-    pub fn can_reconfigure_window(&mut self, window: x::Window) -> bool {
-        let Some(win) = self.windows.get_mut(&window) else {
+    pub fn can_change_position(&self, window: x::Window) -> bool {
+        let Some(win) = self.windows.get(&window) else {
             return true;
         };
 
@@ -850,6 +850,11 @@ impl<C: XConnection> ServerState<C> {
                     (event.height() as f64 / data.scale_factor) as i32,
                 );
                 popup.popup.reposition(&popup.positioner, 0);
+            }
+            Some(SurfaceRole::Toplevel(Some(_))) => {
+                win.attrs.dims.width = dims.width;
+                win.attrs.dims.height = dims.height;
+                data.update_viewport(win.attrs.dims, win.attrs.size_hints);
             }
             other => warn!("Non popup ({other:?}) being reconfigured, behavior may be off."),
         }

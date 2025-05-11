@@ -407,20 +407,18 @@ impl XState {
                     self.handle_property_change(e, server_state);
                 }
                 xcb::Event::X(x::Event::ConfigureRequest(e)) => {
-                    if !server_state.can_reconfigure_window(e.window()) {
-                        debug!("ignoring reconfigure request for {:?}", e.window());
-                        continue;
-                    }
                     debug!("{:?} request: {:?}", e.window(), e.value_mask());
 
                     let mut list = Vec::new();
                     let mask = e.value_mask();
 
-                    if mask.contains(x::ConfigWindowMask::X) {
-                        list.push(x::ConfigWindow::X(e.x().into()));
-                    }
-                    if mask.contains(x::ConfigWindowMask::Y) {
-                        list.push(x::ConfigWindow::Y(e.y().into()));
+                    if server_state.can_change_position(e.window()) {
+                        if mask.contains(x::ConfigWindowMask::X) {
+                            list.push(x::ConfigWindow::X(e.x().into()));
+                        }
+                        if mask.contains(x::ConfigWindowMask::Y) {
+                            list.push(x::ConfigWindow::Y(e.y().into()));
+                        }
                     }
                     if mask.contains(x::ConfigWindowMask::WIDTH) {
                         list.push(x::ConfigWindow::Width(e.width().into()));

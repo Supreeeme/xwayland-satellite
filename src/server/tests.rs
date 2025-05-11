@@ -1574,17 +1574,27 @@ fn reposition_popup() {
 }
 
 #[test]
-fn ignore_toplevel_reconfigure() {
+fn toplevel_reconfigure() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     let toplevel = unsafe { Window::new(1) };
-    let _ = f.create_toplevel(&comp, toplevel);
+    let (_, surface) = f.create_toplevel(&comp, toplevel);
+
+    {
+        let data = f
+            .testwl
+            .get_surface_data(surface)
+            .expect("Missing surface data");
+        let viewport = data.viewport.as_ref().expect("Missing viewport");
+        assert_eq!(viewport.width, 100);
+        assert_eq!(viewport.height, 100);
+    }
 
     f.satellite.reconfigure_window(x::ConfigureNotifyEvent::new(
         toplevel,
         toplevel,
         x::WINDOW_NONE,
-        40,  // x
-        60,  // y
+        0,   // x
+        0,   // y
         80,  // width
         100, // height
         0,
@@ -1592,16 +1602,13 @@ fn ignore_toplevel_reconfigure() {
     ));
 
     f.run();
-    let win_data = &f.connection().windows[&toplevel];
-    assert_eq!(
-        win_data.dims,
-        WindowDims {
-            x: 0,
-            y: 0,
-            width: 100,
-            height: 100
-        }
-    );
+    let data = f
+        .testwl
+        .get_surface_data(surface)
+        .expect("Missing surface data");
+    let viewport = data.viewport.as_ref().expect("Missing viewport");
+    assert_eq!(viewport.width, 80);
+    assert_eq!(viewport.height, 100);
 }
 
 type EventMatcher<'a, Event> = Box<dyn FnMut(&Event) -> bool + 'a>;
