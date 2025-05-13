@@ -137,6 +137,7 @@ pub enum SurfaceRole {
 pub struct Toplevel {
     pub xdg: XdgSurfaceData,
     pub toplevel: XdgToplevel,
+    pub parent: Option<XdgToplevel>,
     pub min_size: Option<Vec2>,
     pub max_size: Option<Vec2>,
     pub states: Vec<xdg_toplevel::State>,
@@ -1224,6 +1225,13 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                 };
                 toplevel.app_id = app_id.into();
             }
+            xdg_toplevel::Request::SetParent { parent } => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
+                    unreachable!();
+                };
+                toplevel.parent = parent;
+            }
             other => todo!("unhandled request {other:?}"),
         }
     }
@@ -1247,6 +1255,7 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                 let t = Toplevel {
                     xdg: XdgSurfaceData::new(resource.clone()),
                     toplevel,
+                    parent: None,
                     min_size: None,
                     max_size: None,
                     states: Vec::new(),

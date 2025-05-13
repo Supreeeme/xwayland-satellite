@@ -93,6 +93,7 @@ struct WindowAttributes {
     class: Option<String>,
     group: Option<x::Window>,
     decorations: Option<Decorations>,
+    transient_for: Option<x::Window>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
@@ -930,6 +931,14 @@ impl<C: XConnection> ServerState<C> {
         }
     }
 
+    pub fn set_transient_for(&mut self, window: x::Window, parent: x::Window) {
+        let Some(win) = self.windows.get_mut(&window) else {
+            return;
+        };
+
+        win.attrs.transient_for = Some(parent);
+    }
+
     pub fn activate_window(&mut self, window: x::Window) {
         let Some(activation_state) = self.activation_state.as_ref() else {
             return;
@@ -1168,14 +1177,16 @@ impl<C: XConnection> ServerState<C> {
             .xdg_wm_base
             .get_xdg_surface(&surface.client, &self.qh, surface_key);
 
-        let window = self.windows.get(&window).unwrap();
+        // Temporarily remove to placate borrow checker
+        let window_data = self.windows.remove(&window).unwrap();
+
         let mut popup_for = None;
-        if window.attrs.is_popup {
+        if window_data.attrs.is_popup {
             popup_for = self.last_hovered.or(self.last_focused_toplevel);
         }
 
         let mut fullscreen = false;
-        let (width, height) = (window.attrs.dims.width, window.attrs.dims.height);
+        let (width, height) = (window_data.attrs.dims.width, window_data.attrs.dims.height);
         for (key, _) in &self.output_keys {
             let output: &Output = self.objects[key].as_ref();
             if output.dimensions.width == width as i32 && output.dimensions.height == height as i32
@@ -1188,11 +1199,12 @@ impl<C: XConnection> ServerState<C> {
         let initial_scale;
         let role = if let Some(parent) = popup_for {
             let data;
-            (initial_scale, data) = self.create_popup(window, surface_key, xdg_surface, parent);
+            (initial_scale, data) =
+                self.create_popup(&window_data, surface_key, xdg_surface, parent);
             SurfaceRole::Popup(Some(data))
         } else {
             initial_scale = 1.0;
-            let data = self.create_toplevel(window, surface_key, xdg_surface, fullscreen);
+            let data = self.create_toplevel(&window_data, surface_key, xdg_surface, fullscreen);
             SurfaceRole::Toplevel(Some(data))
         };
 
@@ -1206,15 +1218,17 @@ impl<C: XConnection> ServerState<C> {
             assert_eq!(
                 new_role_type, old_role_type,
                 "Surface for {:?} already had a role: {:?}",
-                window.window, role
+                window_data.window, role
             );
         }
 
         surface.client.commit();
+        // Reinsert
+        self.windows.insert(window, window_data);
     }
 
     fn create_toplevel(
-        &self,
+        &mut self,
         window: &WindowData,
         surface_key: ObjectKey,
         xdg: XdgSurface,
@@ -1271,6 +1285,37 @@ impl<C: XConnection> ServerState<C> {
             window.activation_token.clone(),
         ) {
             activation_state.activate::<Self>(&surface.client, token);
+        }
+
+        if let Some(parent) = window.attrs.transient_for {
+            // TODO: handle transient_for window not being mapped/not a toplevel
+            'b: {
+                let Some(parent_data) = self.windows.get_mut(&parent) else {
+                    warn!(
+                        "Window {:?} is marked transient for unknown window {:?}",
+                        window.window, parent
+                    );
+                    break 'b;
+                };
+
+                let Some(key) = parent_data.surface_key else {
+                    warn!("Parent window {parent:?} missing surface key.");
+                    break 'b;
+                };
+
+                let Some::<&SurfaceData>(surface) = self.objects.get(key).map(|o| o.as_ref())
+                else {
+                    warn!("Parent window {parent:?} surface is stale");
+                    break 'b;
+                };
+
+                let Some(SurfaceRole::Toplevel(Some(parent_toplevel))) = &surface.role else {
+                    warn!("Surface {:?} (for window {parent:?}) was not an active toplevel, not setting as parent", surface.client.id());
+                    break 'b;
+                };
+
+                toplevel.set_parent(Some(&parent_toplevel.toplevel));
+            }
         }
 
         ToplevelData {

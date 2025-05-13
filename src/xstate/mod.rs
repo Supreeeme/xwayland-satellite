@@ -533,10 +533,14 @@ impl XState {
                 1,
                 |reply: x::GetPropertyReply| reply.value::<x::Window>().first().copied(),
             )
-            .resolve()?;
+            .resolve()?
+            .flatten();
 
         let is_popup = self.guess_is_popup(window, motif_hints, transient_for.is_some())?;
         server_state.set_popup(window, is_popup);
+        if let Some(parent) = transient_for.and_then(|t| (!is_popup).then_some(t)) {
+            server_state.set_transient_for(window, parent);
+        }
 
         Ok(())
     }

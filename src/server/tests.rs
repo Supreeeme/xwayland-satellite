@@ -2183,6 +2183,40 @@ fn subpopup_positioning() {
     assert_eq!(dims.y, 50);
 }
 
+#[test]
+fn transient_for_toplevel() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let toplevel = unsafe { Window::new(1) };
+    let (_, toplevel_id) = f.create_toplevel(&comp, toplevel);
+
+    let sub_toplevel = unsafe { Window::new(2) };
+    let (buffer, surface) = comp.create_surface();
+    f.new_window(
+        sub_toplevel,
+        false,
+        WindowData {
+            mapped: true,
+            dims: WindowDims {
+                width: 50,
+                height: 50,
+                ..Default::default()
+            },
+            fullscreen: false,
+        },
+    );
+
+    f.satellite.set_transient_for(sub_toplevel, toplevel);
+    f.map_window(&comp, sub_toplevel, &surface.obj, &buffer);
+    f.run();
+    let id = f.check_new_surface();
+    let toplevel_data = f.testwl.get_surface_data(toplevel_id).unwrap();
+    let sub_data = f.testwl.get_surface_data(id).unwrap();
+    assert_eq!(
+        sub_data.toplevel().parent,
+        Some(toplevel_data.toplevel().toplevel.clone())
+    );
+}
+
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}
