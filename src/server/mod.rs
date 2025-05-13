@@ -657,13 +657,13 @@ impl<C: XConnection> ServerState<C> {
         );
     }
 
-    pub fn set_popup(&mut self, window: x::Window) {
+    pub fn set_popup(&mut self, window: x::Window, is_popup: bool) {
         let Some(win) = self.windows.get_mut(&window) else {
             debug!("not setting popup for unknown window {window:?}");
             return;
         };
 
-        win.attrs.is_popup = true;
+        win.attrs.is_popup = is_popup;
     }
 
     pub fn set_win_title(&mut self, window: x::Window, name: WmName) {

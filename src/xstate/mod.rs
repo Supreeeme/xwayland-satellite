@@ -107,6 +107,7 @@ impl WmName {
 pub struct XState {
     connection: Rc<xcb::Connection>,
     atoms: Atoms,
+    window_atoms: WindowTypes,
     root: x::Window,
     wm_window: x::Window,
     selection_data: SelectionData,
@@ -198,12 +199,14 @@ impl XState {
 
         let wm_window = connection.generate_id();
         let selection_data = SelectionData::new(&connection, root);
+        let window_atoms = WindowTypes::intern_all(&connection).unwrap();
 
         let mut r = Self {
             connection,
             wm_window,
             root,
             atoms,
+            window_atoms,
             selection_data,
         };
         r.create_ewmh_window();
@@ -502,12 +505,6 @@ impl XState {
         let class = self.get_wm_class(window);
         let size_hints = self.get_wm_size_hints(window);
         let motif_wm_hints = self.get_motif_wm_hints(window);
-        let window_state = PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie: self.get_property_cookie(window, self.atoms.net_wm_state, x::ATOM_ATOM, 10),
-            resolver: |reply: x::GetPropertyReply| reply.value::<x::Atom>().to_vec(),
-        };
-
         let mut title = name.resolve()?;
         if title.is_none() {
             title = self.get_wm_name(window).resolve()?;
@@ -522,20 +519,105 @@ impl XState {
         if let Some(hints) = size_hints.resolve()? {
             server_state.set_size_hints(window, hints);
         }
-        if let Some(decorations) = motif_wm_hints.resolve()?.and_then(|m| m.decorations) {
+
+        let motif_hints = motif_wm_hints.resolve()?;
+        if let Some(decorations) = motif_hints.as_ref().and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
         }
 
-        let mut is_popup = false;
-        if let Some(states) = window_state.resolve()? {
-            is_popup = states.contains(&self.atoms.skip_taskbar);
-        }
+        let transient_for = self
+            .property_cookie_wrapper(
+                window,
+                self.atoms.wm_transient_for,
+                x::ATOM_WINDOW,
+                1,
+                |reply: x::GetPropertyReply| reply.value::<x::Window>().first().copied(),
+            )
+            .resolve()?;
 
-        if is_popup {
-            server_state.set_popup(window);
-        }
+        let is_popup = self.guess_is_popup(window, motif_hints, transient_for.is_some())?;
+        server_state.set_popup(window, is_popup);
 
         Ok(())
+    }
+
+    fn property_cookie_wrapper<F: PropertyResolver>(
+        &self,
+        window: x::Window,
+        property: x::Atom,
+        ty: x::Atom,
+        len: u32,
+        resolver: F,
+    ) -> PropertyCookieWrapper<F> {
+        PropertyCookieWrapper {
+            connection: &self.connection,
+            cookie: self.get_property_cookie(window, property, ty, len),
+            resolver,
+        }
+    }
+
+    fn guess_is_popup(
+        &self,
+        window: x::Window,
+        motif_hints: Option<motif::Hints>,
+        has_transient_for: bool,
+    ) -> XResult<bool> {
+        if let Some(hints) = motif_hints {
+            // If the motif hints indicate the user shouldn't be able to do anything
+            // to the window at all, it stands to reason it's probably a popup.
+            if hints.functions.is_some_and(|f| f.is_empty()) {
+                return Ok(true);
+            }
+        }
+
+        let attrs = self
+            .connection
+            .send_request(&x::GetWindowAttributes { window });
+
+        let atoms_vec = |reply: x::GetPropertyReply| reply.value::<x::Atom>().to_vec();
+        let window_types =
+            self.property_cookie_wrapper(window, self.window_atoms.ty, x::ATOM_ATOM, 10, atoms_vec);
+        let window_state = self.property_cookie_wrapper(
+            window,
+            self.atoms.net_wm_state,
+            x::ATOM_ATOM,
+            10,
+            atoms_vec,
+        );
+
+        let override_redirect = self.connection.wait_for_reply(attrs)?.override_redirect();
+        let mut is_popup = override_redirect;
+
+        let window_types = window_types.resolve()?.unwrap_or_else(|| {
+            if !override_redirect && has_transient_for {
+                vec![self.window_atoms.dialog]
+            } else {
+                vec![self.window_atoms.normal]
+            }
+        });
+
+        let mut known_window_type = false;
+        for ty in window_types {
+            match ty {
+                x if x == self.window_atoms.normal || x == self.window_atoms.dialog => {
+                    is_popup = override_redirect;
+                }
+                _ => {
+                    continue;
+                }
+            }
+
+            known_window_type = true;
+            break;
+        }
+
+        if !known_window_type {
+            if let Some(states) = window_state.resolve()? {
+                is_popup = states.contains(&self.atoms.skip_taskbar);
+            }
+        }
+
+        Ok(is_popup)
     }
 
     fn get_property_cookie(
@@ -664,7 +746,7 @@ impl XState {
     fn get_motif_wm_hints(
         &self,
         window: x::Window,
-    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = MotifWmHints>> {
+    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = motif::Hints>> {
         let cookie = self.get_property_cookie(
             window,
             self.atoms.motif_wm_hints,
@@ -673,7 +755,7 @@ impl XState {
         );
         let resolver = |reply: x::GetPropertyReply| {
             let data: &[u32] = reply.value();
-            MotifWmHints::from(data)
+            motif::Hints::from(data)
         };
 
         PropertyCookieWrapper {
@@ -828,12 +910,6 @@ bitflags! {
     }
 }
 
-bitflags! {
-    pub struct MotifWmHintsFlags: u32 {
-        const Decorations = 2;
-    }
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct WinSize {
     pub width: i32,
@@ -888,49 +964,80 @@ impl From<&[u32]> for WmHints {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum Decorations {
-    Client = 0,
-    Server = 1,
-}
+pub use motif::Decorations;
+mod motif {
+    use super::*;
+    // Motif WM hints are incredibly poorly documented, I could only find this header:
+    // https://www.opengroup.org/infosrv/openmotif/R2.1.30/motif/lib/Xm/MwmUtil.h
+    // and these random Perl docs:
+    // https://metacpan.org/pod/X11::Protocol::WM#_MOTIF_WM_HINTS
 
-impl TryFrom<u32> for Decorations {
-    type Error = ();
-
-    fn try_from(value: u32) -> Result<Self, ()> {
-        match value {
-            0 => Ok(Self::Client),
-            1 => Ok(Self::Server),
-            _ => Err(()),
+    bitflags! {
+        struct HintsFlags: u32 {
+            const Functions = 1;
+            const Decorations = 2;
         }
     }
-}
 
-impl From<Decorations> for zxdg_toplevel_decoration_v1::Mode {
-    fn from(value: Decorations) -> Self {
-        match value {
-            Decorations::Client => zxdg_toplevel_decoration_v1::Mode::ClientSide,
-            Decorations::Server => zxdg_toplevel_decoration_v1::Mode::ServerSide,
+    bitflags! {
+        pub(super) struct Functions: u32 {
+            const All = 1;
+            const Resize = 2;
+            const Move = 4;
+            const Minimize = 8;
+            const Maximize = 16;
+            const Close = 32;
         }
     }
-}
 
-#[derive(Default, Debug, PartialEq, Eq)]
-pub struct MotifWmHints {
-    pub decorations: Option<Decorations>,
-}
+    #[derive(Default)]
+    pub(super) struct Hints {
+        pub(super) functions: Option<Functions>,
+        pub(super) decorations: Option<Decorations>,
+    }
 
-impl From<&[u32]> for MotifWmHints {
-    fn from(value: &[u32]) -> Self {
-        let mut ret = Self::default();
+    impl From<&[u32]> for Hints {
+        fn from(value: &[u32]) -> Self {
+            let mut ret = Self::default();
 
-        let flags = MotifWmHintsFlags::from_bits_truncate(value[0]);
+            let flags = HintsFlags::from_bits_truncate(value[0]);
 
-        if flags.contains(MotifWmHintsFlags::Decorations) {
-            ret.decorations = value[2].try_into().ok();
+            if flags.contains(HintsFlags::Functions) {
+                ret.functions = Some(Functions::from_bits_truncate(value[1]));
+            }
+            if flags.contains(HintsFlags::Decorations) {
+                ret.decorations = value[2].try_into().ok();
+            }
+
+            ret
         }
+    }
 
-        ret
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    pub enum Decorations {
+        Client = 0,
+        Server = 1,
+    }
+
+    impl TryFrom<u32> for Decorations {
+        type Error = ();
+
+        fn try_from(value: u32) -> Result<Self, ()> {
+            match value {
+                0 => Ok(Self::Client),
+                1 => Ok(Self::Server),
+                _ => Err(()),
+            }
+        }
+    }
+
+    impl From<Decorations> for zxdg_toplevel_decoration_v1::Mode {
+        fn from(value: Decorations) -> Self {
+            match value {
+                Decorations::Client => zxdg_toplevel_decoration_v1::Mode::ClientSide,
+                Decorations::Server => zxdg_toplevel_decoration_v1::Mode::ServerSide,
+            }
+        }
     }
 }
 

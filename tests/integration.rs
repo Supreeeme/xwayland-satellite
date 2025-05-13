@@ -309,6 +309,8 @@ xcb::atoms_struct! {
         multiple => b"MULTIPLE",
         wm_state => b"WM_STATE",
         wm_check => b"_NET_SUPPORTING_WM_CHECK",
+        win_type => b"_NET_WM_WINDOW_TYPE",
+        win_type_normal => b"_NET_WM_WINDOW_TYPE_NORMAL",
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
         mime1 => b"text/plain" only_if_exists = false,
         mime2 => b"blah/blah" only_if_exists = false,
@@ -1647,19 +1649,52 @@ fn forced_1x_scale_consistent_x11_size() {
 }
 
 #[test]
-fn popup_properties() {
+fn popup_heuristics() {
     let mut f = Fixture::new();
     let mut connection = Connection::new(&f.display);
 
     let win_toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
     f.map_as_toplevel(&mut connection, win_toplevel);
 
-    let win_popup_dialog = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    let ghidra_popup = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
-        win_popup_dialog,
+        ghidra_popup,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_normal],
+    );
+    connection.set_property(
+        ghidra_popup,
         x::ATOM_ATOM,
         connection.atoms.net_wm_state,
         &[connection.atoms.skip_taskbar],
     );
-    f.map_as_popup(&mut connection, win_popup_dialog);
+    connection.set_property(
+        ghidra_popup,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0b11_u32, 0, 0, 0, 0],
+    );
+    f.map_as_popup(&mut connection, ghidra_popup);
+
+    let reaper_dialog = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        ghidra_popup,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_normal],
+    );
+    connection.set_property(
+        ghidra_popup,
+        x::ATOM_ATOM,
+        connection.atoms.net_wm_state,
+        &[connection.atoms.skip_taskbar],
+    );
+    connection.set_property(
+        ghidra_popup,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x2_u32, 0, 0x2a, 0, 0],
+    );
+    f.map_as_toplevel(&mut connection, reaper_dialog);
 }
