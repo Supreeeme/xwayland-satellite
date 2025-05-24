@@ -1272,6 +1272,7 @@ impl<C: XConnection> GlobalDispatch<WlOutput, Global> for ServerState<C> {
             Output::new(client, server).into()
         });
         state.output_keys.insert(key, ());
+        state.output_scales_updated = true;
     }
 }
 global_dispatch_with_events!(WlDrmServer, WlDrmClient);

@@ -822,6 +822,10 @@ impl Output {
             scale: 1,
         }
     }
+
+    pub(super) fn scale(&self) -> i32 {
+        self.scale
+    }
 }
 
 #[derive(Debug)]
@@ -1027,6 +1031,7 @@ impl Output {
 
                     self.server.scale(factor);
                 }
+                state.output_scales_updated = true;
             }
             _ => simple_event_shunt! {
                 self.server, event: Event => [

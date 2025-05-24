@@ -35,9 +35,14 @@ It will be started when the `graphical-session.target` is reached,
 which is likely after your compositor is started if it supports systemd.
 
 ## Scaling/HiDPI
-On HiDPI displays, xwayland-satellite windows may have small text. Because HiDPI on X11 is very application dependent and hard to solve,
-xwayland-satellite doesn't make an attempt to do it for you. However, the same methods that would normally work on X11 should also work
-with satellite. See [the Arch Wiki on HiDPI](https://wiki.archlinux.org/title/HiDPI) for a good place start.
+For most GTK and Qt apps, xwayland-satellite should automatically scale them properly. Note that for mixed DPI monitor setups, satellite will choose
+the smallest monitor's DPI, meaning apps may have small text on other monitors.
+
+Other miscellaneous apps (such as Wine apps) may have small text on HiDPI displays. It is application dependent on getting apps to scale properly with satellite,
+so you will have to figure out what app specific config needs to be set. See [the Arch Wiki on HiDPI](https://wiki.archlinux.org/title/HiDPI) for a good place start.
+
+Satellite acts as an Xsettings manager for setting scaling related settings, but will get out of the way of other Xsettings managers.
+To manually set these settings, try [xsettingsd](https://codeberg.org/derat/xsettingsd) or another Xsettings manager.
 
 ## Wayland protocols used
 The host compositor **must** implement the following protocols/interfaces for satellite to function:

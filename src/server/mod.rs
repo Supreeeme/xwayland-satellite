@@ -522,6 +522,8 @@ pub struct ServerState<C: XConnection> {
     activation_state: Option<ActivationState>,
     global_output_offset: GlobalOutputOffset,
     global_offset_updated: bool,
+    output_scales_updated: bool,
+    new_scale: Option<i32>,
     decoration_manager: Option<ZxdgDecorationManagerV1>,
 }
 
@@ -611,6 +613,8 @@ impl<C: XConnection> ServerState<C> {
                 },
             },
             global_offset_updated: false,
+            output_scales_updated: false,
+            new_scale: None,
             decoration_manager,
         }
     }
@@ -1058,6 +1062,42 @@ impl<C: XConnection> ServerState<C> {
             self.global_offset_updated = false;
         }
 
+        if self.output_scales_updated {
+            let mut mixed_scale = false;
+            let mut scale;
+
+            'b: {
+                let mut keys_iter = self.output_keys.iter();
+                let (key, _) = keys_iter.next().unwrap();
+                let Some::<&Output>(output) = &mut self.objects.get(key).map(AsRef::as_ref) else {
+                    // This should never happen, but you never know...
+                    break 'b;
+                };
+
+                scale = output.scale();
+
+                for (key, _) in keys_iter {
+                    let Some::<&Output>(output) = self.objects.get(key).map(AsRef::as_ref) else {
+                        continue;
+                    };
+
+                    if output.scale() != scale {
+                        mixed_scale = true;
+                        scale = scale.min(output.scale());
+                    }
+                }
+
+                if mixed_scale {
+                    warn!("Mixed output scales detected, choosing to give apps the smallest detected scale ({scale}x)");
+                }
+
+                debug!("Using new scale {scale}");
+                self.new_scale = Some(scale);
+            }
+
+            self.output_scales_updated = false;
+        }
+
         {
             if let Some(FocusData {
                 window,
@@ -1081,6 +1121,10 @@ impl<C: XConnection> ServerState<C> {
             .queue
             .flush()
             .expect("Failed flushing clientside events");
+    }
+
+    pub fn new_global_scale(&mut self) -> Option<i32> {
+        self.new_scale.take()
     }
 
     pub fn new_selection(&mut self) -> Option<ForeignSelection> {

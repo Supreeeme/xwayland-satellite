@@ -196,6 +196,10 @@ pub fn main(data: impl RunData) -> Option<()> {
             if let Some(sel) = server_state.new_selection() {
                 xstate.set_clipboard(sel);
             }
+
+            if let Some(scale) = server_state.new_global_scale() {
+                xstate.update_global_scale(scale);
+            }
         }
     }
 }

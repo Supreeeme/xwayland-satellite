@@ -1,5 +1,6 @@
 use rustix::event::{poll, PollFd, PollFlags};
 use rustix::process::{Pid, Signal, WaitOptions};
+use std::collections::HashMap;
 use std::io::Write;
 use std::mem::ManuallyDrop;
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -178,6 +179,7 @@ impl Fixture {
     #[track_caller]
     fn wait_and_dispatch(&mut self) {
         let mut pollfd = [self.pollfd.clone()];
+        self.testwl.dispatch();
         assert!(
             poll(&mut pollfd, 50).unwrap() > 0,
             "Did not receive any events"
@@ -315,6 +317,8 @@ xcb::atoms_struct! {
         mime1 => b"text/plain" only_if_exists = false,
         mime2 => b"blah/blah" only_if_exists = false,
         incr => b"INCR",
+        xsettings => b"_XSETTINGS_S0",
+        xsettings_setting => b"_XSETTINGS_SETTINGS",
     }
 }
 
@@ -1697,4 +1701,194 @@ fn popup_heuristics() {
         &[0x2_u32, 0, 0x2a, 0, 0],
     );
     f.map_as_toplevel(&mut connection, reaper_dialog);
+}
+
+#[test]
+fn xsettings_scale() {
+    let mut f = Fixture::new_preset(|testwl| {
+        testwl.new_output(0, 0); // WL-1
+    });
+    let connection = Connection::new(&f.display);
+    f.testwl.enable_xdg_output_manager();
+
+    struct Settings {
+        serial: u32,
+        data: HashMap<String, Setting>,
+    }
+    struct Setting {
+        value: i32,
+        last_change: u32,
+    }
+
+    let owner = connection
+        .get_reply(&x::GetSelectionOwner {
+            selection: connection.atoms.xsettings,
+        })
+        .owner();
+
+    let get_settings = || -> Settings {
+        let reply = connection.get_reply(&x::GetProperty {
+            delete: false,
+            window: owner,
+            property: connection.atoms.xsettings_setting,
+            r#type: connection.atoms.xsettings_setting,
+            long_offset: 0,
+            long_length: 60,
+        });
+        assert_eq!(reply.r#type(), connection.atoms.xsettings_setting);
+
+        let data = reply.value::<u8>();
+
+        let byte_order = data[0];
+        assert_eq!(byte_order, 0);
+        let serial = u32::from_le_bytes(data[4..8].try_into().unwrap());
+        let num_settings = u32::from_le_bytes(data[8..12].try_into().unwrap());
+
+        let mut current_idx = 12;
+        let mut settings = HashMap::new();
+        for _ in 0..num_settings {
+            assert_eq!(&data[current_idx..current_idx + 2], &[0, 0]);
+            let name_len =
+                u16::from_le_bytes(data[current_idx + 2..current_idx + 4].try_into().unwrap());
+
+            let padding_start = current_idx + 4 + name_len as usize;
+            let name = String::from_utf8(data[current_idx + 4..padding_start].to_vec()).unwrap();
+            let num_padding_bytes = (4 - (name_len as usize % 4)) % 4;
+            let data_start = padding_start + num_padding_bytes;
+            let last_change =
+                u32::from_le_bytes(data[data_start..data_start + 4].try_into().unwrap());
+            let value =
+                i32::from_le_bytes(data[data_start + 4..data_start + 8].try_into().unwrap());
+
+            settings.insert(name, Setting { value, last_change });
+            current_idx = data_start + 8;
+        }
+
+        Settings {
+            serial,
+            data: settings,
+        }
+    };
+
+    let settings = get_settings();
+    let settings_serial = settings.serial;
+    assert_eq!(settings.data["Xft/DPI"].value, 96 * 1024);
+    let dpi_serial = settings.data["Xft/DPI"].last_change;
+    assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 1);
+    let window_serial = settings.data["Gdk/WindowScalingFactor"].last_change;
+    assert_eq!(settings.data["Gdk/UnscaledDPI"].value, 96 * 1024);
+    let unscaled_serial = settings.data["Gdk/UnscaledDPI"].last_change;
+
+    let output = f.testwl.get_output("WL-1").unwrap();
+    output.scale(2);
+    output.done();
+    f.wait_and_dispatch();
+
+    let settings = get_settings();
+    assert!(settings.serial > settings_serial);
+    assert_eq!(settings.data["Xft/DPI"].value, 2 * 96 * 1024);
+    assert!(settings.data["Xft/DPI"].last_change > dpi_serial);
+    assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 2);
+    assert!(settings.data["Gdk/WindowScalingFactor"].last_change > window_serial);
+    assert_eq!(settings.data["Gdk/UnscaledDPI"].value, 96 * 1024);
+    assert_eq!(
+        settings.data["Gdk/UnscaledDPI"].last_change,
+        unscaled_serial
+    );
+
+    let output2 = f.create_output(0, 0);
+    let settings = get_settings();
+    assert_eq!(settings.data["Xft/DPI"].value, 96 * 1024);
+    assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 1);
+    assert_eq!(settings.data["Gdk/UnscaledDPI"].value, 96 * 1024);
+
+    output2.scale(2);
+    output2.done();
+    f.testwl.dispatch();
+    std::thread::sleep(Duration::from_millis(1));
+
+    let settings = get_settings();
+    assert_eq!(settings.data["Xft/DPI"].value, 2 * 96 * 1024);
+    assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 2);
+    assert_eq!(settings.data["Gdk/UnscaledDPI"].value, 96 * 1024);
+}
+
+#[test]
+fn xsettings_switch_owner() {
+    let f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let owner = connection
+        .get_reply(&x::GetSelectionOwner {
+            selection: connection.atoms.xsettings,
+        })
+        .owner();
+
+    let win = connection.generate_id();
+    connection
+        .send_and_check_request(&x::CreateWindow {
+            wid: win,
+            x: 0,
+            y: 0,
+            parent: connection.root,
+            depth: 0,
+            width: 1,
+            height: 1,
+            border_width: 0,
+            class: x::WindowClass::InputOnly,
+            visual: x::COPY_FROM_PARENT,
+            value_list: &[],
+        })
+        .unwrap();
+
+    connection
+        .send_and_check_request(&x::SetSelectionOwner {
+            owner: win,
+            selection: connection.atoms.xsettings,
+            time: x::CURRENT_TIME,
+        })
+        .unwrap();
+
+    assert_eq!(
+        connection
+            .get_reply(&x::GetSelectionOwner {
+                selection: connection.atoms.xsettings,
+            })
+            .owner(),
+        win
+    );
+
+    connection
+        .send_and_check_request(&xcb::xfixes::SelectSelectionInput {
+            window: connection.root,
+            selection: connection.atoms.xsettings,
+            event_mask: xcb::xfixes::SelectionEventMask::SET_SELECTION_OWNER
+                | xcb::xfixes::SelectionEventMask::SELECTION_WINDOW_DESTROY
+                | xcb::xfixes::SelectionEventMask::SELECTION_CLIENT_CLOSE,
+        })
+        .unwrap();
+
+    connection
+        .send_and_check_request(&x::DestroyWindow { window: win })
+        .unwrap();
+
+    match connection.await_event() {
+        xcb::Event::XFixes(xcb::xfixes::Event::SelectionNotify(x))
+            if x.subtype() == xcb::xfixes::SelectionEvent::SelectionWindowDestroy => {}
+        other => panic!("unexpected event {other:?}"),
+    }
+    match connection.await_event() {
+        xcb::Event::XFixes(xcb::xfixes::Event::SelectionNotify(x))
+            if x.subtype() == xcb::xfixes::SelectionEvent::SetSelectionOwner => {}
+        other => panic!("unexpected event {other:?}"),
+    }
+
+    assert_eq!(
+        connection
+            .get_reply(&x::GetSelectionOwner {
+                selection: connection.atoms.xsettings,
+            })
+            .owner(),
+        owner
+    );
 }

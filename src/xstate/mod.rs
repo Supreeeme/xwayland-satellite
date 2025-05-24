@@ -1,3 +1,5 @@
+mod settings;
+use settings::Settings;
 mod selection;
 use selection::{Selection, SelectionData};
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
@@ -111,6 +113,7 @@ pub struct XState {
     root: x::Window,
     wm_window: x::Window,
     selection_data: SelectionData,
+    settings: Settings,
 }
 
 impl XState {
@@ -185,6 +188,14 @@ impl XState {
                     | SelectionEventMask::SELECTION_CLIENT_CLOSE,
             })
             .unwrap();
+        connection
+            .send_and_check_request(&xcb::xfixes::SelectSelectionInput {
+                window: root,
+                selection: atoms.xsettings,
+                event_mask: SelectionEventMask::SELECTION_WINDOW_DESTROY
+                    | SelectionEventMask::SELECTION_CLIENT_CLOSE,
+            })
+            .unwrap();
         {
             // Setup default cursor theme
             let ctx = CursorContext::new(&connection, screen).unwrap();
@@ -200,6 +211,7 @@ impl XState {
         let wm_window = connection.generate_id();
         let selection_data = SelectionData::new(&connection, root);
         let window_atoms = WindowTypes::intern_all(&connection).unwrap();
+        let settings = Settings::new(&connection, &atoms, root);
 
         let mut r = Self {
             connection,
@@ -208,8 +220,10 @@ impl XState {
             atoms,
             window_atoms,
             selection_data,
+            settings,
         };
         r.create_ewmh_window();
+        r.set_xsettings_owner();
         r
     }
 
@@ -876,6 +890,8 @@ xcb::atoms_struct! {
         timestamp => b"TIMESTAMP" only_if_exists = false,
         selection_reply => b"_selection_reply" only_if_exists = false,
         incr => b"INCR" only_if_exists = false,
+        xsettings => b"_XSETTINGS_S0" only_if_exists = false,
+        xsettings_settings => b"_XSETTINGS_SETTINGS" only_if_exists = false,
     }
 }
 

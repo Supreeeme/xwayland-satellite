@@ -281,15 +281,16 @@ impl XState {
         debug!("Clipboard set from Wayland");
     }
 
-    pub(crate) fn handle_selection_event(
+    pub(super) fn handle_selection_event(
         &mut self,
         event: &xcb::Event,
         server_state: &mut RealServerState,
     ) -> bool {
         match event {
-            // Someone else took the clipboard owner
             xcb::Event::X(x::Event::SelectionClear(e)) => {
-                self.handle_new_selection_owner(e.owner(), e.time());
+                if e.selection() == self.atoms.clipboard {
+                    self.handle_new_selection_owner(e.owner(), e.time());
+                }
             }
             xcb::Event::X(x::Event::SelectionNotify(e)) => {
                 if e.property() == x::ATOM_NONE {
@@ -414,9 +415,8 @@ impl XState {
                 }
             }
 
-            xcb::Event::XFixes(xcb::xfixes::Event::SelectionNotify(e)) => {
-                assert_eq!(e.selection(), self.atoms.clipboard);
-                match e.subtype() {
+            xcb::Event::XFixes(xcb::xfixes::Event::SelectionNotify(e)) => match e.selection() {
+                x if x == self.atoms.clipboard => match e.subtype() {
                     xcb::xfixes::SelectionEvent::SetSelectionOwner => {
                         if e.owner() == self.wm_window {
                             return true;
@@ -429,8 +429,17 @@ impl XState {
                         debug!("Selection owner destroyed, selection will be unset");
                         self.selection_data.current_selection = None;
                     }
-                }
-            }
+                },
+                x if x == self.atoms.xsettings => match e.subtype() {
+                    xcb::xfixes::SelectionEvent::SelectionClientClose
+                    | xcb::xfixes::SelectionEvent::SelectionWindowDestroy => {
+                        debug!("Xsettings owner disappeared, reacquiring");
+                        self.set_xsettings_owner();
+                    }
+                    _ => {}
+                },
+                _ => {}
+            },
             _ => return false,
         }
 
