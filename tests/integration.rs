@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use wayland_protocols::xdg::{
     decoration::zv1::server::zxdg_toplevel_decoration_v1, shell::server::xdg_toplevel,
 };
+use wayland_server::protocol::wl_output;
 use wayland_server::Resource;
 use xcb::{x, Xid};
 use xwayland_satellite as xwls;
@@ -1891,4 +1892,44 @@ fn xsettings_switch_owner() {
             .owner(),
         owner
     );
+}
+
+#[test]
+fn rotated_output() {
+    let mut f = Fixture::new_preset(|testwl| {
+        testwl.enable_xdg_output_manager();
+        testwl.new_output(0, 0);
+    });
+    let mut connection = Connection::new(&f.display);
+
+    connection
+        .send_and_check_request(&x::ChangeWindowAttributes {
+            window: connection.root,
+            value_list: &[x::Cw::EventMask(x::EventMask::STRUCTURE_NOTIFY)],
+        })
+        .unwrap();
+
+    let output = f.testwl.get_output("WL-1").unwrap();
+    output.mode(wl_output::Mode::Current, 100, 1000, 60);
+    output.geometry(
+        0,
+        0,
+        50,
+        50,
+        wl_output::Subpixel::Unknown,
+        "satellite".to_string(),
+        "WL-1".to_string(),
+        wl_output::Transform::_90,
+    );
+    output.done();
+    f.testwl.dispatch();
+
+    match connection.await_event() {
+        xcb::Event::X(x::Event::ConfigureNotify(e)) => {
+            assert_eq!(e.window(), connection.root);
+            assert_eq!(e.width(), 1000);
+            assert_eq!(e.height(), 100);
+        }
+        other => panic!("unexpected event {other:?}"),
+    }
 }

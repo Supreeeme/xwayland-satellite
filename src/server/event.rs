@@ -551,6 +551,12 @@ impl HandleEvent for Pointer {
                         warn!("could not move pointer to surface ({serial}): stale surface");
                     }
                 } else {
+                    trace!(
+                        target: "pointer_position",
+                        "pointer motion {} {}",
+                        surface_x * self.scale,
+                        surface_y * self.scale
+                    );
                     self.server
                         .motion(time, surface_x * self.scale, surface_y * self.scale);
                 }
@@ -795,6 +801,7 @@ pub struct Output {
     pub(super) dimensions: OutputDimensions,
     name: String,
     scale: i32,
+    swap_dimensions: bool,
 }
 
 impl Output {
@@ -820,6 +827,7 @@ impl Output {
             },
             name: "<unknown>".to_string(),
             scale: 1,
+            swap_dimensions: false,
         }
     }
 
@@ -993,6 +1001,24 @@ impl Output {
                     model,
                     convert_wenum(transform),
                 );
+                self.swap_dimensions = transform.into_result().is_ok_and(|t| {
+                    matches!(
+                        t,
+                        client::wl_output::Transform::_90
+                            | client::wl_output::Transform::_270
+                            | client::wl_output::Transform::Flipped90
+                            | client::wl_output::Transform::Flipped270
+                    )
+                });
+                if let Some(xdg) = &self.xdg {
+                    if self.swap_dimensions {
+                        xdg.server
+                            .logical_size(self.dimensions.height, self.dimensions.width);
+                    } else {
+                        xdg.server
+                            .logical_size(self.dimensions.width, self.dimensions.height);
+                    }
+                }
             }
             Event::Mode {
                 flags,
@@ -1000,11 +1026,9 @@ impl Output {
                 height,
                 refresh,
             } => {
-                if matches!(self.dimensions.source, OutputDimensionsSource::Wl { .. }) {
-                    self.dimensions.width = width;
-                    self.dimensions.height = height;
-                    debug!("{} dimensions: {width}x{height} (wl)", self.server.id());
-                }
+                self.dimensions.width = width;
+                self.dimensions.height = height;
+                debug!("{} dimensions: {width}x{height}", self.server.id());
                 self.server
                     .mode(convert_wenum(flags), width, height, refresh);
             }
@@ -1065,7 +1089,11 @@ impl Output {
                 );
             }
             Event::LogicalSize { .. } => {
-                xdg.logical_size(self.dimensions.width, self.dimensions.height);
+                if self.swap_dimensions {
+                    xdg.logical_size(self.dimensions.height, self.dimensions.width);
+                } else {
+                    xdg.logical_size(self.dimensions.width, self.dimensions.height);
+                }
             }
             _ => simple_event_shunt! {
                 xdg, event: zxdg_output_v1::Event => [
