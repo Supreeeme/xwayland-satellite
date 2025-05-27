@@ -1026,9 +1026,14 @@ impl Output {
                 height,
                 refresh,
             } => {
-                self.dimensions.width = width;
-                self.dimensions.height = height;
-                debug!("{} dimensions: {width}x{height}", self.server.id());
+                if flags
+                    .into_result()
+                    .is_ok_and(|f| f.contains(client::wl_output::Mode::Current))
+                {
+                    self.dimensions.width = width;
+                    self.dimensions.height = height;
+                    debug!("{} dimensions: {width}x{height}", self.server.id());
+                }
                 self.server
                     .mode(convert_wenum(flags), width, height, refresh);
             }
