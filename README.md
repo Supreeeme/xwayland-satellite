@@ -2,6 +2,10 @@
 xwayland-satellite grants rootless Xwayland integration to any Wayland compositor implementing xdg_wm_base and viewporter.
 This is particularly useful for compositors that (understandably) do not want to go through implementing support for rootless Xwayland themselves.
 
+Found a bug? [Open a bug report.](https://github.com/Supreeeme/xwayland-satellite/issues/new?template=bug_report.yaml)
+
+Need help troubleshooting, or have some other general question? [Ask on GitHub Discussions.](https://github.com/Supreeeme/xwayland-satellite/discussions)
+
 ## Dependencies
 - Xwayland >=23.1
 - xcb
