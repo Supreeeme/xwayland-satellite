@@ -314,6 +314,8 @@ xcb::atoms_struct! {
         wm_check => b"_NET_SUPPORTING_WM_CHECK",
         win_type => b"_NET_WM_WINDOW_TYPE",
         win_type_normal => b"_NET_WM_WINDOW_TYPE_NORMAL",
+        win_type_menu => b"_NET_WM_WINDOW_TYPE_MENU",
+        win_type_tooltip => b"_NET_WM_WINDOW_TYPE_TOOLTIP",
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
         mime1 => b"text/plain" only_if_exists = false,
         mime2 => b"blah/blah" only_if_exists = false,
@@ -1702,6 +1704,24 @@ fn popup_heuristics() {
         &[0x2_u32, 0, 0x2a, 0, 0],
     );
     f.map_as_toplevel(&mut connection, reaper_dialog);
+
+    let chromium_menu = connection.new_window(connection.root, 10, 10, 50, 50, true);
+    connection.set_property(
+        chromium_menu,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_menu],
+    );
+    f.map_as_popup(&mut connection, chromium_menu);
+
+    let chromium_tooltip = connection.new_window(connection.root, 10, 10, 50, 50, true);
+    connection.set_property(
+        chromium_tooltip,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_tooltip],
+    );
+    f.map_as_popup(&mut connection, chromium_tooltip);
 }
 
 #[test]

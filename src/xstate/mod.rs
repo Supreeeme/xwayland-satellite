@@ -614,11 +614,25 @@ impl XState {
             }
         });
 
+        if log::log_enabled!(log::Level::Debug) {
+            let win_types = window_types
+                .iter()
+                .copied()
+                .map(|t| get_atom_name(&self.connection, t))
+                .collect::<Vec<_>>();
+
+            debug!("{window:?} window_types: {win_types:?}");
+        }
+        debug!("{window:?} override_redirect: {override_redirect:?}");
+
         let mut known_window_type = false;
         for ty in window_types {
             match ty {
                 x if x == self.window_atoms.normal || x == self.window_atoms.dialog => {
                     is_popup = override_redirect;
+                }
+                x if x == self.window_atoms.menu || x == self.window_atoms.tooltip => {
+                    is_popup = true;
                 }
                 _ => {
                     continue;
@@ -903,6 +917,7 @@ xcb::atoms_struct! {
         splash => b"_NET_WM_WINDOW_TYPE_SPLASH" only_if_exists = false,
         menu => b"_NET_WM_WINDOW_TYPE_MENU" only_if_exists = false,
         utility => b"_NET_WM_WINDOW_TYPE_UTILITY" only_if_exists = false,
+        tooltip => b"_NET_WM_WINDOW_TYPE_TOOLTIP" only_if_exists = false,
     }
 }
 
