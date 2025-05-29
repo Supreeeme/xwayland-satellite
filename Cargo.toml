@@ -48,3 +48,7 @@ systemd = ["dep:sd-notify"]
 [dev-dependencies]
 rustix = { workspace = true, features = ["fs"] }
 testwl = { path = "testwl" }
+
+[build-dependencies]
+anyhow = "1.0.98"
+vergen-gitcl = "1.0.8"

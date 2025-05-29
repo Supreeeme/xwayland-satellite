@@ -47,6 +47,12 @@ pub trait RunData {
 }
 
 pub fn main(data: impl RunData) -> Option<()> {
+    let mut version = env!("VERGEN_GIT_DESCRIBE");
+    if version == "VERGEN_IDEMPOTENT_OUTPUT" {
+        version = env!("CARGO_PKG_VERSION");
+    }
+    info!("Starting xwayland-satellite version {version}");
+
     let socket = ListeningSocket::bind_auto("xwls", 1..=128).unwrap();
     let mut display = Display::<RealServerState>::new().unwrap();
     let dh = display.handle();
