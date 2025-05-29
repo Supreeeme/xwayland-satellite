@@ -2073,6 +2073,31 @@ fn fractional_scale_small_popup() {
         .expect("Missing popup data");
     let pos = &data.popup().positioner_state;
     assert_eq!(pos.size.unwrap(), testwl::Vec2 { x: 1, y: 1 });
+
+    f.satellite.reconfigure_window(x::ConfigureNotifyEvent::new(
+        popup,
+        popup,
+        x::WINDOW_NONE,
+        0,
+        0,
+        2,
+        1,
+        0,
+        true,
+    ));
+    f.run();
+    f.run();
+
+    let dims = f.connection().window(popup).dims;
+    assert!(dims.width > 0);
+    assert!(dims.height > 0);
+
+    let data = f
+        .testwl
+        .get_surface_data(popup_id)
+        .expect("Missing popup data");
+    let pos = &data.popup().positioner_state;
+    assert_eq!(pos.size.unwrap(), testwl::Vec2 { x: 1, y: 1 });
 }
 
 #[test]

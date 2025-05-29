@@ -851,8 +851,8 @@ impl<C: XConnection> ServerState<C> {
                     ((event.y() as i32 - win.output_offset.y) as f64 / data.scale_factor) as i32,
                 );
                 popup.positioner.set_size(
-                    (event.width() as f64 / data.scale_factor) as i32,
-                    (event.height() as f64 / data.scale_factor) as i32,
+                    1.max((event.width() as f64 / data.scale_factor) as i32),
+                    1.max((event.height() as f64 / data.scale_factor) as i32),
                 );
                 popup.popup.reposition(&popup.positioner, 0);
             }

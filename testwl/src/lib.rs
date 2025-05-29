@@ -1285,9 +1285,9 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                     client.kill(
                         dh,
                         ProtocolError {
-                            code: xdg_surface::Error::InvalidSize.into(),
-                            object_id: resource.id().protocol_id(),
-                            object_interface: XdgSurface::interface().name.to_string(),
+                            code: xdg_positioner::Error::InvalidInput.into(),
+                            object_id: positioner.id().protocol_id(),
+                            object_interface: XdgPositioner::interface().name.to_string(),
                             message,
                         },
                     );
@@ -1362,11 +1362,11 @@ impl Default for PositionerState {
 impl Dispatch<XdgPositioner, ()> for State {
     fn request(
         state: &mut Self,
-        _: &Client,
+        client: &Client,
         resource: &XdgPositioner,
         request: <XdgPositioner as Resource>::Request,
         _: &(),
-        _: &DisplayHandle,
+        handle: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
         let hash_map::Entry::Occupied(mut data) = state
@@ -1377,6 +1377,22 @@ impl Dispatch<XdgPositioner, ()> for State {
         };
         match request {
             xdg_positioner::Request::SetSize { width, height } => {
+                if width <= 0 || height <= 0 {
+                    // TODO: figure out why the client.kill here doesn't make satellite print the error message
+                    let message = format!("positioner had an invalid size {width}x{height}");
+                    eprintln!("{message}");
+                    client.kill(
+                        handle,
+                        ProtocolError {
+                            code: xdg_positioner::Error::InvalidInput.into(),
+                            object_id: resource.id().protocol_id(),
+                            object_interface: XdgPositioner::interface().name.to_string(),
+                            message,
+                        },
+                    );
+                    return;
+                }
+
                 data.get_mut().size = Some(Vec2 {
                     x: width,
                     y: height,
