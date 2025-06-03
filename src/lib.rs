@@ -8,7 +8,7 @@ use log::{error, info};
 use rustix::event::{poll, PollFd, PollFlags};
 use smithay_client_toolkit::data_device_manager::WritePipe;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, ExitStatus, Stdio};
 use wayland_server::{Display, ListeningSocket};
@@ -35,6 +35,7 @@ type RealServerState = ServerState<RealConnection>;
 
 pub trait RunData {
     fn display(&self) -> Option<&str>;
+    fn listenfds(&mut self) -> Vec<OwnedFd>;
     fn server(&self) -> Option<UnixStream> {
         None
     }
@@ -46,7 +47,7 @@ pub trait RunData {
     fn xwayland_ready(&self, _display: String, _pid: u32) {}
 }
 
-pub fn main(data: impl RunData) -> Option<()> {
+pub fn main(mut data: impl RunData) -> Option<()> {
     let mut version = env!("VERGEN_GIT_DESCRIBE");
     if version == "VERGEN_IDEMPOTENT_OUTPUT" {
         version = env!("CARGO_PKG_VERSION");
@@ -70,6 +71,12 @@ pub fn main(data: impl RunData) -> Option<()> {
     if let Some(display) = data.display() {
         xwayland.arg(display);
     }
+
+    let fds = data.listenfds();
+    for fd in &fds {
+        xwayland.args(["-listenfd", &fd.as_raw_fd().to_string()]);
+    }
+
     let mut xwayland = xwayland
         .args([
             "-rootless",
@@ -83,6 +90,9 @@ pub fn main(data: impl RunData) -> Option<()> {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+
+    // Now that Xwayland spawned and got the listenfds, we can close them here.
+    drop(fds);
 
     let xwl_pid = xwayland.id();
 
