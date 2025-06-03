@@ -294,6 +294,14 @@ impl XState {
                 data: b"xwayland-satellite",
             })
             .unwrap();
+
+        self.connection
+            .send_and_check_request(&x::SetSelectionOwner {
+                owner: self.wm_window,
+                selection: self.atoms.wm_s0,
+                time: x::CURRENT_TIME,
+            })
+            .unwrap();
     }
 
     pub fn handle_events(&mut self, server_state: &mut super::RealServerState) {
@@ -886,6 +894,7 @@ xcb::atoms_struct! {
         wm_delete_window => b"WM_DELETE_WINDOW" only_if_exists = false,
         wm_transient_for => b"WM_TRANSIENT_FOR" only_if_exists = false,
         wm_state => b"WM_STATE" only_if_exists = false,
+        wm_s0 => b"WM_S0" only_if_exists = false,
         wm_check => b"_NET_SUPPORTING_WM_CHECK" only_if_exists = false,
         net_wm_name => b"_NET_WM_NAME" only_if_exists = false,
         wm_pid => b"_NET_WM_PID" only_if_exists = false,
