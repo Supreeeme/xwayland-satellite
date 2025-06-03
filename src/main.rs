@@ -52,6 +52,8 @@ fn parse_args() -> RealData {
 
             data.listenfds.push(fd);
             i += 2;
+        } else if arg == "--test-listenfd-support" {
+            std::process::exit(0);
         } else {
             panic!("Unrecognized argument: {arg}");
         }
