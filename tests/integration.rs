@@ -3,7 +3,7 @@ use rustix::process::{Pid, Signal, WaitOptions};
 use std::collections::HashMap;
 use std::io::Write;
 use std::mem::ManuallyDrop;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -70,6 +70,10 @@ impl xwls::RunData for TestData {
 
     fn display(&self) -> Option<&str> {
         None
+    }
+
+    fn listenfds(&mut self) -> Vec<OwnedFd> {
+        Vec::new()
     }
 
     fn server(&self) -> Option<UnixStream> {
