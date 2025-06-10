@@ -320,6 +320,7 @@ xcb::atoms_struct! {
         win_type_normal => b"_NET_WM_WINDOW_TYPE_NORMAL",
         win_type_menu => b"_NET_WM_WINDOW_TYPE_MENU",
         win_type_tooltip => b"_NET_WM_WINDOW_TYPE_TOOLTIP",
+        win_type_dnd => b"_NET_WM_WINDOW_TYPE_DND",
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
         mime1 => b"text/plain" only_if_exists = false,
         mime2 => b"blah/blah" only_if_exists = false,
@@ -1726,6 +1727,28 @@ fn popup_heuristics() {
         &[connection.atoms.win_type_tooltip],
     );
     f.map_as_popup(&mut connection, chromium_tooltip);
+}
+
+#[test]
+#[ignore]
+fn discord_drag_n_drop() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let discord_dnd = connection.new_window(connection.root, 20, 138, 48, 48, true);
+    connection.set_property(
+        discord_dnd,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_dnd],
+    );
+    connection.set_property::<u32>(
+        discord_dnd,
+        x::ATOM_WM_SIZE_HINTS,
+        x::ATOM_WM_HINTS,
+        &[516, 20, 137, 0, 0, 0, 0, 0, 0],
+    );
+    f.map_as_popup(&mut connection, discord_dnd);
 }
 
 #[test]
