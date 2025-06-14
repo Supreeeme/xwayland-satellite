@@ -1,12 +1,16 @@
 use super::*;
+use hecs::CommandBuffer;
 use log::{debug, error, trace, warn};
 use macros::simple_event_shunt;
 use std::sync::{Arc, OnceLock};
 use wayland_client::globals::Global;
 use wayland_protocols::{
     wp::{
+        fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1,
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
         pointer_constraints::zv1::{
+            client::zwp_confined_pointer_v1::ZwpConfinedPointerV1 as ConfinedPointerClient,
+            client::zwp_locked_pointer_v1::ZwpLockedPointerV1 as LockedPointerClient,
             client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1 as PointerConstraintsClient,
             server::{
                 zwp_confined_pointer_v1::{
@@ -20,12 +24,16 @@ use wayland_protocols::{
         },
         relative_pointer::zv1::{
             client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1 as RelativePointerManClient,
+            client::zwp_relative_pointer_v1::ZwpRelativePointerV1 as RelativePointerClient,
             server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1 as RelativePointerManServer,
+            server::zwp_relative_pointer_v1::ZwpRelativePointerV1 as RelativePointerServer,
         },
         tablet::zv2::{client as c_tablet, server as s_tablet},
+        viewporter::client::wp_viewport::WpViewport,
     },
     xdg::xdg_output::zv1::{
         client::zxdg_output_manager_v1::ZxdgOutputManagerV1 as OutputManClient,
+        client::zxdg_output_v1::ZxdgOutputV1 as XdgOutputClient,
         server::{
             zxdg_output_manager_v1::{
                 self as s_output_man, ZxdgOutputManagerV1 as OutputManServer,
@@ -56,40 +64,6 @@ use wayland_server::{
     Dispatch, DisplayHandle, GlobalDispatch, Resource,
 };
 
-macro_rules! only_destroy_request_impl {
-    ($object_type:ty) => {
-        impl<C: XConnection> Dispatch<<$object_type as GenericObjectExt>::Server, ObjectKey>
-            for ServerState<C>
-        {
-            fn request(
-                state: &mut Self,
-                _: &Client,
-                _: &<$object_type as GenericObjectExt>::Server,
-                request: <<$object_type as GenericObjectExt>::Server as Resource>::Request,
-                key: &ObjectKey,
-                _: &DisplayHandle,
-                _: &mut wayland_server::DataInit<'_, Self>,
-            ) {
-                if !matches!(
-                    request,
-                    <<$object_type as GenericObjectExt>::Server as Resource>::Request::Destroy
-                ) {
-                    warn!(
-                        "unrecognized {} request: {:?}",
-                        stringify!($object_type),
-                        request
-                    );
-                    return;
-                }
-
-                let obj: &$object_type = state.objects[*key].as_ref();
-                obj.client.destroy();
-                state.objects.remove(*key);
-            }
-        }
-    };
-}
-
 // noop
 impl<C: XConnection> Dispatch<WlCallback, ()> for ServerState<C> {
     fn request(
@@ -105,37 +79,42 @@ impl<C: XConnection> Dispatch<WlCallback, ()> for ServerState<C> {
     }
 }
 
-impl<C: XConnection> Dispatch<WlSurface, ObjectKey> for ServerState<C> {
+impl<C: XConnection> Dispatch<WlSurface, Entity> for ServerState<C> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
         _: &WlSurface,
         request: <WlSurface as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        let surface: &SurfaceData = state.objects[*key].as_ref();
-        let configured =
-            surface.role.is_none() || surface.xdg().is_none() || surface.xdg().unwrap().configured;
+        let data = state.world.entity(*entity).unwrap();
+        let mut role = data.get::<&mut SurfaceRole>();
+        let xdg = role.as_ref().and_then(|role| role.xdg());
+        let configured = xdg.is_none_or(|xdg| xdg.configured);
+        let client = data.get::<&client::wl_surface::WlSurface>().unwrap();
+
+        let mut cmd = CommandBuffer::new();
 
         match request {
             Request::<WlSurface>::Attach { buffer, x, y } => {
                 if buffer.is_none() {
-                    trace!("xwayland attached null buffer to {:?}", surface.client);
+                    trace!("xwayland attached null buffer to {client:?}");
                 }
                 let buffer = buffer.as_ref().map(|b| {
-                    let key: &ObjectKey = b.data().unwrap();
-                    let data: &Buffer = state.objects[*key].as_ref();
-                    &data.client
+                    let entity: Entity = b.data().copied().unwrap();
+                    state
+                        .world
+                        .get::<&client::wl_buffer::WlBuffer>(entity)
+                        .unwrap()
                 });
 
                 if configured {
-                    surface.client.attach(buffer, x, y);
+                    client.attach(buffer.as_deref(), x, y);
                 } else {
-                    let buffer = buffer.cloned();
-                    let surface: &mut SurfaceData = state.objects[*key].as_mut();
-                    surface.attach = Some(SurfaceAttach { buffer, x, y });
+                    let buffer = buffer.as_deref().cloned();
+                    cmd.insert(*entity, (SurfaceAttach { buffer, x, y },));
                 }
             }
             Request::<WlSurface>::DamageBuffer {
@@ -145,49 +124,61 @@ impl<C: XConnection> Dispatch<WlSurface, ObjectKey> for ServerState<C> {
                 height,
             } => {
                 if configured {
-                    surface.client.damage_buffer(x, y, width, height);
+                    client.damage_buffer(x, y, width, height);
                 }
             }
             Request::<WlSurface>::Frame { callback } => {
                 let cb = data_init.init(callback, ());
                 if configured {
-                    surface.client.frame(&state.qh, cb);
+                    client.frame(&state.qh, cb);
                 } else {
-                    let surface: &mut SurfaceData = state.objects[*key].as_mut();
-                    surface.frame_callback = Some(cb);
+                    cmd.insert(*entity, (cb,));
                 }
             }
             Request::<WlSurface>::Commit => {
                 if configured {
-                    surface.client.commit();
+                    client.commit();
                 }
             }
             Request::<WlSurface>::Destroy => {
-                let mut object = state.objects.remove(*key).unwrap();
-                let surface: &mut SurfaceData = object.as_mut();
-                if let Some(window_data) = surface.window.and_then(|w| state.windows.get_mut(&w)) {
-                    window_data.surface_key.take();
+                if !data.has::<x::Window>() {
+                    cmd.despawn(*entity);
                 }
-                surface.destroy_role();
-                surface.client.destroy();
-                surface.viewport.destroy();
-                if let Some(f) = &mut surface.fractional {
-                    f.destroy();
+
+                if let Some(role) = role.as_mut() {
+                    role.destroy();
                 }
+                client.destroy();
+
                 debug!(
-                    "deleting key: {key:?} (surface {:?})",
-                    surface.server.id().protocol_id()
+                    "deleting (surface {:?})",
+                    data.get::<&WlSurface>().unwrap().id().protocol_id()
                 );
+
+                let mut query = data.query::<(&WpViewport, Option<&WpFractionalScaleV1>)>();
+                let (viewport, fractional) = query.get().unwrap();
+                viewport.destroy();
+
+                cmd.remove::<event::SurfaceBundle>(*entity);
+                if let Some(f) = fractional {
+                    f.destroy();
+                    cmd.remove_one::<WpFractionalScaleV1>(*entity);
+                }
             }
             Request::<WlSurface>::SetBufferScale { scale } => {
-                surface.client.set_buffer_scale(scale);
+                client.set_buffer_scale(scale);
             }
             Request::<WlSurface>::SetInputRegion { region } => {
                 let region = region.as_ref().map(|r| r.data().unwrap());
-                surface.client.set_input_region(region);
+                client.set_input_region(region);
             }
             other => warn!("unhandled surface request: {other:?}"),
         }
+
+        drop(client);
+        drop(role);
+
+        cmd.run_on(&mut state.world);
     }
 }
 
@@ -226,36 +217,28 @@ impl<C: XConnection>
     ) {
         match request {
             Request::<WlCompositor>::CreateSurface { id } => {
-                let mut surface_id = None;
+                let entity = state.world.reserve_entity();
+                let client = client.create_surface(&state.qh, entity);
+                let server = data_init.init(id, entity);
+                debug!("new surface ({})", server.id());
+                let viewport = state.viewporter.get_viewport(&client, &state.qh, ());
+                let fractional = state
+                    .fractional_scale
+                    .as_ref()
+                    .map(|f| f.get_fractional_scale(&client, &state.qh, entity));
 
-                state.objects.insert_with_key(|key| {
-                    let client = client.create_surface(&state.qh, key);
-                    let server = data_init.init(id, key);
-                    let viewport = state.viewporter.get_viewport(&client, &state.qh, ());
-                    surface_id = Some(server.id().protocol_id());
-                    debug!("new surface with key {key:?} ({surface_id:?})");
-                    let fractional = state
-                        .fractional_scale
-                        .as_ref()
-                        .map(|f| f.get_fractional_scale(&client, &state.qh, key));
-
-                    SurfaceData {
+                state.world.spawn_at(
+                    entity,
+                    event::SurfaceBundle {
                         client,
                         server,
-                        key,
-                        serial: Default::default(),
-                        attach: None,
-                        frame_callback: None,
-                        role: None,
-                        xwl: None,
-                        window: None,
-                        output_key: None,
-                        scale_factor: 1.0,
                         viewport,
-                        fractional,
-                    }
-                    .into()
-                });
+                        scale: SurfaceScaleFactor(1.0),
+                    },
+                );
+                if let Some(f) = fractional {
+                    state.world.insert(entity, (f,)).unwrap();
+                }
             }
             Request::<WlCompositor>::CreateRegion { id } => {
                 let c_region = client.create_region(&state.qh, ());
@@ -268,21 +251,24 @@ impl<C: XConnection>
     }
 }
 
-impl<C: XConnection> Dispatch<WlBuffer, ObjectKey> for ServerState<C> {
+impl<C: XConnection> Dispatch<WlBuffer, Entity> for ServerState<C> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
         _: &WlBuffer,
         request: <WlBuffer as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
         assert!(matches!(request, Request::<WlBuffer>::Destroy));
 
-        let buf: &Buffer = state.objects[*key].as_ref();
-        buf.client.destroy();
-        state.objects.remove(*key);
+        state
+            .world
+            .get::<&client::wl_buffer::WlBuffer>(*entity)
+            .unwrap()
+            .destroy();
+        state.world.despawn(*entity).unwrap();
     }
 }
 
@@ -305,26 +291,25 @@ impl<C: XConnection> Dispatch<WlShmPool, client::wl_shm_pool::WlShmPool> for Ser
                 stride,
                 format,
             } => {
-                state.objects.insert_with_key(|key| {
-                    let client = c_pool.create_buffer(
-                        offset,
-                        width,
-                        height,
-                        stride,
-                        convert_wenum(format),
-                        &state.qh,
-                        key,
-                    );
-                    let server = data_init.init(id, key);
-                    Buffer { server, client }.into()
-                });
+                let entity = state.world.reserve_entity();
+                let client = c_pool.create_buffer(
+                    offset,
+                    width,
+                    height,
+                    stride,
+                    convert_wenum(format),
+                    &state.qh,
+                    entity,
+                );
+                let server = data_init.init(id, entity);
+                state.world.spawn_at(entity, (client, server));
             }
             Request::<WlShmPool>::Resize { size } => {
                 c_pool.resize(size);
             }
             Request::<WlShmPool>::Destroy => {
                 c_pool.destroy();
-                state.clientside.queue.flush().unwrap();
+                state.queue.flush().unwrap();
             }
             other => warn!("unhandled shmpool request: {other:?}"),
         }
@@ -355,19 +340,20 @@ impl<C: XConnection> Dispatch<WlShm, ClientGlobalWrapper<client::wl_shm::WlShm>>
     }
 }
 
-impl<C: XConnection> Dispatch<WlPointer, ObjectKey> for ServerState<C> {
+impl<C: XConnection> Dispatch<WlPointer, Entity> for ServerState<C> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
         _: &WlPointer,
         request: <WlPointer as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        let Pointer {
-            client: c_pointer, ..
-        }: &Pointer = state.objects[*key].as_ref();
+        let c_pointer = state
+            .world
+            .get::<&client::wl_pointer::WlPointer>(*entity)
+            .unwrap();
 
         match request {
             Request::<WlPointer>::SetCursor {
@@ -376,115 +362,155 @@ impl<C: XConnection> Dispatch<WlPointer, ObjectKey> for ServerState<C> {
                 hotspot_y,
                 surface,
             } => {
-                let c_surface = surface.and_then(|s| state.get_client_surface_from_server(s));
-                c_pointer.set_cursor(serial, c_surface, hotspot_x, hotspot_y);
+                let c_surface = surface.and_then(|s| {
+                    let e = s.data().copied()?;
+                    Some(
+                        state
+                            .world
+                            .get::<&client::wl_surface::WlSurface>(e)
+                            .unwrap(),
+                    )
+                });
+                c_pointer.set_cursor(serial, c_surface.as_deref(), hotspot_x, hotspot_y);
             }
             Request::<WlPointer>::Release => {
                 c_pointer.release();
-                state.objects.remove(*key);
+                drop(c_pointer);
+                let _ = state.world.despawn(*entity);
             }
             _ => warn!("unhandled cursor request: {request:?}"),
         }
     }
 }
 
-impl<C: XConnection> Dispatch<WlKeyboard, ObjectKey> for ServerState<C> {
+impl<C: XConnection> Dispatch<WlKeyboard, Entity> for ServerState<C> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
         _: &WlKeyboard,
         request: <WlKeyboard as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
         match request {
             Request::<WlKeyboard>::Release => {
-                let Keyboard { client, .. }: &_ = state.objects[*key].as_ref();
-                client.release();
-                state.objects.remove(*key);
+                state
+                    .world
+                    .get::<&client::wl_keyboard::WlKeyboard>(*entity)
+                    .unwrap()
+                    .release();
+                state.world.despawn(*entity).unwrap();
             }
             _ => unreachable!(),
         }
     }
 }
 
-impl<C: XConnection> Dispatch<WlTouch, ObjectKey> for ServerState<C> {
+impl<C: XConnection> Dispatch<WlTouch, Entity> for ServerState<C> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
         _: &WlTouch,
         request: <WlTouch as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
         match request {
             Request::<WlTouch>::Release => {
-                let Touch { client, .. }: &_ = state.objects[*key].as_ref();
-                client.release();
-                state.objects.remove(*key);
+                state
+                    .world
+                    .get::<&client::wl_touch::WlTouch>(*entity)
+                    .unwrap()
+                    .release();
+                state.world.despawn(*entity).unwrap();
             }
             _ => unreachable!(),
         }
     }
 }
 
-impl<C: XConnection> Dispatch<WlSeat, ObjectKey> for ServerState<C> {
+impl<C: XConnection> Dispatch<WlSeat, Entity> for ServerState<C> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
         _: &WlSeat,
         request: <WlSeat as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
         match request {
             Request::<WlSeat>::GetPointer { id } => {
-                state
-                    .objects
-                    .insert_from_other_objects([*key], |[seat_obj], key| {
-                        let Seat { client, .. }: &Seat = seat_obj.try_into().unwrap();
-                        let client = client.get_pointer(&state.qh, key);
-                        let server = data_init.init(id, key);
-                        trace!("new pointer: {server:?}");
-                        Pointer::new(server, client).into()
-                    });
+                let new_entity = state.world.reserve_entity();
+                let client = {
+                    state
+                        .world
+                        .get::<&client::wl_seat::WlSeat>(*entity)
+                        .unwrap()
+                        .get_pointer(&state.qh, new_entity)
+                };
+                let server = data_init.init(id, new_entity);
+                state.world.spawn_at(new_entity, (client, server));
             }
             Request::<WlSeat>::GetKeyboard { id } => {
-                state
-                    .objects
-                    .insert_from_other_objects([*key], |[seat_obj], key| {
-                        let Seat {
-                            client: client_seat,
-                            ..
-                        }: &Seat = seat_obj.try_into().unwrap();
-                        let client = client_seat.get_keyboard(&state.qh, key);
-                        let server = data_init.init(id, key);
-                        Keyboard {
-                            client,
-                            server,
-                            seat: client_seat.clone(),
-                        }
-                        .into()
-                    });
+                let client = {
+                    state
+                        .world
+                        .get::<&client::wl_seat::WlSeat>(*entity)
+                        .unwrap()
+                        .get_keyboard(&state.qh, *entity)
+                };
+                let server = data_init.init(id, *entity);
+                state.world.insert(*entity, (client, server)).unwrap();
             }
             Request::<WlSeat>::GetTouch { id } => {
-                state
-                    .objects
-                    .insert_from_other_objects([*key], |[seat_obj], key| {
-                        let Seat { client, .. }: &Seat = seat_obj.try_into().unwrap();
-                        let client = client.get_touch(&state.qh, key);
-                        let server = data_init.init(id, key);
-                        Touch { client, server }.into()
-                    });
+                let new_entity = state.world.reserve_entity();
+                let client = {
+                    state
+                        .world
+                        .get::<&client::wl_seat::WlSeat>(*entity)
+                        .unwrap()
+                        .get_touch(&state.qh, new_entity)
+                };
+                let server = data_init.init(id, new_entity);
+                state.world.spawn_at(new_entity, (client, server));
             }
             other => warn!("unhandled seat request: {other:?}"),
         }
     }
 }
-only_destroy_request_impl!(RelativePointer);
+
+macro_rules! only_destroy_request_impl {
+    ($server:ty, $client:ty) => {
+        impl<C: XConnection> Dispatch<$server, Entity> for ServerState<C> {
+            fn request(
+                state: &mut Self,
+                _: &Client,
+                _: &$server,
+                request: <$server as Resource>::Request,
+                entity: &Entity,
+                _: &DisplayHandle,
+                _: &mut wayland_server::DataInit<'_, Self>,
+            ) {
+                if !matches!(request, <$server as Resource>::Request::Destroy) {
+                    warn!(
+                        "unrecognized {} request: {:?}",
+                        stringify!($server),
+                        request
+                    );
+                    return;
+                }
+
+                state.world.get::<&$client>(*entity).unwrap().destroy();
+                state.world.despawn(*entity).unwrap();
+            }
+        }
+    };
+}
+
+only_destroy_request_impl!(RelativePointerServer, RelativePointerClient);
 
 impl<C: XConnection>
     Dispatch<RelativePointerManServer, ClientGlobalWrapper<RelativePointerManClient>>
@@ -501,35 +527,41 @@ impl<C: XConnection>
     ) {
         match request {
             Request::<RelativePointerManServer>::GetRelativePointer { id, pointer } => {
-                let p_key: ObjectKey = pointer.data().copied().unwrap();
-                state
-                    .objects
-                    .insert_from_other_objects([p_key], |[pointer_obj], key| {
-                        let pointer: &Pointer = pointer_obj.try_into().unwrap();
-                        let client = client.get_relative_pointer(&pointer.client, &state.qh, key);
-                        let server = data_init.init(id, key);
-                        RelativePointer { client, server }.into()
-                    });
+                let pointer_entity: Entity = pointer.data().copied().unwrap();
+                let entity = state.world.reserve_entity();
+                let client = {
+                    let client_pointer = state
+                        .world
+                        .get::<&client::wl_pointer::WlPointer>(pointer_entity)
+                        .unwrap();
+
+                    client.get_relative_pointer(&client_pointer, &state.qh, entity)
+                };
+                let server = data_init.init(id, entity);
+                state.world.spawn_at(entity, (server, client));
             }
             _ => warn!("unhandled relative pointer request: {request:?}"),
         }
     }
 }
 
-impl<C: XConnection> Dispatch<WlOutput, ObjectKey> for ServerState<C> {
+impl<C: XConnection> Dispatch<WlOutput, Entity> for ServerState<C> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
         _: &WlOutput,
         request: <WlOutput as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
         match request {
             wayland_server::protocol::wl_output::Request::Release => {
-                let Output { client, .. }: &_ = state.objects[*key].as_ref();
-                client.release();
+                state
+                    .world
+                    .get::<&client::wl_output::WlOutput>(*entity)
+                    .unwrap()
+                    .release();
                 todo!("handle wloutput destruction");
             }
             _ => warn!("unhandled output request {request:?}"),
@@ -538,7 +570,7 @@ impl<C: XConnection> Dispatch<WlOutput, ObjectKey> for ServerState<C> {
 }
 
 impl<C: XConnection>
-    Dispatch<s_dmabuf::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1, ObjectKey>
+    Dispatch<s_dmabuf::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1, Entity>
     for ServerState<C>
 {
     fn request(
@@ -546,16 +578,21 @@ impl<C: XConnection>
         _: &wayland_server::Client,
         _: &s_dmabuf::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1,
         request: <s_dmabuf::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1 as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
         use s_dmabuf::zwp_linux_dmabuf_feedback_v1::Request::*;
         match request {
             Destroy => {
-                let dmabuf: &DmabufFeedback = state.objects[*key].as_ref();
-                dmabuf.client.destroy();
-                state.objects.remove(*key);
+                state
+                    .world
+                    .get::<&c_dmabuf::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1>(
+                        *entity,
+                    )
+                    .unwrap()
+                    .destroy();
+                state.world.despawn(*entity).unwrap();
             }
             _ => unreachable!(),
         }
@@ -588,18 +625,17 @@ impl<C: XConnection>
                 format,
                 flags,
             } => {
-                state.objects.insert_with_key(|key| {
-                    let client = c_params.create_immed(
-                        width,
-                        height,
-                        format,
-                        convert_wenum(flags),
-                        &state.qh,
-                        key,
-                    );
-                    let server = data_init.init(buffer_id, key);
-                    Buffer { server, client }.into()
-                });
+                let entity = state.world.reserve_entity();
+                let client = c_params.create_immed(
+                    width,
+                    height,
+                    format,
+                    convert_wenum(flags),
+                    &state.qh,
+                    entity,
+                );
+                let server = data_init.init(buffer_id, entity);
+                state.world.spawn_at(entity, (client, server));
             }
             Add {
                 fd,
@@ -651,37 +687,37 @@ impl<C: XConnection>
                 data_init.init(params_id, c_params);
             }
             GetDefaultFeedback { id } => {
-                state.objects.insert_with_key(|key| {
-                    let client = client.get_default_feedback(&state.qh, key);
-                    let server = data_init.init(id, key);
-                    DmabufFeedback { client, server }.into()
-                });
+                let entity = state.world.reserve_entity();
+                let client = client.get_default_feedback(&state.qh, entity);
+                let server = data_init.init(id, entity);
+                state.world.spawn_at(entity, (client, server));
             }
             GetSurfaceFeedback { id, surface } => {
-                let surf_key: ObjectKey = surface.data().copied().unwrap();
-                state
-                    .objects
-                    .insert_from_other_objects([surf_key], |[surface_obj], key| {
-                        let SurfaceData {
-                            client: c_surface, ..
-                        }: &SurfaceData = surface_obj.try_into().unwrap();
-                        let client = client.get_surface_feedback(c_surface, &state.qh, key);
-                        let server = data_init.init(id, key);
-                        DmabufFeedback { client, server }.into()
-                    });
+                let entity = state.world.reserve_entity();
+                let surface_entity: Entity = surface.data().copied().unwrap();
+                let client = {
+                    let c_surface = state
+                        .world
+                        .get::<&client::wl_surface::WlSurface>(surface_entity)
+                        .unwrap();
+                    client.get_surface_feedback(&c_surface, &state.qh, entity)
+                };
+                let server = data_init.init(id, entity);
+
+                state.world.spawn_at(entity, (client, server));
             }
             _ => warn!("unhandled dmabuf request: {request:?}"),
         }
     }
 }
 
-impl<C: XConnection> Dispatch<WlDrmServer, ObjectKey> for ServerState<C> {
+impl<C: XConnection> Dispatch<WlDrmServer, Entity> for ServerState<C> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
         _: &WlDrmServer,
         request: <WlDrmServer as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
@@ -689,8 +725,8 @@ impl<C: XConnection> Dispatch<WlDrmServer, ObjectKey> for ServerState<C> {
 
         type DrmFn = dyn FnOnce(
             &wl_drm::client::wl_drm::WlDrm,
-            ObjectKey,
-            &ClientQueueHandle,
+            Entity,
+            &QueueHandle<MyWorld>,
         ) -> client::wl_buffer::WlBuffer;
 
         let mut bufs: Option<(Box<DrmFn>, wayland_server::New<WlBuffer>)> = None;
@@ -767,32 +803,37 @@ impl<C: XConnection> Dispatch<WlDrmServer, ObjectKey> for ServerState<C> {
                 ));
             }
             Authenticate { id } => {
-                let drm: &Drm = state.objects[*key].as_ref();
-                drm.client.authenticate(id);
+                state
+                    .world
+                    .get::<&wl_drm::client::wl_drm::WlDrm>(*entity)
+                    .unwrap()
+                    .authenticate(id);
             }
             _ => unreachable!(),
         }
 
         if let Some((buf_create, id)) = bufs {
-            state
-                .objects
-                .insert_from_other_objects([*key], |[drm_obj], key| {
-                    let drm: &Drm = drm_obj.try_into().unwrap();
-                    let client = buf_create(&drm.client, key, &state.qh);
-                    let server = data_init.init(id, key);
-                    Buffer { client, server }.into()
-                });
+            let new_entity = state.world.reserve_entity();
+            let client = {
+                let drm_client = state
+                    .world
+                    .get::<&wl_drm::client::wl_drm::WlDrm>(*entity)
+                    .unwrap();
+                buf_create(&drm_client, new_entity, &state.qh)
+            };
+            let server = data_init.init(id, new_entity);
+            state.world.spawn_at(new_entity, (client, server));
         }
     }
 }
 
-impl<C: XConnection> Dispatch<XdgOutputServer, ObjectKey> for ServerState<C> {
+impl<C: XConnection> Dispatch<XdgOutputServer, Entity> for ServerState<C> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
         _: &XdgOutputServer,
         request: <XdgOutputServer as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
@@ -800,9 +841,11 @@ impl<C: XConnection> Dispatch<XdgOutputServer, ObjectKey> for ServerState<C> {
             unreachable!();
         };
 
-        let output: &mut Output = state.objects[*key].as_mut();
-        let xdg_output = output.xdg.take().unwrap();
-        xdg_output.client.destroy();
+        let (client, _) = state
+            .world
+            .query_one_mut::<(&XdgOutputClient, &XdgOutputServer)>(*entity)
+            .unwrap();
+        client.destroy();
     }
 }
 
@@ -820,11 +863,16 @@ impl<C: XConnection> Dispatch<OutputManServer, ClientGlobalWrapper<OutputManClie
     ) {
         match request {
             s_output_man::Request::GetXdgOutput { id, output } => {
-                let output_key: ObjectKey = output.data().copied().unwrap();
-                let output: &mut Output = state.objects[output_key].as_mut();
-                let client = client.get_xdg_output(&output.client, &state.qh, output_key);
-                let server = data_init.init(id, output_key);
-                output.xdg = Some(XdgOutput { client, server });
+                let entity: Entity = output.data().copied().unwrap();
+                let client = {
+                    let c_output = state
+                        .world
+                        .get::<&client::wl_output::WlOutput>(entity)
+                        .unwrap();
+                    client.get_xdg_output(&c_output, &state.qh, entity)
+                };
+                let server = data_init.init(id, entity);
+                state.world.insert(entity, (client, server)).unwrap();
             }
             s_output_man::Request::Destroy => {}
             _ => unreachable!(),
@@ -832,19 +880,19 @@ impl<C: XConnection> Dispatch<OutputManServer, ClientGlobalWrapper<OutputManClie
     }
 }
 
-impl<C: XConnection> Dispatch<ConfinedPointerServer, ObjectKey> for ServerState<C> {
+impl<C: XConnection> Dispatch<ConfinedPointerServer, Entity> for ServerState<C> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
         _: &ConfinedPointerServer,
         request: <ConfinedPointerServer as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        let confined_ptr: &ConfinedPointer = state.objects[*key].as_ref();
+        let client = state.world.get::<&ConfinedPointerClient>(*entity).unwrap();
         simple_event_shunt! {
-            confined_ptr.client, request: cp::Request => [
+            client, request: cp::Request => [
                 SetRegion {
                     |region| region.as_ref().map(|r| r.data().unwrap())
                 },
@@ -854,19 +902,19 @@ impl<C: XConnection> Dispatch<ConfinedPointerServer, ObjectKey> for ServerState<
     }
 }
 
-impl<C: XConnection> Dispatch<LockedPointerServer, ObjectKey> for ServerState<C> {
+impl<C: XConnection> Dispatch<LockedPointerServer, Entity> for ServerState<C> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
         _: &LockedPointerServer,
         request: <LockedPointerServer as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        let locked_ptr: &LockedPointer = state.objects[*key].as_ref();
+        let client = state.world.get::<&LockedPointerClient>(*entity).unwrap();
         simple_event_shunt! {
-            locked_ptr.client, request: lp::Request => [
+            client, request: lp::Request => [
                 SetCursorPositionHint { surface_x, surface_y },
                 SetRegion {
                     |region| region.as_ref().map(|r| r.data().unwrap())
@@ -900,29 +948,31 @@ impl<C: XConnection>
                 region,
                 lifetime,
             } => {
-                let surf_key: ObjectKey = surface.data().copied().unwrap();
-                let ptr_key: ObjectKey = pointer.data().copied().unwrap();
-                state.objects.insert_from_other_objects(
-                    [surf_key, ptr_key],
-                    |[surf_obj, ptr_obj], key| {
-                        let SurfaceData {
-                            client: c_surface, ..
-                        }: &SurfaceData = surf_obj.try_into().unwrap();
-                        let Pointer { client: c_ptr, .. }: &Pointer = ptr_obj.try_into().unwrap();
+                let surf_key: Entity = surface.data().copied().unwrap();
+                let ptr_key: Entity = pointer.data().copied().unwrap();
 
-                        let client = client.confine_pointer(
-                            c_surface,
-                            c_ptr,
-                            region.as_ref().map(|r| r.data().unwrap()),
-                            convert_wenum(lifetime),
-                            &state.qh,
-                            key,
-                        );
-                        let server = data_init.init(id, key);
+                let entity = state.world.reserve_entity();
+                let client = {
+                    let c_surface = state
+                        .world
+                        .get::<&client::wl_surface::WlSurface>(surf_key)
+                        .unwrap();
+                    let c_ptr = state
+                        .world
+                        .get::<&client::wl_pointer::WlPointer>(ptr_key)
+                        .unwrap();
+                    client.confine_pointer(
+                        &c_surface,
+                        &c_ptr,
+                        region.as_ref().map(|r| r.data().unwrap()),
+                        convert_wenum(lifetime),
+                        &state.qh,
+                        entity,
+                    )
+                };
+                let server = data_init.init(id, entity);
 
-                        ConfinedPointer { client, server }.into()
-                    },
-                );
+                state.world.spawn_at(entity, (client, server));
             }
             Request::LockPointer {
                 id,
@@ -931,27 +981,31 @@ impl<C: XConnection>
                 region,
                 lifetime,
             } => {
-                let surf_key: ObjectKey = surface.data().copied().unwrap();
-                let ptr_key: ObjectKey = pointer.data().copied().unwrap();
-                state.objects.insert_from_other_objects(
-                    [surf_key, ptr_key],
-                    |[surf_obj, ptr_obj], key| {
-                        let SurfaceData {
-                            client: c_surface, ..
-                        }: &SurfaceData = surf_obj.try_into().unwrap();
-                        let Pointer { client: c_ptr, .. }: &Pointer = ptr_obj.try_into().unwrap();
-                        let client = client.lock_pointer(
-                            c_surface,
-                            c_ptr,
-                            region.as_ref().map(|r| r.data().unwrap()),
-                            convert_wenum(lifetime),
-                            &state.qh,
-                            key,
-                        );
-                        let server = data_init.init(id, key);
-                        LockedPointer { client, server }.into()
-                    },
-                );
+                let surf_key: Entity = surface.data().copied().unwrap();
+                let ptr_key: Entity = pointer.data().copied().unwrap();
+
+                let entity = state.world.reserve_entity();
+                let client = {
+                    let c_surface = state
+                        .world
+                        .get::<&client::wl_surface::WlSurface>(surf_key)
+                        .unwrap();
+                    let c_ptr = state
+                        .world
+                        .get::<&client::wl_pointer::WlPointer>(ptr_key)
+                        .unwrap();
+                    client.lock_pointer(
+                        &c_surface,
+                        &c_ptr,
+                        region.as_ref().map(|r| r.data().unwrap()),
+                        convert_wenum(lifetime),
+                        &state.qh,
+                        entity,
+                    )
+                };
+                let server = data_init.init(id, entity);
+
+                state.world.spawn_at(entity, (client, server));
             }
             Request::Destroy => {
                 client.destroy();
@@ -979,15 +1033,19 @@ impl<C: XConnection>
         use s_tablet::zwp_tablet_manager_v2::Request::*;
         match request {
             GetTabletSeat { tablet_seat, seat } => {
-                let seat_key: ObjectKey = seat.data().copied().unwrap();
-                state
-                    .objects
-                    .insert_from_other_objects([seat_key], |[seat_obj], key| {
-                        let Seat { client: c_seat, .. }: &Seat = seat_obj.try_into().unwrap();
-                        let client = client.get_tablet_seat(c_seat, &state.qh, key);
-                        let server = data_init.init(tablet_seat, key);
-                        TabletSeat { client, server }.into()
-                    });
+                let seat_key: Entity = seat.data().copied().unwrap();
+
+                let entity = state.world.reserve_entity();
+                let client = {
+                    let c_seat = state
+                        .world
+                        .get::<&client::wl_seat::WlSeat>(seat_key)
+                        .unwrap();
+                    client.get_tablet_seat(&c_seat, &state.qh, entity)
+                };
+                let server = data_init.init(tablet_seat, entity);
+
+                state.world.spawn_at(entity, (client, server));
             }
             other => {
                 warn!("unhandled tablet request: {other:?}");
@@ -996,11 +1054,20 @@ impl<C: XConnection>
     }
 }
 
-only_destroy_request_impl!(TabletSeat);
-only_destroy_request_impl!(Tablet);
-only_destroy_request_impl!(TabletPadGroup);
+only_destroy_request_impl!(
+    s_tablet::zwp_tablet_seat_v2::ZwpTabletSeatV2,
+    c_tablet::zwp_tablet_seat_v2::ZwpTabletSeatV2
+);
+only_destroy_request_impl!(
+    s_tablet::zwp_tablet_v2::ZwpTabletV2,
+    c_tablet::zwp_tablet_v2::ZwpTabletV2
+);
+only_destroy_request_impl!(
+    s_tablet::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2,
+    c_tablet::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2
+);
 
-impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_v2::ZwpTabletPadV2, ObjectKey>
+impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_v2::ZwpTabletPadV2, Entity>
     for ServerState<C>
 {
     fn request(
@@ -1008,29 +1075,33 @@ impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_v2::ZwpTabletPadV2, Objec
         _: &Client,
         _: &s_tablet::zwp_tablet_pad_v2::ZwpTabletPadV2,
         request: <s_tablet::zwp_tablet_pad_v2::ZwpTabletPadV2 as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        let pad: &TabletPad = state.objects[*key].as_ref();
+        let client = state
+            .world
+            .get::<&c_tablet::zwp_tablet_pad_v2::ZwpTabletPadV2>(*entity)
+            .unwrap();
         match request {
             s_tablet::zwp_tablet_pad_v2::Request::SetFeedback {
                 button,
                 description,
                 serial,
             } => {
-                pad.client.set_feedback(button, description, serial);
+                client.set_feedback(button, description, serial);
             }
             s_tablet::zwp_tablet_pad_v2::Request::Destroy => {
-                pad.client.destroy();
-                state.objects.remove(*key);
+                client.destroy();
+                drop(client);
+                state.world.despawn(*entity).unwrap();
             }
             other => warn!("unhandled tablet pad request: {other:?}"),
         }
     }
 }
 
-impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2, ObjectKey>
+impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2, Entity>
     for ServerState<C>
 {
     fn request(
@@ -1038,11 +1109,14 @@ impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2, Obj
         _: &Client,
         _: &s_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2,
         request: <s_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2 as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        let tool: &TabletTool = state.objects[*key].as_ref();
+        let client = state
+            .world
+            .get::<&c_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2>(*entity)
+            .unwrap();
         match request {
             s_tablet::zwp_tablet_tool_v2::Request::SetCursor {
                 serial,
@@ -1050,24 +1124,26 @@ impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2, Obj
                 hotspot_x,
                 hotspot_y,
             } => {
-                let surf_key: Option<ObjectKey> = surface.map(|s| s.data().copied().unwrap());
+                let surf_key: Option<Entity> = surface.map(|s| s.data().copied().unwrap());
                 let c_surface = surf_key.map(|key| {
-                    let d: &SurfaceData = state.objects[key].as_ref();
-                    &d.client
+                    state
+                        .world
+                        .get::<&client::wl_surface::WlSurface>(key)
+                        .unwrap()
                 });
-                tool.client
-                    .set_cursor(serial, c_surface, hotspot_x, hotspot_y);
+                client.set_cursor(serial, c_surface.as_deref(), hotspot_x, hotspot_y);
             }
             s_tablet::zwp_tablet_tool_v2::Request::Destroy => {
-                tool.client.destroy();
-                state.objects.remove(*key);
+                client.destroy();
+                drop(client);
+                state.world.despawn(*entity).unwrap();
             }
             other => warn!("unhandled tablet tool request: {other:?}"),
         }
     }
 }
 
-impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2, ObjectKey>
+impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2, Entity>
     for ServerState<C>
 {
     fn request(
@@ -1075,28 +1151,32 @@ impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_ring_v2::ZwpTabletPadRing
         _: &Client,
         _: &s_tablet::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2,
         request: <s_tablet::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2 as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        let ring: &TabletPadRing = state.objects[*key].as_ref();
+        let client = state
+            .world
+            .get::<&c_tablet::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2>(*entity)
+            .unwrap();
         match request {
             s_tablet::zwp_tablet_pad_ring_v2::Request::SetFeedback {
                 description,
                 serial,
             } => {
-                ring.client.set_feedback(description, serial);
+                client.set_feedback(description, serial);
             }
             s_tablet::zwp_tablet_pad_ring_v2::Request::Destroy => {
-                ring.client.destroy();
-                state.objects.remove(*key);
+                client.destroy();
+                drop(client);
+                state.world.despawn(*entity).unwrap();
             }
             other => warn!("unhandled tablet pad ring request: {other:?}"),
         }
     }
 }
 
-impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2, ObjectKey>
+impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2, Entity>
     for ServerState<C>
 {
     fn request(
@@ -1104,21 +1184,26 @@ impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_strip_v2::ZwpTabletPadStr
         _: &Client,
         _: &s_tablet::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2,
         request: <s_tablet::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2 as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        let strip: &TabletPadStrip = state.objects[*key].as_ref();
+        let client = state
+            .world
+            .get::<&c_tablet::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2>(*entity)
+            .unwrap();
+
         match request {
             s_tablet::zwp_tablet_pad_strip_v2::Request::SetFeedback {
                 description,
                 serial,
             } => {
-                strip.client.set_feedback(description, serial);
+                client.set_feedback(description, serial);
             }
             s_tablet::zwp_tablet_pad_strip_v2::Request::Destroy => {
-                strip.client.destroy();
-                state.objects.remove(*key);
+                client.destroy();
+                drop(client);
+                state.world.despawn(*entity).unwrap();
             }
             other => warn!("unhandled tablet pad strip request: {other:?}"),
         }
@@ -1145,7 +1230,7 @@ macro_rules! global_dispatch_no_events {
         impl<C: XConnection> GlobalDispatch<$server, Global> for ServerState<C>
         where
             ServerState<C>: Dispatch<$server, ClientGlobalWrapper<$client>>,
-            Globals: wayland_client::Dispatch<$client, ()>,
+            MyWorld: wayland_client::Dispatch<$client, ()>,
         {
             fn bind(
                 state: &mut Self,
@@ -1159,13 +1244,12 @@ macro_rules! global_dispatch_no_events {
                 let server = data_init.init(resource, client.clone());
                 client
                     .0
-                    .set(
-                        state
-                            .clientside
-                            .global_list
-                            .registry()
-                            .bind::<$client, _, _>(data.name, server.version(), &state.qh, ()),
-                    )
+                    .set(state.world.global_list.registry().bind::<$client, _, _>(
+                        data.name,
+                        server.version(),
+                        &state.qh,
+                        (),
+                    ))
                     .unwrap();
             }
         }
@@ -1178,9 +1262,8 @@ macro_rules! global_dispatch_with_events {
         where
             $server: Resource,
             $client: Proxy,
-            ServerState<C>: Dispatch<$server, ObjectKey>,
-            Globals: wayland_client::Dispatch<$client, ObjectKey>,
-            GenericObject<$server, $client>: Into<Object>,
+            ServerState<C>: Dispatch<$server, Entity>,
+            MyWorld: wayland_client::Dispatch<$client, Entity>,
         {
             fn bind(
                 state: &mut Self,
@@ -1190,15 +1273,15 @@ macro_rules! global_dispatch_with_events {
                 data: &Global,
                 data_init: &mut wayland_server::DataInit<'_, Self>,
             ) {
-                state.objects.insert_with_key(|key| {
-                    let server = data_init.init(resource, key);
-                    let client = state
-                        .clientside
-                        .global_list
-                        .registry()
-                        .bind::<$client, _, _>(data.name, server.version(), &state.qh, key);
-                    GenericObject { server, client }.into()
-                });
+                let entity = state.world.reserve_entity();
+                let server = data_init.init(resource, entity);
+                let client = state.world.global_list.registry().bind::<$client, _, _>(
+                    data.name,
+                    server.version(),
+                    &state.qh,
+                    entity,
+                );
+                state.world.spawn_at(entity, (server, client));
             }
         }
     };
@@ -1218,14 +1301,7 @@ global_dispatch_no_events!(
     c_tablet::zwp_tablet_manager_v2::ZwpTabletManagerV2
 );
 
-impl<C: XConnection> GlobalDispatch<WlSeat, Global> for ServerState<C>
-where
-    WlSeat: Resource,
-    client::wl_seat::WlSeat: Proxy,
-    ServerState<C>: Dispatch<WlSeat, ObjectKey>,
-    Globals: wayland_client::Dispatch<client::wl_seat::WlSeat, ObjectKey>,
-    GenericObject<WlSeat, client::wl_seat::WlSeat>: Into<Object>,
-{
+impl<C: XConnection> GlobalDispatch<WlSeat, Global> for ServerState<C> {
     fn bind(
         state: &mut Self,
         _: &DisplayHandle,
@@ -1234,20 +1310,20 @@ where
         data: &Global,
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        state.objects.insert_with_key(|key| {
-            let server = data_init.init(resource, key);
-            let client = state
-                .clientside
-                .global_list
-                .registry()
-                .bind::<client::wl_seat::WlSeat, _, _>(data.name, server.version(), &state.qh, key);
-            if let Some(c) = &mut state.clipboard_data {
-                c.device = Some(c.manager.get_data_device(&state.qh, &client));
-            }
-            GenericObject { server, client }.into()
-        });
+        let entity = state.world.reserve_entity();
+        let server = data_init.init(resource, entity);
+        let client = state
+            .world
+            .global_list
+            .registry()
+            .bind::<client::wl_seat::WlSeat, _, _>(data.name, server.version(), &state.qh, entity);
+        if let Some(c) = &mut state.clipboard_data {
+            c.device = Some(c.manager.get_data_device(&state.qh, &client));
+        }
+        state.world.spawn_at(entity, (server, client));
     }
 }
+
 impl<C: XConnection> GlobalDispatch<WlOutput, Global> for ServerState<C> {
     fn bind(
         state: &mut Self,
@@ -1257,21 +1333,27 @@ impl<C: XConnection> GlobalDispatch<WlOutput, Global> for ServerState<C> {
         data: &Global,
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        let key = state.objects.insert_with_key(|key| {
-            let server = data_init.init(resource, key);
-            let client = state
-                .clientside
-                .global_list
-                .registry()
-                .bind::<client::wl_output::WlOutput, _, _>(
-                    data.name,
-                    server.version(),
-                    &state.qh,
-                    key,
-                );
-            Output::new(client, server).into()
-        });
-        state.output_keys.insert(key, ());
+        let entity = state.world.reserve_entity();
+        let server = data_init.init(resource, entity);
+        let client = state
+            .world
+            .global_list
+            .registry()
+            .bind::<client::wl_output::WlOutput, _, _>(
+                data.name,
+                server.version(),
+                &state.qh,
+                entity,
+            );
+        state.world.spawn_at(
+            entity,
+            (
+                server,
+                client,
+                event::OutputScaleFactor(1),
+                event::OutputDimensions::default(),
+            ),
+        );
         state.output_scales_updated = true;
     }
 }
@@ -1303,9 +1385,8 @@ impl<C: XConnection> Dispatch<XwaylandShellV1, ()> for ServerState<C> {
         use xwayland_shell_v1::Request;
         match request {
             Request::GetXwaylandSurface { id, surface } => {
-                let key: ObjectKey = surface.data().copied().unwrap();
-                let data: &mut SurfaceData = state.objects[key].as_mut();
-                if data.xwl.is_some() {
+                let e: Entity = surface.data().copied().unwrap();
+                if state.world.entity(e).unwrap().has::<XwaylandSurfaceV1>() {
                     error!("Surface {surface:?} already has the xwayland surface role!");
                     client.kill(
                         dhandle,
@@ -1319,8 +1400,7 @@ impl<C: XConnection> Dispatch<XwaylandShellV1, ()> for ServerState<C> {
                     return;
                 }
 
-                let xwl = data_init.init(id, key);
-                data.xwl = Some(xwl);
+                data_init.init(id, e);
             }
             Request::Destroy => {}
             _ => unreachable!(),
@@ -1328,45 +1408,49 @@ impl<C: XConnection> Dispatch<XwaylandShellV1, ()> for ServerState<C> {
     }
 }
 
-impl<C: XConnection> Dispatch<XwaylandSurfaceV1, ObjectKey> for ServerState<C> {
+impl<C: XConnection> Dispatch<XwaylandSurfaceV1, Entity> for ServerState<C> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
         _: &XwaylandSurfaceV1,
         request: <XwaylandSurfaceV1 as Resource>::Request,
-        key: &ObjectKey,
+        entity: &Entity,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
         use xwayland_surface_v1::Request;
-        let data: &mut SurfaceData = state.objects[*key].as_mut();
         match request {
             Request::SetSerial {
                 serial_lo,
                 serial_hi,
             } => {
-                let serial = [serial_lo, serial_hi];
-                data.serial = Some(serial);
-                if let Some((win, window_data)) =
-                    state.windows.iter_mut().find_map(|(win, data)| {
-                        Some(*win)
-                            .zip((data.surface_serial.is_some_and(|s| s == serial)).then_some(data))
-                    })
-                {
-                    debug!(
-                        "associate surface {} with {:?}",
-                        data.server.id().protocol_id(),
-                        win
-                    );
-                    window_data.surface_key = Some(*key);
-                    state.associated_windows.insert(*key, win);
-                    if window_data.mapped {
-                        state.create_role_window(win, *key);
+                let surface_id = state.world.get::<&WlSurface>(*entity).unwrap().id();
+                let serial = SurfaceSerial([serial_lo, serial_hi]);
+                let win_entity = state
+                    .world
+                    .query_mut::<&SurfaceSerial>()
+                    .without::<&WlSurface>()
+                    .into_iter()
+                    .find(|(_, surface_serial)| **surface_serial == serial)
+                    .map(|i| i.0);
+
+                if let Some(win_entity) = win_entity {
+                    let win = *state.world.get::<&x::Window>(win_entity).unwrap();
+                    debug!("associate {surface_id} with {win:?}");
+                    state.windows.insert(win, *entity);
+                    let mut builder = hecs::EntityBuilder::new();
+                    builder.add_bundle(state.world.take(win_entity).unwrap());
+                    state.world.insert(*entity, builder.build()).unwrap();
+                    let data = state.world.entity(*entity).unwrap();
+                    if data.get::<&WindowData>().unwrap().mapped {
+                        state.create_role_window(win, *entity);
                     }
+                } else {
+                    state.world.insert(*entity, (serial,)).unwrap();
                 }
             }
             Request::Destroy => {
-                data.xwl.take();
+                state.world.remove_one::<SurfaceSerial>(*entity).unwrap();
             }
             _ => unreachable!(),
         }

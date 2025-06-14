@@ -26,20 +26,18 @@ bitflags = "2.5.0"
 rustix = { workspace = true, features = ["event"] }
 wayland-client.workspace = true
 wayland-protocols = { workspace = true, features = ["client", "server", "staging", "unstable"] }
-wayland-scanner.workspace = true
 wayland-server.workspace = true
 xcb = { version = "1.3.0", features = ["composite", "randr", "res"] }
 wl_drm = { path = "wl_drm" }
-libc = "0.2.153"
 log = "0.4.21"
 env_logger = "0.11.3"
 pretty_env_logger = "0.5.0"
-slotmap = "1.0.7"
 xcb-util-cursor = "0.3.2"
 smithay-client-toolkit = { version = "0.19.1", default-features = false }
 
 sd-notify = { version = "0.4.2", optional = true }
 macros = { version = "0.1.0", path = "macros" }
+hecs = { version = "0.10.5", features = ["macros"] }
 
 [features]
 default = []

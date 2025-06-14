@@ -1,4 +1,3 @@
-mod clientside;
 mod server;
 pub mod xstate;
 

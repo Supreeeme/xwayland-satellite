@@ -1,16 +1,16 @@
+mod clientside;
 mod dispatch;
 mod event;
-
 #[cfg(test)]
 mod tests;
 
 use self::event::*;
-use crate::clientside::*;
 use crate::xstate::{Decorations, WindowDims, WmHints, WmName, WmNormalHints};
 use crate::{X11Selection, XConnection};
+use clientside::MyWorld;
+use hecs::{Entity, World};
 use log::{debug, warn};
 use rustix::event::{poll, PollFd, PollFlags};
-use slotmap::{new_key_type, HopSlotMap, SparseSecondaryMap};
 use smithay_client_toolkit::activation::ActivationState;
 use smithay_client_toolkit::data_device_manager::{
     data_device::DataDevice, data_offer::SelectionOffer, data_source::CopyPasteSource,
@@ -21,8 +21,10 @@ use std::io::Read;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::rc::{Rc, Weak};
-use wayland_client::{globals::Global, protocol as client, Proxy};
-use wayland_protocols::wp::fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1;
+use wayland_client::{
+    globals::{registry_queue_init, Global},
+    protocol as client, Connection, EventQueue, Proxy, QueueHandle,
+};
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1;
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::{
     self, ZxdgToplevelDecorationV1,
@@ -31,8 +33,18 @@ use wayland_protocols::{
     wp::{
         fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
-        pointer_constraints::zv1::server::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
-        relative_pointer::zv1::server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+        pointer_constraints::zv1::{
+            client::{zwp_confined_pointer_v1, zwp_locked_pointer_v1},
+            server::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
+        },
+        relative_pointer::zv1::{
+            client::zwp_relative_pointer_v1,
+            server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+        },
+        tablet::zv2::client::{
+            zwp_tablet_pad_group_v2, zwp_tablet_pad_ring_v2, zwp_tablet_pad_strip_v2,
+            zwp_tablet_pad_v2, zwp_tablet_seat_v2, zwp_tablet_tool_v2, zwp_tablet_v2,
+        },
         tablet::zv2::server::zwp_tablet_manager_v2::ZwpTabletManagerV2,
         viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
     },
@@ -46,9 +58,7 @@ use wayland_protocols::{
         },
         xdg_output::zv1::server::zxdg_output_manager_v1::ZxdgOutputManagerV1,
     },
-    xwayland::shell::v1::server::{
-        xwayland_shell_v1::XwaylandShellV1, xwayland_surface_v1::XwaylandSurfaceV1,
-    },
+    xwayland::shell::v1::server::xwayland_shell_v1::XwaylandShellV1,
 };
 use wayland_server::protocol::wl_seat::WlSeat;
 use wayland_server::{
@@ -104,27 +114,15 @@ struct WindowOutputOffset {
 
 #[derive(Debug)]
 struct WindowData {
-    window: x::Window,
-    surface_serial: Option<[u32; 2]>,
-    surface_key: Option<ObjectKey>,
     mapped: bool,
     attrs: WindowAttributes,
     output_offset: WindowOutputOffset,
-    output_key: Option<ObjectKey>,
     activation_token: Option<String>,
 }
 
 impl WindowData {
-    fn new(
-        window: x::Window,
-        override_redirect: bool,
-        dims: WindowDims,
-        activation_token: Option<String>,
-    ) -> Self {
+    fn new(override_redirect: bool, dims: WindowDims, activation_token: Option<String>) -> Self {
         Self {
-            window,
-            surface_key: None,
-            surface_serial: None,
             mapped: false,
             attrs: WindowAttributes {
                 is_popup: override_redirect,
@@ -132,22 +130,17 @@ impl WindowData {
                 ..Default::default()
             },
             output_offset: WindowOutputOffset::default(),
-            output_key: None,
             activation_token,
         }
     }
 
     fn update_output_offset<C: XConnection>(
         &mut self,
-        output_key: ObjectKey,
+        window: x::Window,
         offset: WindowOutputOffset,
         connection: &mut C,
     ) {
         log::trace!("offset: {offset:?}");
-        if self.output_key != Some(output_key) {
-            self.output_key = Some(output_key);
-        }
-
         if offset == self.output_offset {
             return;
         }
@@ -158,7 +151,7 @@ impl WindowData {
         self.output_offset = offset;
 
         connection.set_window_dims(
-            self.window,
+            window,
             PendingSurfaceState {
                 x: dims.x as i32,
                 y: dims.y as i32,
@@ -167,7 +160,7 @@ impl WindowData {
             },
         );
 
-        debug!("set {:?} offset to {:?}", self.window, self.output_offset);
+        debug!("set {:?} offset to {:?}", window, self.output_offset);
     }
 }
 
@@ -177,70 +170,50 @@ struct SurfaceAttach {
     y: i32,
 }
 
-pub struct SurfaceData {
-    client: client::wl_surface::WlSurface,
-    server: WlSurface,
-    key: ObjectKey,
-    serial: Option<[u32; 2]>,
-    frame_callback: Option<WlCallback>,
-    attach: Option<SurfaceAttach>,
-    role: Option<SurfaceRole>,
-    xwl: Option<XwaylandSurfaceV1>,
-    window: Option<x::Window>,
-    output_key: Option<ObjectKey>,
-    scale_factor: f64,
-    viewport: WpViewport,
-    fractional: Option<WpFractionalScaleV1>,
+#[derive(PartialEq, Eq)]
+struct SurfaceSerial([u32; 2]);
+
+#[derive(Copy, Clone)]
+struct SurfaceScaleFactor(f64);
+
+#[derive(Debug)]
+enum SurfaceRole {
+    Toplevel(Option<ToplevelData>),
+    Popup(Option<PopupData>),
 }
 
-impl SurfaceData {
+impl SurfaceRole {
     fn xdg(&self) -> Option<&XdgSurfaceData> {
-        match self
-            .role
-            .as_ref()
-            .expect("Tried to get XdgSurface for surface without role")
-        {
+        match self {
             SurfaceRole::Toplevel(ref t) => t.as_ref().map(|t| &t.xdg),
             SurfaceRole::Popup(ref p) => p.as_ref().map(|p| &p.xdg),
         }
     }
 
     fn xdg_mut(&mut self) -> Option<&mut XdgSurfaceData> {
-        match self
-            .role
-            .as_mut()
-            .expect("Tried to get XdgSurface for surface without role")
-        {
+        match self {
             SurfaceRole::Toplevel(ref mut t) => t.as_mut().map(|t| &mut t.xdg),
             SurfaceRole::Popup(ref mut p) => p.as_mut().map(|p| &mut p.xdg),
         }
     }
 
-    fn destroy_role(&mut self) {
-        if let Some(role) = self.role.take() {
-            match role {
-                SurfaceRole::Toplevel(Some(mut t)) => {
-                    if let Some(decoration) = t.decoration.take() {
-                        decoration.destroy();
-                    }
-                    t.toplevel.destroy();
-                    t.xdg.surface.destroy();
+    fn destroy(&mut self) {
+        match self {
+            SurfaceRole::Toplevel(Some(ref mut t)) => {
+                if let Some(decoration) = t.decoration.take() {
+                    decoration.destroy();
                 }
-                SurfaceRole::Popup(Some(p)) => {
-                    p.positioner.destroy();
-                    p.popup.destroy();
-                    p.xdg.surface.destroy();
-                }
-                _ => {}
+                t.toplevel.destroy();
+                t.xdg.surface.destroy();
             }
+            SurfaceRole::Popup(Some(p)) => {
+                p.positioner.destroy();
+                p.popup.destroy();
+                p.xdg.surface.destroy();
+            }
+            _ => {}
         }
     }
-}
-
-#[derive(Debug)]
-enum SurfaceRole {
-    Toplevel(Option<ToplevelData>),
-    Popup(Option<PopupData>),
 }
 
 #[derive(Debug)]
@@ -265,9 +238,8 @@ struct PopupData {
     xdg: XdgSurfaceData,
 }
 
-pub(crate) trait HandleEvent {
-    type Event;
-    fn handle_event<C: XConnection>(&mut self, event: Self::Event, state: &mut ServerState<C>);
+trait Event {
+    fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>);
 }
 
 macro_rules! enum_try_from {
@@ -319,39 +291,26 @@ macro_rules! enum_try_from {
     }
 }
 
-/// Implement HandleEvent for our enum
-macro_rules! handle_event_enum {
+macro_rules! impl_event {
     (
         $(#[$meta:meta])*
-        $pub:vis enum $name:ident {
+        $pub:vis enum $enum:ident {
             $( $variant:ident($ty:ty) ),+
-        } => $name_event:ident
+        }
     ) => {
         enum_try_from! {
             $(#[$meta])*
-            $pub enum $name {
+            $pub enum $enum {
                 $( $variant($ty) ),+
             }
         }
 
-        enum_try_from! {
-            #[derive(Debug)]
-            $pub enum $name_event {
-                $( $variant(<$ty as HandleEvent>::Event) ),+
-            }
-        }
-
-        impl HandleEvent for $name {
-            type Event = $name_event;
-
-            fn handle_event<C: XConnection>(&mut self, event: Self::Event, state: &mut ServerState<C>) {
+        impl Event for $enum {
+            fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
                 match self {
                     $(
                         Self::$variant(v) => {
-                            let Self::Event::$variant(event) = event else {
-                                unreachable!();
-                            };
-                            v.handle_event(event, state)
+                            v.handle(target, state)
                         }
                     ),+
                 }
@@ -360,86 +319,28 @@ macro_rules! handle_event_enum {
     }
 }
 
-handle_event_enum! {
-
-/// Objects that generate client side events that we will have to process.
-pub(crate) enum Object {
-    Surface(SurfaceData),
-    Buffer(Buffer),
-    Seat(Seat),
-    Pointer(Pointer),
-    Keyboard(Keyboard),
-    Output(Output),
-    RelativePointer(RelativePointer),
-    DmabufFeedback(DmabufFeedback),
-    Drm(Drm),
-    Touch(Touch),
-    ConfinedPointer(ConfinedPointer),
-    LockedPointer(LockedPointer),
-    TabletSeat(TabletSeat),
-    Tablet(Tablet),
-    TabletTool(TabletTool),
-    TabletPad(TabletPad),
-    TabletPadGroup(TabletPadGroup),
-    TabletPadRing(TabletPadRing),
-    TabletPadStrip(TabletPadStrip)
-} => ObjectEvent
-
+impl_event! {
+enum ObjectEvent {
+    Surface(event::SurfaceEvents),
+    Buffer(client::wl_buffer::Event),
+    Seat(client::wl_seat::Event),
+    Pointer(client::wl_pointer::Event),
+    Keyboard(client::wl_keyboard::Event),
+    Touch(client::wl_touch::Event),
+    Output(event::OutputEvent),
+    Drm(wl_drm::client::wl_drm::Event),
+    DmabufFeedback(c_dmabuf::zwp_linux_dmabuf_feedback_v1::Event),
+    RelativePointer(zwp_relative_pointer_v1::Event),
+    LockedPointer(zwp_locked_pointer_v1::Event),
+    ConfinedPointer(zwp_confined_pointer_v1::Event),
+    TabletSeat(zwp_tablet_seat_v2::Event),
+    Tablet(zwp_tablet_v2::Event),
+    TabletPad(zwp_tablet_pad_v2::Event),
+    TabletTool(zwp_tablet_tool_v2::Event),
+    TabletPadGroup(zwp_tablet_pad_group_v2::Event),
+    TabletPadRing(zwp_tablet_pad_ring_v2::Event),
+    TabletPadStrip(zwp_tablet_pad_strip_v2::Event)
 }
-
-#[derive(Default)]
-pub(crate) struct WrappedObject(Option<Object>);
-
-impl<T> From<T> for WrappedObject
-where
-    T: Into<Object>,
-{
-    fn from(value: T) -> Self {
-        Self(Some(value.into()))
-    }
-}
-
-impl<T> AsRef<T> for WrappedObject
-where
-    for<'a> &'a T: TryFrom<&'a Object, Error = String>,
-{
-    fn as_ref(&self) -> &T {
-        <&T>::try_from(self.0.as_ref().unwrap()).unwrap()
-    }
-}
-
-impl<T> AsMut<T> for WrappedObject
-where
-    for<'a> &'a mut T: TryFrom<&'a mut Object, Error = String>,
-{
-    fn as_mut(&mut self) -> &mut T {
-        <&mut T>::try_from(self.0.as_mut().unwrap()).unwrap()
-    }
-}
-
-type ObjectMap = HopSlotMap<ObjectKey, WrappedObject>;
-trait ObjectMapExt {
-    fn insert_from_other_objects<F, const N: usize>(&mut self, keys: [ObjectKey; N], insert_fn: F)
-    where
-        F: FnOnce([&Object; N], ObjectKey) -> Object;
-}
-
-impl ObjectMapExt for ObjectMap {
-    /// Insert an object into our map that needs some other values from our map as well
-    fn insert_from_other_objects<F, const N: usize>(&mut self, keys: [ObjectKey; N], insert_fn: F)
-    where
-        F: FnOnce([&Object; N], ObjectKey) -> Object,
-    {
-        let objects = keys.each_ref().map(|key| self[*key].0.take().unwrap());
-        let key = self.insert(WrappedObject(None));
-        let obj = insert_fn(objects.each_ref(), key);
-        let ret = self[key].0.replace(obj);
-        debug_assert!(ret.is_none());
-        for (object, key) in objects.into_iter().zip(keys.into_iter()) {
-            let ret = self[key].0.replace(object);
-            debug_assert!(ret.is_none());
-        }
-    }
 }
 
 fn handle_globals<'a, C: XConnection>(
@@ -448,18 +349,18 @@ fn handle_globals<'a, C: XConnection>(
 ) {
     for global in globals {
         macro_rules! server_global {
-                ($($global:ty),+) => {
-                    match global.interface {
-                        $(
-                            ref x if x == <$global>::interface().name => {
-                                let version = u32::min(global.version, <$global>::interface().version);
-                                dh.create_global::<ServerState<C>, $global, Global>(version, global.clone());
-                            }
-                        )+
-                        _ => {}
-                    }
+            ($($global:ty),+) => {
+                match global.interface {
+                    $(
+                        ref x if x == <$global>::interface().name => {
+                            let version = u32::min(global.version, <$global>::interface().version);
+                            dh.create_global::<ServerState<C>, $global, Global>(version, global.clone());
+                        }
+                    )+
+                    _ => {}
                 }
             }
+        }
 
         server_global![
             WlCompositor,
@@ -476,10 +377,6 @@ fn handle_globals<'a, C: XConnection>(
     }
 }
 
-new_key_type! {
-    pub struct ObjectKey;
-}
-
 struct FocusData {
     window: x::Window,
     output_name: Option<String>,
@@ -487,7 +384,7 @@ struct FocusData {
 
 #[derive(Copy, Clone, Default)]
 struct GlobalOutputOffsetDimension {
-    owner: Option<ObjectKey>,
+    owner: Option<Entity>,
     value: i32,
 }
 
@@ -499,14 +396,12 @@ struct GlobalOutputOffset {
 
 pub struct ServerState<C: XConnection> {
     dh: DisplayHandle,
-    clientside: ClientState,
-    objects: ObjectMap,
-    associated_windows: SparseSecondaryMap<ObjectKey, x::Window>,
-    output_keys: SparseSecondaryMap<ObjectKey, ()>,
-    windows: HashMap<x::Window, WindowData>,
+    windows: HashMap<x::Window, Entity>,
     pids: HashSet<u32>,
 
-    qh: ClientQueueHandle,
+    world: MyWorld,
+    queue: EventQueue<MyWorld>,
+    qh: QueueHandle<MyWorld>,
     client: Option<Client>,
     to_focus: Option<FocusData>,
     unfocus: bool,
@@ -517,6 +412,7 @@ pub struct ServerState<C: XConnection> {
     xdg_wm_base: XdgWmBase,
     viewporter: WpViewporter,
     fractional_scale: Option<WpFractionalScaleManagerV1>,
+    decoration_manager: Option<ZxdgDecorationManagerV1>,
     clipboard_data: Option<ClipboardData<C::X11Selection>>,
     last_kb_serial: Option<(client::wl_seat::WlSeat, u32)>,
     activation_state: Option<ActivationState>,
@@ -524,16 +420,20 @@ pub struct ServerState<C: XConnection> {
     global_offset_updated: bool,
     output_scales_updated: bool,
     new_scale: Option<i32>,
-    decoration_manager: Option<ZxdgDecorationManagerV1>,
 }
 
 impl<C: XConnection> ServerState<C> {
     pub fn new(dh: DisplayHandle, server_connection: Option<UnixStream>) -> Self {
-        let clientside = ClientState::new(server_connection);
-        let qh = clientside.qh.clone();
+        let connection = if let Some(stream) = server_connection {
+            Connection::from_socket(stream).unwrap()
+        } else {
+            Connection::connect_to_env().unwrap()
+        };
 
-        let xdg_wm_base = clientside
-            .global_list
+        let (global_list, queue) = registry_queue_init::<MyWorld>(&connection).unwrap();
+        let qh = queue.handle();
+
+        let xdg_wm_base = global_list
             .bind::<XdgWmBase, _, _>(&qh, 2..=6, ())
             .expect("Could not bind xdg_wm_base");
 
@@ -541,16 +441,15 @@ impl<C: XConnection> ServerState<C> {
             warn!("xdg_wm_base version 2 detected. Popup repositioning will not work, and some popups may not work correctly.");
         }
 
-        let viewporter = clientside
-            .global_list
+        let viewporter = global_list
             .bind::<WpViewporter, _, _>(&qh, 1..=1, ())
             .expect("Could not bind wp_viewporter");
 
-        let fractional_scale = clientside.global_list.bind::<WpFractionalScaleManagerV1, _, _>(&qh, 1..=1, ())
+        let fractional_scale = global_list.bind::<WpFractionalScaleManagerV1, _, _>(&qh, 1..=1, ())
             .inspect_err(|e| warn!("Couldn't bind fractional scale manager: {e}. Fractional scaling will not work."))
             .ok();
 
-        let manager = DataDeviceManagerState::bind(&clientside.global_list, &qh)
+        let manager = DataDeviceManagerState::bind(&global_list, &qh)
             .inspect_err(|e| {
                 warn!("Could not bind data device manager ({e:?}). Clipboard will not work.")
             })
@@ -561,14 +460,13 @@ impl<C: XConnection> ServerState<C> {
             source: None::<CopyPasteData<C::X11Selection>>,
         });
 
-        let activation_state = ActivationState::bind(&clientside.global_list, &qh)
+        let activation_state = ActivationState::bind(&global_list, &qh)
             .inspect_err(|e| {
                 warn!("Could not bind xdg activation ({e:?}). Windows might not receive focus depending on compositor focus stealing policy.")
             })
             .ok();
 
-        let decoration_manager = clientside
-            .global_list
+        let decoration_manager = global_list
             .bind::<ZxdgDecorationManagerV1, _, _>(&qh, 1..=1, ())
             .inspect_err(|e| {
                 warn!("Could not bind xdg decoration ({e:?}). Windows might not have decorations.")
@@ -576,16 +474,15 @@ impl<C: XConnection> ServerState<C> {
             .ok();
 
         dh.create_global::<Self, XwaylandShellV1, _>(1, ());
-        clientside
-            .global_list
+        global_list
             .contents()
             .with_list(|globals| handle_globals::<C>(&dh, globals));
 
         Self {
             windows: HashMap::new(),
             pids: HashSet::new(),
-            clientside,
             client: None,
+            queue,
             qh,
             dh,
             to_focus: None,
@@ -593,9 +490,6 @@ impl<C: XConnection> ServerState<C> {
             last_focused_toplevel: None,
             last_hovered: None,
             connection: None,
-            objects: Default::default(),
-            output_keys: Default::default(),
-            associated_windows: Default::default(),
             xdg_wm_base,
             viewporter,
             fractional_scale,
@@ -616,11 +510,12 @@ impl<C: XConnection> ServerState<C> {
             output_scales_updated: false,
             new_scale: None,
             decoration_manager,
+            world: MyWorld::new(global_list),
         }
     }
 
     pub fn clientside_fd(&self) -> BorrowedFd<'_> {
-        self.clientside.queue.as_fd()
+        self.queue.as_fd()
     }
 
     pub fn connect(&mut self, connection: UnixStream) {
@@ -636,7 +531,7 @@ impl<C: XConnection> ServerState<C> {
     }
 
     fn handle_new_globals(&mut self) {
-        let globals = std::mem::take(&mut self.clientside.globals.new_globals);
+        let globals = std::mem::take(&mut self.world.new_globals);
         handle_globals::<C>(&self.dh, globals.iter());
     }
 
@@ -656,26 +551,40 @@ impl<C: XConnection> ServerState<C> {
                     .find_map(|line| line.strip_prefix(b"XDG_ACTIVATION_TOKEN="))
                     .and_then(|token| String::from_utf8(token.to_vec()).ok())
             });
-        self.windows.insert(
+
+        let id = self.world.spawn((
             window,
-            WindowData::new(window, override_redirect, dims, activation_token),
-        );
+            WindowData::new(override_redirect, dims, activation_token),
+        ));
+
+        self.windows.insert(window, id);
     }
 
     pub fn set_popup(&mut self, window: x::Window, is_popup: bool) {
-        let Some(win) = self.windows.get_mut(&window) else {
+        let Some(id) = self.windows.get(&window).copied() else {
             debug!("not setting popup for unknown window {window:?}");
             return;
         };
 
-        win.attrs.is_popup = is_popup;
+        self.world
+            .get::<&mut WindowData>(id)
+            .unwrap()
+            .attrs
+            .is_popup = is_popup;
     }
 
     pub fn set_win_title(&mut self, window: x::Window, name: WmName) {
-        let Some(win) = self.windows.get_mut(&window) else {
+        let Some(data) = self
+            .windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+        else {
             debug!("not setting title for unknown window {window:?}");
             return;
         };
+
+        let mut win = data.get::<&mut WindowData>().unwrap();
 
         let new_title = match &mut win.attrs.title {
             Some(w) => {
@@ -694,72 +603,72 @@ impl<C: XConnection> ServerState<C> {
         let Some(title) = new_title else {
             return;
         };
-        if let Some(key) = win.surface_key {
-            if let Some(object) = self.objects.get(key) {
-                let surface: &SurfaceData = object.as_ref();
-                if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
-                    data.toplevel.set_title(title.name().to_string());
-                }
-            } else {
-                warn!("could not set window title: stale surface");
+
+        if let Some(role) = data.get::<&SurfaceRole>() {
+            if let SurfaceRole::Toplevel(Some(data)) = &*role {
+                data.toplevel.set_title(title.name().to_string());
             }
         }
     }
 
     pub fn set_win_class(&mut self, window: x::Window, class: String) {
-        let Some(win) = self.windows.get_mut(&window) else {
+        let Some(data) = self
+            .windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+        else {
             debug!("not setting class for unknown window {window:?}");
             return;
         };
 
+        let mut win = data.get::<&mut WindowData>().unwrap();
+
         let class = win.attrs.class.insert(class);
-        if let Some(key) = win.surface_key {
-            if let Some(object) = self.objects.get(key) {
-                let surface: &SurfaceData = object.as_ref();
-                if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
-                    data.toplevel.set_app_id(class.to_string());
-                }
-            } else {
-                warn!("could not set window class: stale surface");
+        if let Some(role) = data.get::<&SurfaceRole>() {
+            if let SurfaceRole::Toplevel(Some(data)) = &*role {
+                data.toplevel.set_app_id(class.to_string());
             }
         }
     }
 
     pub fn set_win_hints(&mut self, window: x::Window, hints: WmHints) {
-        let Some(win) = self.windows.get_mut(&window) else {
+        let Some(id) = self.windows.get(&window).copied() else {
             debug!("not setting hints for unknown window {window:?}");
             return;
         };
-        win.attrs.group = hints.window_group;
+
+        self.world.get::<&mut WindowData>(id).unwrap().attrs.group = hints.window_group;
     }
 
     pub fn set_size_hints(&mut self, window: x::Window, hints: WmNormalHints) {
-        let Some(win) = self.windows.get_mut(&window) else {
+        let Some(data) = self
+            .windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+        else {
             debug!("not setting size hints for unknown window {window:?}");
             return;
         };
 
+        let mut win = data.get::<&mut WindowData>().unwrap();
+
         if win.attrs.size_hints.is_none() || *win.attrs.size_hints.as_ref().unwrap() != hints {
             debug!("setting {window:?} hints {hints:?}");
-            if let Some(key) = win.surface_key {
-                if let Some(object) = self.objects.get(key) {
-                    let surface: &SurfaceData = object.as_ref();
-                    if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
-                        if let Some(min_size) = &hints.min_size {
-                            data.toplevel.set_min_size(
-                                (min_size.width as f64 / surface.scale_factor) as i32,
-                                (min_size.height as f64 / surface.scale_factor) as i32,
-                            );
-                        }
-                        if let Some(max_size) = &hints.max_size {
-                            data.toplevel.set_max_size(
-                                (max_size.width as f64 / surface.scale_factor) as i32,
-                                (max_size.height as f64 / surface.scale_factor) as i32,
-                            );
-                        }
-                    }
-                } else {
-                    warn!("could not set size hint on {window:?}: stale surface")
+            let mut query = data.query::<(&SurfaceRole, &SurfaceScaleFactor)>();
+            if let Some((SurfaceRole::Toplevel(Some(data)), scale_factor)) = query.get() {
+                if let Some(min_size) = &hints.min_size {
+                    data.toplevel.set_min_size(
+                        (min_size.width as f64 / scale_factor.0) as i32,
+                        (min_size.height as f64 / scale_factor.0) as i32,
+                    );
+                }
+                if let Some(max_size) = &hints.max_size {
+                    data.toplevel.set_max_size(
+                        (max_size.width as f64 / scale_factor.0) as i32,
+                        (max_size.height as f64 / scale_factor.0) as i32,
+                    );
                 }
             }
             win.attrs.size_hints = Some(hints);
@@ -771,24 +680,26 @@ impl<C: XConnection> ServerState<C> {
             return;
         };
 
-        let Some(win) = self.windows.get_mut(&window) else {
+        let Some(data) = self
+            .windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+        else {
             debug!("not setting decorations for unknown window {window:?}");
             return;
         };
 
+        let mut win = data.get::<&mut WindowData>().unwrap();
+
         if win.attrs.decorations != Some(decorations) {
             debug!("setting {window:?} decorations {decorations:?}");
-            if let Some(key) = win.surface_key {
-                if let Some(object) = self.objects.get(key) {
-                    let surface: &SurfaceData = object.as_ref();
-                    if let Some(SurfaceRole::Toplevel(Some(data))) = &surface.role {
-                        data.decoration
-                            .as_ref()
-                            .unwrap()
-                            .set_mode(decorations.into());
-                    }
-                } else {
-                    warn!("could not set decorations on {window:?}: stale surface")
+            if let Some(role) = data.get::<&SurfaceRole>() {
+                if let SurfaceRole::Toplevel(Some(data)) = &*role {
+                    data.decoration
+                        .as_ref()
+                        .unwrap()
+                        .set_mode(decorations.into());
                 }
             }
             win.attrs.decorations = Some(decorations);
@@ -796,15 +707,22 @@ impl<C: XConnection> ServerState<C> {
     }
 
     pub fn set_window_serial(&mut self, window: x::Window, serial: [u32; 2]) {
-        let Some(win) = self.windows.get_mut(&window) else {
+        let Some(id) = self.windows.get(&window).copied() else {
             warn!("Tried to set serial for unknown window {window:?}");
             return;
         };
-        win.surface_serial = Some(serial);
+
+        self.world.insert(id, (SurfaceSerial(serial),)).unwrap();
     }
 
     pub fn can_change_position(&self, window: x::Window) -> bool {
-        let Some(win) = self.windows.get(&window) else {
+        let Some(win) = self
+            .windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+            .map(|data| data.get::<&WindowData>().unwrap())
+        else {
             return true;
         };
 
@@ -812,10 +730,18 @@ impl<C: XConnection> ServerState<C> {
     }
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
-        let Some(win) = self.windows.get_mut(&event.window()) else {
+        let Some(data) = self
+            .windows
+            .get(&event.window())
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+        else {
             debug!("not reconfiguring unknown window {:?}", event.window());
             return;
         };
+
+        let mut win = data.get::<&mut WindowData>().unwrap();
+
         let dims = WindowDims {
             x: event.x(),
             y: event.y(),
@@ -835,31 +761,29 @@ impl<C: XConnection> ServerState<C> {
             return;
         }
 
-        let Some(key) = win.surface_key else {
+        let mut query = data.query::<(&SurfaceRole, &SurfaceScaleFactor)>();
+        let Some((role, scale_factor)) = query.get() else {
             return;
         };
 
-        let Some(data): Option<&mut SurfaceData> = self.objects.get_mut(key).map(|o| o.as_mut())
-        else {
-            return;
-        };
-
-        match &data.role {
-            Some(SurfaceRole::Popup(Some(popup))) => {
+        match role {
+            SurfaceRole::Popup(Some(popup)) => {
                 popup.positioner.set_offset(
-                    ((event.x() as i32 - win.output_offset.x) as f64 / data.scale_factor) as i32,
-                    ((event.y() as i32 - win.output_offset.y) as f64 / data.scale_factor) as i32,
+                    ((event.x() as i32 - win.output_offset.x) as f64 / scale_factor.0) as i32,
+                    ((event.y() as i32 - win.output_offset.y) as f64 / scale_factor.0) as i32,
                 );
                 popup.positioner.set_size(
-                    1.max((event.width() as f64 / data.scale_factor) as i32),
-                    1.max((event.height() as f64 / data.scale_factor) as i32),
+                    1.max((event.width() as f64 / scale_factor.0) as i32),
+                    1.max((event.height() as f64 / scale_factor.0) as i32),
                 );
                 popup.popup.reposition(&popup.positioner, 0);
             }
-            Some(SurfaceRole::Toplevel(Some(_))) => {
+            SurfaceRole::Toplevel(Some(_)) => {
                 win.attrs.dims.width = dims.width;
                 win.attrs.dims.height = dims.height;
-                data.update_viewport(win.attrs.dims, win.attrs.size_hints);
+                drop(query);
+                drop(win);
+                update_surface_viewport(self.world.query_one(data.entity()).unwrap());
             }
             other => warn!("Non popup ({other:?}) being reconfigured, behavior may be off."),
         }
@@ -868,55 +792,65 @@ impl<C: XConnection> ServerState<C> {
     pub fn map_window(&mut self, window: x::Window) {
         debug!("mapping {window:?}");
 
-        let Some(window) = self.windows.get_mut(&window) else {
+        let Some(mut win) = self
+            .windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+            .map(|data| data.get::<&mut WindowData>().unwrap())
+        else {
             debug!("not mapping unknown window {window:?}");
             return;
         };
-        window.mapped = true;
+
+        win.mapped = true;
     }
 
     pub fn unmap_window(&mut self, window: x::Window) {
-        let Some(win) = self.windows.get_mut(&window) else {
-            return;
-        };
-        if !win.mapped {
-            return;
-        }
-        debug!("unmapping {window:?}");
+        let entity = self.windows.get(&window).copied();
 
-        if matches!(self.last_focused_toplevel, Some(x) if x == window) {
-            self.last_focused_toplevel.take();
-        }
-        if self.last_hovered == Some(window) {
-            self.last_hovered.take();
-        }
-        win.mapped = false;
-
-        if let Some(key) = win.surface_key.take() {
-            let Some(object) = self.objects.get_mut(key) else {
-                warn!("could not unmap {window:?}: stale surface");
+        {
+            let Some(data) = entity.and_then(|id| self.world.entity(id).ok()) else {
                 return;
             };
-            let surface: &mut SurfaceData = object.as_mut();
-            surface.destroy_role();
+
+            let mut win = data.get::<&mut WindowData>().unwrap();
+            if !win.mapped {
+                return;
+            }
+            debug!("unmapping {window:?}");
+
+            if matches!(self.last_focused_toplevel, Some(x) if x == window) {
+                self.last_focused_toplevel.take();
+            }
+            if self.last_hovered == Some(window) {
+                self.last_hovered.take();
+            }
+            win.mapped = false;
+        }
+
+        if let Ok(mut role) = self.world.remove_one::<SurfaceRole>(entity.unwrap()) {
+            role.destroy();
         }
     }
 
     pub fn set_fullscreen(&mut self, window: x::Window, state: super::xstate::SetState) {
-        let Some(win) = self.windows.get(&window) else {
+        let Some(data) = self
+            .windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+        else {
             warn!("Tried to set unknown window {window:?} fullscreen");
             return;
         };
-        let Some(key) = win.surface_key else {
-            warn!("Tried to set window without surface fullscreen: {window:?}");
+
+        let Some(role) = data.get::<&SurfaceRole>() else {
+            warn!("Tried to set window without role fullscreen: {window:?}");
             return;
         };
-        let Some(object) = self.objects.get_mut(key) else {
-            warn!("Could not set fullscreen on {window:?}: stale surface");
-            return;
-        };
-        let surface: &mut SurfaceData = object.as_mut();
-        let Some(SurfaceRole::Toplevel(Some(ref toplevel))) = surface.role else {
+
+        let SurfaceRole::Toplevel(Some(ref toplevel)) = &*role else {
             warn!("Tried to set an unmapped toplevel or non toplevel fullscreen: {window:?}");
             return;
         };
@@ -936,7 +870,13 @@ impl<C: XConnection> ServerState<C> {
     }
 
     pub fn set_transient_for(&mut self, window: x::Window, parent: x::Window) {
-        let Some(win) = self.windows.get_mut(&window) else {
+        let Some(mut win) = self
+            .windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+            .map(|data| data.get::<&mut WindowData>().unwrap())
+        else {
             return;
         };
 
@@ -952,34 +892,41 @@ impl<C: XConnection> ServerState<C> {
             warn!("No last focused toplevel, cannot focus window {window:?}");
             return;
         };
-        let Some(win) = self.windows.get(&last_focused_toplevel) else {
+
+        let Some(data) = self
+            .windows
+            .get(&last_focused_toplevel)
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+        else {
             warn!("Unknown last focused toplevel, cannot focus window {window:?}");
             return;
         };
-        let Some(key) = win.surface_key else {
+
+        let Some(surface) = data.get::<&client::wl_surface::WlSurface>() else {
             warn!("Last focused toplevel has no surface, cannot focus window {window:?}");
             return;
         };
-        let Some(object) = self.objects.get_mut(key) else {
-            warn!("Last focused toplevel has stale reference, cannot focus window {window:?}");
-            return;
-        };
-        let surface: &mut SurfaceData = object.as_mut();
         activation_state.request_token_with_data(
             &self.qh,
-            xdg_activation::ActivationData::new(
+            clientside::ActivationData::new(
                 window,
                 smithay_client_toolkit::activation::RequestData {
-                    app_id: win.attrs.class.clone(),
+                    app_id: data.get::<&WindowData>().unwrap().attrs.class.clone(),
                     seat_and_serial: self.last_kb_serial.clone(),
-                    surface: Some(surface.client.clone()),
+                    surface: Some((*surface).clone()),
                 },
             ),
         );
     }
 
     pub fn destroy_window(&mut self, window: x::Window) {
-        let _ = self.windows.remove(&window);
+        if let Some(id) = self.windows.remove(&window) {
+            self.world.remove::<(x::Window, WindowData)>(id).unwrap();
+            if self.world.entity(id).unwrap().is_empty() {
+                self.world.despawn(id).unwrap();
+            }
+        }
     }
 
     pub(crate) fn set_copy_paste_source(&mut self, selection: &Rc<C::X11Selection>) {
@@ -1006,16 +953,15 @@ impl<C: XConnection> ServerState<C> {
     }
 
     pub fn run(&mut self) {
-        if let Some(r) = self.clientside.queue.prepare_read() {
+        if let Some(r) = self.queue.prepare_read() {
             let fd = r.connection_fd();
             let pollfd = PollFd::new(&fd, PollFlags::IN);
             if poll(&mut [pollfd], 0).unwrap() > 0 {
                 let _ = r.read();
             }
         }
-        self.clientside
-            .queue
-            .dispatch_pending(&mut self.clientside.globals)
+        self.queue
+            .dispatch_pending(&mut self.world)
             .expect("Failed dispatching client side Wayland events");
         self.handle_clientside_events();
     }
@@ -1023,16 +969,12 @@ impl<C: XConnection> ServerState<C> {
     pub fn handle_clientside_events(&mut self) {
         self.handle_new_globals();
 
-        for (key, event) in self.clientside.read_events() {
-            let Some(object) = &mut self.objects.get_mut(key) else {
+        for (target, event) in self.world.read_events() {
+            if !self.world.contains(target) {
                 warn!("could not handle clientside event: stale object");
                 continue;
-            };
-            let mut object = object.0.take().unwrap();
-            object.handle_event(event, self);
-
-            let ret = self.objects[key].0.replace(object); // safe indexed access?
-            debug_assert!(ret.is_none());
+            }
+            event.handle(target, self);
         }
 
         if self.global_offset_updated {
@@ -1046,18 +988,13 @@ impl<C: XConnection> ServerState<C> {
                 "updated global output offset: {}x{}",
                 self.global_output_offset.x.value, self.global_output_offset.y.value
             );
-            for (key, _) in self.output_keys.clone() {
-                let Some(object) = &mut self.objects.get_mut(key) else {
-                    continue;
-                };
-                let mut output: Output = object
-                    .0
-                    .take()
-                    .expect("Output object missing?")
-                    .try_into()
-                    .expect("Not an output?");
-                output.global_offset_updated(self);
-                self.objects[key].0.replace(output.into());
+            for (e, _) in self.world.query::<&WlOutput>().iter() {
+                event::update_global_output_offset(
+                    e,
+                    &self.global_output_offset,
+                    &self.world,
+                    self.connection.as_mut().unwrap(),
+                );
             }
             self.global_offset_updated = false;
         }
@@ -1066,34 +1003,24 @@ impl<C: XConnection> ServerState<C> {
             let mut mixed_scale = false;
             let mut scale;
 
-            'b: {
-                let mut keys_iter = self.output_keys.iter();
-                let (key, _) = keys_iter.next().unwrap();
-                let Some::<&Output>(output) = &mut self.objects.get(key).map(AsRef::as_ref) else {
-                    // This should never happen, but you never know...
-                    break 'b;
-                };
+            let mut outputs = self.world.query_mut::<&OutputScaleFactor>().into_iter();
+            let (_, output_scale) = outputs.next().unwrap();
 
-                scale = output.scale();
+            scale = output_scale.0;
 
-                for (key, _) in keys_iter {
-                    let Some::<&Output>(output) = self.objects.get(key).map(AsRef::as_ref) else {
-                        continue;
-                    };
-
-                    if output.scale() != scale {
-                        mixed_scale = true;
-                        scale = scale.min(output.scale());
-                    }
+            for (_, output_scale) in outputs {
+                if output_scale.0 != scale {
+                    mixed_scale = true;
+                    scale = scale.min(output_scale.0);
                 }
-
-                if mixed_scale {
-                    warn!("Mixed output scales detected, choosing to give apps the smallest detected scale ({scale}x)");
-                }
-
-                debug!("Using new scale {scale}");
-                self.new_scale = Some(scale);
             }
+
+            if mixed_scale {
+                warn!("Mixed output scales detected, choosing to give apps the smallest detected scale ({scale}x)");
+            }
+
+            debug!("Using new scale {scale}");
+            self.new_scale = Some(scale);
 
             self.output_scales_updated = false;
         }
@@ -1117,8 +1044,7 @@ impl<C: XConnection> ServerState<C> {
 
         self.handle_clipboard_events();
         self.handle_activations();
-        self.clientside
-            .queue
+        self.queue
             .flush()
             .expect("Failed flushing clientside events");
     }
@@ -1140,10 +1066,8 @@ impl<C: XConnection> ServerState<C> {
     }
 
     fn handle_clipboard_events(&mut self) {
-        let globals = &mut self.clientside.globals;
-
         if let Some(clipboard) = self.clipboard_data.as_mut() {
-            for (mime_type, fd) in std::mem::take(&mut globals.selection_requests) {
+            for (mime_type, fd) in std::mem::take(&mut self.world.selection_requests) {
                 let CopyPasteData::X11 { data, .. } = clipboard.source.as_ref().unwrap() else {
                     unreachable!("Got selection request without having set the selection?")
                 };
@@ -1152,8 +1076,8 @@ impl<C: XConnection> ServerState<C> {
                 }
             }
 
-            if clipboard.source.is_none() || globals.cancelled {
-                if globals.selection.take().is_some() {
+            if clipboard.source.is_none() || self.world.selection_cancelled {
+                if self.world.selection.take().is_some() {
                     let device = clipboard.device.as_ref().unwrap();
                     let offer = device.data().selection_offer().unwrap();
                     let mime_types: Box<[String]> = offer.with_mime_types(|mimes| mimes.into());
@@ -1163,7 +1087,7 @@ impl<C: XConnection> ServerState<C> {
                     };
                     clipboard.source = Some(CopyPasteData::Foreign(foreign));
                 }
-                globals.cancelled = false;
+                self.world.selection_cancelled = false;
             }
         }
     }
@@ -1172,17 +1096,15 @@ impl<C: XConnection> ServerState<C> {
         let Some(activation_state) = self.activation_state.as_ref() else {
             return;
         };
-        let globals = &mut self.clientside.globals;
 
-        globals.pending_activations.retain(|(window, token)| {
-            if let Some(surface) = self
-                .windows
-                .get(window)
-                .and_then(|window| window.surface_key)
-                .and_then(|key| self.objects.get(key))
-                .map(AsRef::<SurfaceData>::as_ref)
-            {
-                activation_state.activate::<Self>(&surface.client, token.clone());
+        self.world.pending_activations.retain(|(window, token)| {
+            if let Some(surface) = self.windows.get(window).copied().and_then(|id| {
+                self.world
+                    .world
+                    .get::<&client::wl_surface::WlSurface>(id)
+                    .ok()
+            }) {
+                activation_state.activate::<Self>(&surface, token.clone());
                 return false;
             }
             true
@@ -1190,97 +1112,98 @@ impl<C: XConnection> ServerState<C> {
     }
 
     fn calc_global_output_offset(&mut self) {
-        for (key, _) in &self.output_keys {
-            let Some(object) = &self.objects.get(key) else {
-                continue;
-            };
-
-            let output: &Output = object.as_ref();
-            if output.dimensions.x < self.global_output_offset.x.value {
+        for (entity, dimensions) in self.world.query_mut::<&OutputDimensions>() {
+            if dimensions.x < self.global_output_offset.x.value {
                 self.global_output_offset.x = GlobalOutputOffsetDimension {
-                    owner: Some(key),
-                    value: output.dimensions.x,
+                    owner: Some(entity),
+                    value: dimensions.x,
                 }
             }
-            if output.dimensions.y < self.global_output_offset.y.value {
+            if dimensions.y < self.global_output_offset.y.value {
                 self.global_output_offset.y = GlobalOutputOffsetDimension {
-                    owner: Some(key),
-                    value: output.dimensions.y,
+                    owner: Some(entity),
+                    value: dimensions.y,
                 }
             }
         }
     }
 
-    fn create_role_window(&mut self, window: x::Window, surface_key: ObjectKey) {
-        let surface: &mut SurfaceData = self.objects.get_mut(surface_key).unwrap().as_mut();
-        surface.window = Some(window);
-        surface.client.attach(None, 0, 0);
-        surface.client.commit();
-
-        let xdg_surface = self
-            .xdg_wm_base
-            .get_xdg_surface(&surface.client, &self.qh, surface_key);
-
-        // Temporarily remove to placate borrow checker
-        let window_data = self.windows.remove(&window).unwrap();
-
+    fn create_role_window(&mut self, window: x::Window, entity: Entity) {
+        let xdg_surface;
         let mut popup_for = None;
-        if window_data.attrs.is_popup {
-            popup_for = self.last_hovered.or(self.last_focused_toplevel);
-        }
-
         let mut fullscreen = false;
-        let (width, height) = (window_data.attrs.dims.width, window_data.attrs.dims.height);
-        for (key, _) in &self.output_keys {
-            let output: &Output = self.objects[key].as_ref();
-            if output.dimensions.width == width as i32 && output.dimensions.height == height as i32
-            {
-                fullscreen = true;
-                popup_for = None;
+
+        {
+            let data = self.world.entity(entity).unwrap();
+            let surface = data.get::<&client::wl_surface::WlSurface>().unwrap();
+            surface.attach(None, 0, 0);
+            surface.commit();
+
+            xdg_surface = self.xdg_wm_base.get_xdg_surface(&surface, &self.qh, entity);
+
+            let window_data = data.get::<&WindowData>().unwrap();
+            if window_data.attrs.is_popup {
+                popup_for = self.last_hovered.or(self.last_focused_toplevel);
+            }
+
+            let (width, height) = (window_data.attrs.dims.width, window_data.attrs.dims.height);
+            for (_, dimensions) in self.world.query::<&OutputDimensions>().iter() {
+                if dimensions.width == width as i32 && dimensions.height == height as i32 {
+                    fullscreen = true;
+                    popup_for = None;
+                    break;
+                }
             }
         }
 
         let initial_scale;
         let role = if let Some(parent) = popup_for {
             let data;
-            (initial_scale, data) =
-                self.create_popup(&window_data, surface_key, xdg_surface, parent);
+            (initial_scale, data) = self.create_popup(entity, xdg_surface, parent);
             SurfaceRole::Popup(Some(data))
         } else {
             initial_scale = 1.0;
-            let data = self.create_toplevel(&window_data, surface_key, xdg_surface, fullscreen);
+            let data = self.create_toplevel(entity, xdg_surface, fullscreen);
             SurfaceRole::Toplevel(Some(data))
         };
 
-        let surface: &mut SurfaceData = self.objects[surface_key].as_mut();
-        surface.scale_factor = initial_scale;
+        let (surface_role, scale_factor, client) = self
+            .world
+            .query_one_mut::<(
+                Option<&SurfaceRole>,
+                &mut SurfaceScaleFactor,
+                &client::wl_surface::WlSurface,
+            )>(entity)
+            .unwrap();
+        scale_factor.0 = initial_scale;
 
         let new_role_type = std::mem::discriminant(&role);
-        let prev = surface.role.replace(role);
-        if let Some(role) = prev {
-            let old_role_type = std::mem::discriminant(&role);
+        if let Some(role) = surface_role {
+            let old_role_type = std::mem::discriminant(role);
             assert_eq!(
                 new_role_type, old_role_type,
                 "Surface for {:?} already had a role: {:?}",
-                window_data.window, role
+                window, role
             );
         }
 
-        surface.client.commit();
-        // Reinsert
-        self.windows.insert(window, window_data);
+        client.commit();
+        self.world.insert(entity, (role,)).unwrap();
     }
 
     fn create_toplevel(
         &mut self,
-        window: &WindowData,
-        surface_key: ObjectKey,
+        entity: Entity,
         xdg: XdgSurface,
         fullscreen: bool,
     ) -> ToplevelData {
-        debug!("creating toplevel for {:?}", window.window);
+        let window = self.world.get::<&WindowData>(entity).unwrap();
+        debug!(
+            "creating toplevel for {:?}",
+            *self.world.get::<&x::Window>(entity).unwrap()
+        );
 
-        let toplevel = xdg.get_toplevel(&self.qh, surface_key);
+        let toplevel = xdg.get_toplevel(&self.qh, entity);
         if let Some(hints) = &window.attrs.size_hints {
             if let Some(min) = &hints.min_size {
                 toplevel.set_min_size(min.width, min.height);
@@ -1290,12 +1213,15 @@ impl<C: XConnection> ServerState<C> {
             }
         }
 
-        let group = window.attrs.group.and_then(|win| self.windows.get(&win));
+        let group = window.attrs.group.and_then(|win| {
+            let id = self.windows.get(&win).copied()?;
+            Some(self.world.get::<&WindowData>(id).unwrap())
+        });
         if let Some(class) = window
             .attrs
             .class
             .as_ref()
-            .or(group.and_then(|g| g.attrs.class.as_ref()))
+            .or(group.as_ref().and_then(|g| g.attrs.class.as_ref()))
         {
             toplevel.set_app_id(class.to_string());
         }
@@ -1303,7 +1229,7 @@ impl<C: XConnection> ServerState<C> {
             .attrs
             .title
             .as_ref()
-            .or(group.and_then(|g| g.attrs.title.as_ref()))
+            .or(group.as_ref().and_then(|g| g.attrs.title.as_ref()))
         {
             toplevel.set_title(title.name().to_string());
         }
@@ -1323,38 +1249,32 @@ impl<C: XConnection> ServerState<C> {
             decoration
         });
 
-        let surface: &SurfaceData = self.objects[surface_key].as_ref();
+        let surface = self
+            .world
+            .get::<&client::wl_surface::WlSurface>(entity)
+            .unwrap();
         if let (Some(activation_state), Some(token)) = (
             self.activation_state.as_ref(),
             window.activation_token.clone(),
         ) {
-            activation_state.activate::<Self>(&surface.client, token);
+            activation_state.activate::<Self>(&surface, token);
         }
 
         if let Some(parent) = window.attrs.transient_for {
             // TODO: handle transient_for window not being mapped/not a toplevel
             'b: {
-                let Some(parent_data) = self.windows.get_mut(&parent) else {
+                let Some(parent_id) = self.windows.get(&parent).copied() else {
                     warn!(
                         "Window {:?} is marked transient for unknown window {:?}",
-                        window.window, parent
+                        *self.world.get::<&x::Window>(entity).unwrap(),
+                        parent
                     );
                     break 'b;
                 };
 
-                let Some(key) = parent_data.surface_key else {
-                    warn!("Parent window {parent:?} missing surface key.");
-                    break 'b;
-                };
-
-                let Some::<&SurfaceData>(surface) = self.objects.get(key).map(|o| o.as_ref())
-                else {
-                    warn!("Parent window {parent:?} surface is stale");
-                    break 'b;
-                };
-
-                let Some(SurfaceRole::Toplevel(Some(parent_toplevel))) = &surface.role else {
-                    warn!("Surface {:?} (for window {parent:?}) was not an active toplevel, not setting as parent", surface.client.id());
+                let role = self.world.get::<&SurfaceRole>(parent_id);
+                let Ok(SurfaceRole::Toplevel(Some(parent_toplevel))) = role.as_deref() else {
+                    warn!("Window {parent:?} was not an active toplevel, not setting as parent");
                     break 'b;
                 };
 
@@ -1375,21 +1295,23 @@ impl<C: XConnection> ServerState<C> {
     }
 
     fn create_popup(
-        &self,
-        window: &WindowData,
-        surface_key: ObjectKey,
+        &mut self,
+        entity: Entity,
         xdg: XdgSurface,
         parent: x::Window,
     ) -> (f64, PopupData) {
-        let parent_window = self.windows.get(&parent).unwrap();
-        let parent_surface: &SurfaceData =
-            self.objects[parent_window.surface_key.unwrap()].as_ref();
+        let window = self.world.get::<&WindowData>(entity).unwrap();
+        let mut parent_query = self
+            .world
+            .query_one::<(&WindowData, &SurfaceScaleFactor, &SurfaceRole)>(self.windows[&parent])
+            .unwrap();
+        let (parent_window, parent_scale, parent_role) = parent_query.get().unwrap();
         let parent_dims = parent_window.attrs.dims;
-        let initial_scale = parent_surface.scale_factor;
+        let initial_scale = parent_scale.0;
 
         debug!(
-            "creating popup ({:?}) {:?} {:?} {:?} {surface_key:?} (scale: {initial_scale})",
-            window.window,
+            "creating popup ({:?}) {:?} {:?} {:?} {entity:?} (scale: {initial_scale})",
+            *self.world.get::<&x::Window>(entity).unwrap(),
             parent,
             window.attrs.dims,
             xdg.id()
@@ -1412,10 +1334,10 @@ impl<C: XConnection> ServerState<C> {
             (parent_window.attrs.dims.height as f64 / initial_scale) as i32,
         );
         let popup = xdg.get_popup(
-            Some(&parent_surface.xdg().unwrap().surface),
+            Some(&parent_role.xdg().unwrap().surface),
             &positioner,
             &self.qh,
-            surface_key,
+            entity,
         );
 
         (
@@ -1430,24 +1352,6 @@ impl<C: XConnection> ServerState<C> {
                 },
             },
         )
-    }
-
-    fn get_server_surface_from_client(
-        &self,
-        surface: client::wl_surface::WlSurface,
-    ) -> Option<&WlSurface> {
-        let key: &ObjectKey = surface.data().unwrap();
-        let surface: &SurfaceData = self.objects.get(*key)?.as_ref();
-        Some(&surface.server)
-    }
-
-    fn get_client_surface_from_server(
-        &self,
-        surface: WlSurface,
-    ) -> Option<&client::wl_surface::WlSurface> {
-        let key: &ObjectKey = surface.data().unwrap();
-        let surface: &SurfaceData = self.objects.get(*key)?.as_ref();
-        Some(&surface.client)
     }
 
     fn close_x_window(&mut self, window: x::Window) {
@@ -1488,7 +1392,7 @@ impl ForeignSelection {
         state: &ServerState<impl XConnection>,
     ) -> Vec<u8> {
         let mut pipe = self.inner.receive(mime_type).unwrap();
-        state.clientside.queue.flush().unwrap();
+        state.queue.flush().unwrap();
         let mut data = Vec::new();
         pipe.read_to_end(&mut data).unwrap();
         data

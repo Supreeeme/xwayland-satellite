@@ -46,9 +46,32 @@ impl Parse for EventVariant {
     }
 }
 
+enum ShuntObject {
+    Ident(syn::Ident),
+    KSelf(Token![self]),
+}
+
+impl Parse for ShuntObject {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        if input.peek(Token![self]) {
+            Ok(Self::KSelf(input.parse()?))
+        } else {
+            Ok(Self::Ident(input.parse()?))
+        }
+    }
+}
+
+impl quote::ToTokens for ShuntObject {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        match self {
+            Self::Ident(i) => i.to_tokens(tokens),
+            Self::KSelf(s) => s.to_tokens(tokens),
+        }
+    }
+}
 struct Input {
     object: syn::Expr,
-    event_object: syn::Ident,
+    event_object: ShuntObject,
     event_type: syn::Type,
     events: Punctuated<EventVariant, Token![,]>,
 }
@@ -58,8 +81,12 @@ impl Parse for Input {
         let object = input.parse()?;
         input.parse::<Token![,]>()?;
         let event_object = input.parse()?;
-        input.parse::<Token![:]>()?;
-        let event_type = input.parse()?;
+        let event_type = if matches!(event_object, ShuntObject::Ident(..)) {
+            input.parse::<Token![:]>()?;
+            input.parse()?
+        } else {
+            parse_quote!(Self)
+        };
         input.parse::<Token![=>]>()?;
         let events;
         bracketed!(events in input);
@@ -119,14 +146,13 @@ pub fn simple_event_shunt(tokens: TokenStream) -> TokenStream {
         let fn_name = format_ident!("{keyword_pfx}{fn_name}");
 
         quote! {
-            #name { #field_names } => { #object.#fn_name(#fn_args); }
+            #event_type::#name { #field_names } => { #object.#fn_name(#fn_args); }
         }
     });
     quote! {{
-        use #event_type::*;
         match #event_object {
             #(#match_arms)*
-            _ => log::warn!(concat!("unhandled ", stringify!(#event_type), ": {:?}"), #event_object)
+            _ => log::warn!("unhandled {}: {:?}", std::any::type_name::<#event_type>(), #event_object)
         }
     }}
     .into()
