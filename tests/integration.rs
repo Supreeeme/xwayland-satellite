@@ -99,12 +99,22 @@ impl Drop for Fixture {
         // Sending anything to the quit receiver to stop the main loop. Then we guarantee a main
         // thread does not use file descriptors which outlive the Fixture's BorrowedFd
         let return_ptr = Box::into_raw(Box::new(0_usize)) as usize;
-        self.quit_tx.write_all(&return_ptr.to_ne_bytes()).unwrap();
+        // If the receiver end of the pipe closed, the main thread dropped it, which means that
+        // thread already terminated
+        if self
+            .quit_tx
+            .write_all(&return_ptr.to_ne_bytes())
+            .is_err_and(|e| e.kind() != std::io::ErrorKind::BrokenPipe)
+        {
+            panic!("could not message the main thread to terminate");
+        }
         if thread.join().is_err() {
             log::error!("main thread panicked");
         }
-        rustix::process::kill_process(self.pid, Signal::TERM).unwrap();
-        rustix::process::waitpid(Some(self.pid), WaitOptions::NOHANG).unwrap();
+        if rustix::process::test_kill_process(self.pid).is_ok() {
+            rustix::process::kill_process(self.pid, Signal::TERM).unwrap();
+            rustix::process::waitpid(Some(self.pid), WaitOptions::NOHANG).unwrap();
+        }
     }
 }
 
@@ -1147,6 +1157,110 @@ fn copy_from_wayland() {
             .value()
             .to_vec();
 
+        assert_eq!(val, data);
+    }
+}
+
+#[test]
+fn incr_copy_from_wayland() {
+    // After a little binary searching, the test passes on less than 16,777,184 bytes, fails due to
+    // a failed assert on matching `dest1_atom` starting at 16,777,185 bytes, and starts crashing
+    // instead at 16,777,189 bytes.
+    const BYTES: usize = 16_777_189;
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    connection.get_selection_owner_change_events(true, window);
+    f.map_as_toplevel(&mut connection, window);
+    let offer = vec![testwl::PasteData {
+        mime_type: "text/plain".into(),
+        data: std::iter::successors(Some(0u8), |n| Some(n.wrapping_add(1)))
+            .take(BYTES)
+            .collect(),
+    }];
+
+    f.testwl.create_data_offer(offer.clone());
+    connection.await_selection_owner_change();
+    connection.verify_clipboard_owner(connection.wm_window);
+    connection.get_selection_owner_change_events(false, window);
+
+    let dest1_atom = connection
+        .get_reply(&x::InternAtom {
+            name: b"dest1",
+            only_if_exists: false,
+        })
+        .atom();
+
+    connection
+        .send_and_check_request(&x::ConvertSelection {
+            requestor: window,
+            selection: connection.atoms.clipboard,
+            target: connection.atoms.targets,
+            property: dest1_atom,
+            time: x::CURRENT_TIME,
+        })
+        .unwrap();
+
+    let request = connection.await_selection_notify();
+    assert_eq!(request.requestor(), window);
+    assert_eq!(request.selection(), connection.atoms.clipboard);
+    assert_eq!(request.target(), connection.atoms.targets);
+    assert_eq!(request.property(), dest1_atom);
+
+    let reply = connection.get_reply(&x::GetProperty {
+        delete: true,
+        window,
+        property: dest1_atom,
+        r#type: x::ATOM_ATOM,
+        long_offset: 0,
+        long_length: 10,
+    });
+    let targets: &[x::Atom] = reply.value();
+    assert_eq!(targets.len(), 1);
+
+    for testwl::PasteData { mime_type, data } in offer {
+        let atom = connection
+            .get_reply(&x::InternAtom {
+                only_if_exists: true,
+                name: mime_type.as_bytes(),
+            })
+            .atom();
+        assert_ne!(atom, x::ATOM_NONE);
+        assert!(targets.contains(&atom));
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        connection
+            .send_and_check_request(&x::ConvertSelection {
+                requestor: window,
+                selection: connection.atoms.clipboard,
+                target: atom,
+                property: dest1_atom,
+                time: x::CURRENT_TIME,
+            })
+            .unwrap();
+
+        f.wait_and_dispatch();
+        let request = connection.await_selection_notify();
+        assert_eq!(request.requestor(), window);
+        assert_eq!(request.selection(), connection.atoms.clipboard);
+        assert_eq!(request.target(), atom);
+        // The particular assert which fails in the narrow byte range as mentioned above.
+        assert_eq!(request.property(), dest1_atom);
+
+        let val: Vec<u8> = connection
+            .get_reply(&x::GetProperty {
+                delete: true,
+                window,
+                property: dest1_atom,
+                r#type: x::ATOM_ANY,
+                long_offset: 0,
+                long_length: (BYTES / 4 + BYTES % 4) as u32,
+            })
+            .value()
+            .to_vec();
+
+        assert_eq!(val.len(), data.len());
         assert_eq!(val, data);
     }
 }
