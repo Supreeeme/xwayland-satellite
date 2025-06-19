@@ -329,6 +329,15 @@ xcb::atoms_struct! {
     }
 }
 
+struct Settings {
+    serial: u32,
+    data: HashMap<String, Setting>,
+}
+struct Setting {
+    value: i32,
+    last_change: u32,
+}
+
 struct Connection {
     inner: xcb::Connection,
     pollfd: PollFd<'static>,
@@ -563,6 +572,56 @@ impl Connection {
             event: request,
         })
         .unwrap();
+    }
+
+    fn get_xsettings(&self) -> Settings {
+        let owner = self
+            .get_reply(&x::GetSelectionOwner {
+                selection: self.atoms.xsettings,
+            })
+            .owner();
+
+        let reply = self.get_reply(&x::GetProperty {
+            delete: false,
+            window: owner,
+            property: self.atoms.xsettings_setting,
+            r#type: self.atoms.xsettings_setting,
+            long_offset: 0,
+            long_length: 60,
+        });
+        assert_eq!(reply.r#type(), self.atoms.xsettings_setting);
+
+        let data = reply.value::<u8>();
+
+        let byte_order = data[0];
+        assert_eq!(byte_order, 0);
+        let serial = u32::from_le_bytes(data[4..8].try_into().unwrap());
+        let num_settings = u32::from_le_bytes(data[8..12].try_into().unwrap());
+
+        let mut current_idx = 12;
+        let mut settings = HashMap::new();
+        for _ in 0..num_settings {
+            assert_eq!(&data[current_idx..current_idx + 2], &[0, 0]);
+            let name_len =
+                u16::from_le_bytes(data[current_idx + 2..current_idx + 4].try_into().unwrap());
+
+            let padding_start = current_idx + 4 + name_len as usize;
+            let name = String::from_utf8(data[current_idx + 4..padding_start].to_vec()).unwrap();
+            let num_padding_bytes = (4 - (name_len as usize % 4)) % 4;
+            let data_start = padding_start + num_padding_bytes;
+            let last_change =
+                u32::from_le_bytes(data[data_start..data_start + 4].try_into().unwrap());
+            let value =
+                i32::from_le_bytes(data[data_start + 4..data_start + 8].try_into().unwrap());
+
+            settings.insert(name, Setting { value, last_change });
+            current_idx = data_start + 8;
+        }
+
+        Settings {
+            serial,
+            data: settings,
+        }
     }
 }
 
@@ -1627,6 +1686,8 @@ fn forced_1x_scale_consistent_x11_size() {
     // Update scale
     output.scale(3);
     output.done();
+    f.wait_and_dispatch();
+
     f.testwl
         .configure_toplevel(surface, 100, 100, vec![xdg_toplevel::State::Activated]);
     f.testwl.focus_toplevel(surface);
@@ -1736,66 +1797,7 @@ fn xsettings_scale() {
     let connection = Connection::new(&f.display);
     f.testwl.enable_xdg_output_manager();
 
-    struct Settings {
-        serial: u32,
-        data: HashMap<String, Setting>,
-    }
-    struct Setting {
-        value: i32,
-        last_change: u32,
-    }
-
-    let owner = connection
-        .get_reply(&x::GetSelectionOwner {
-            selection: connection.atoms.xsettings,
-        })
-        .owner();
-
-    let get_settings = || -> Settings {
-        let reply = connection.get_reply(&x::GetProperty {
-            delete: false,
-            window: owner,
-            property: connection.atoms.xsettings_setting,
-            r#type: connection.atoms.xsettings_setting,
-            long_offset: 0,
-            long_length: 60,
-        });
-        assert_eq!(reply.r#type(), connection.atoms.xsettings_setting);
-
-        let data = reply.value::<u8>();
-
-        let byte_order = data[0];
-        assert_eq!(byte_order, 0);
-        let serial = u32::from_le_bytes(data[4..8].try_into().unwrap());
-        let num_settings = u32::from_le_bytes(data[8..12].try_into().unwrap());
-
-        let mut current_idx = 12;
-        let mut settings = HashMap::new();
-        for _ in 0..num_settings {
-            assert_eq!(&data[current_idx..current_idx + 2], &[0, 0]);
-            let name_len =
-                u16::from_le_bytes(data[current_idx + 2..current_idx + 4].try_into().unwrap());
-
-            let padding_start = current_idx + 4 + name_len as usize;
-            let name = String::from_utf8(data[current_idx + 4..padding_start].to_vec()).unwrap();
-            let num_padding_bytes = (4 - (name_len as usize % 4)) % 4;
-            let data_start = padding_start + num_padding_bytes;
-            let last_change =
-                u32::from_le_bytes(data[data_start..data_start + 4].try_into().unwrap());
-            let value =
-                i32::from_le_bytes(data[data_start + 4..data_start + 8].try_into().unwrap());
-
-            settings.insert(name, Setting { value, last_change });
-            current_idx = data_start + 8;
-        }
-
-        Settings {
-            serial,
-            data: settings,
-        }
-    };
-
-    let settings = get_settings();
+    let settings = connection.get_xsettings();
     let settings_serial = settings.serial;
     assert_eq!(settings.data["Xft/DPI"].value, 96 * 1024);
     let dpi_serial = settings.data["Xft/DPI"].last_change;
@@ -1809,20 +1811,17 @@ fn xsettings_scale() {
     output.done();
     f.wait_and_dispatch();
 
-    let settings = get_settings();
+    let settings = connection.get_xsettings();
     assert!(settings.serial > settings_serial);
     assert_eq!(settings.data["Xft/DPI"].value, 2 * 96 * 1024);
     assert!(settings.data["Xft/DPI"].last_change > dpi_serial);
     assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 2);
     assert!(settings.data["Gdk/WindowScalingFactor"].last_change > window_serial);
     assert_eq!(settings.data["Gdk/UnscaledDPI"].value, 96 * 1024);
-    assert_eq!(
-        settings.data["Gdk/UnscaledDPI"].last_change,
-        unscaled_serial
-    );
+    assert!(settings.data["Gdk/UnscaledDPI"].last_change > unscaled_serial);
 
     let output2 = f.create_output(0, 0);
-    let settings = get_settings();
+    let settings = connection.get_xsettings();
     assert_eq!(settings.data["Xft/DPI"].value, 96 * 1024);
     assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 1);
     assert_eq!(settings.data["Gdk/UnscaledDPI"].value, 96 * 1024);
@@ -1832,10 +1831,66 @@ fn xsettings_scale() {
     f.testwl.dispatch();
     std::thread::sleep(Duration::from_millis(1));
 
-    let settings = get_settings();
+    let settings = connection.get_xsettings();
     assert_eq!(settings.data["Xft/DPI"].value, 2 * 96 * 1024);
     assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 2);
     assert_eq!(settings.data["Gdk/UnscaledDPI"].value, 96 * 1024);
+}
+
+#[test]
+fn xsettings_fractional_scale() {
+    let mut f = Fixture::new_preset(|testwl| {
+        testwl.new_output(0, 0); // WL-1
+        testwl.enable_fractional_scale();
+    });
+    let mut connection = Connection::new(&f.display);
+    f.testwl.enable_xdg_output_manager();
+
+    let output = f.testwl.last_created_output();
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, window);
+
+    let data = f
+        .testwl
+        .get_surface_data(surface)
+        .expect("Missing surface data");
+    let fractional = data
+        .fractional
+        .as_ref()
+        .expect("No fractional scale for surface");
+
+    fractional.preferred_scale(180); // 1.5 scale
+    f.testwl.move_surface_to_output(surface, &output);
+
+    f.wait_and_dispatch();
+    let settings = connection.get_xsettings();
+
+    assert_eq!(
+        settings.data["Xft/DPI"].value,
+        (1.5 * 96_f64 * 1024_f64).round() as i32
+    );
+    assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 1);
+    assert_eq!(
+        settings.data["Gdk/UnscaledDPI"].value,
+        (1.5 * 96_f64 * 1024_f64).round() as i32
+    );
+
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    let fractional = data.fractional.as_ref().unwrap();
+    fractional.preferred_scale(300); // 2.5 scale
+    f.wait_and_dispatch();
+
+    let settings = connection.get_xsettings();
+    assert_eq!(
+        settings.data["Xft/DPI"].value,
+        (2.5 * 96_f64 * 1024_f64).round() as i32
+    );
+    assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 2);
+    assert_eq!(
+        settings.data["Gdk/UnscaledDPI"].value,
+        (2.5 / 2.0 * 96_f64 * 1024_f64).round() as i32
+    );
 }
 
 #[test]

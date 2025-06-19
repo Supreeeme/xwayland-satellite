@@ -1965,6 +1965,7 @@ fn fractional_scale_popup() {
         testwl.enable_fractional_scale();
     });
     let comp = f.compositor();
+    let (_, output) = f.new_output(0, 0);
 
     let toplevel = unsafe { Window::new(1) };
     let (_, toplevel_id) = f.create_toplevel(&comp, toplevel);
@@ -1978,6 +1979,7 @@ fn fractional_scale_popup() {
         .expect("No fractional scale for surface");
 
     fractional.preferred_scale(180); // 1.5 scale
+    f.testwl.move_surface_to_output(toplevel_id, &output);
     f.run();
     f.run();
 
@@ -2038,6 +2040,7 @@ fn fractional_scale_small_popup() {
     });
     let comp = f.compositor();
 
+    let (_, output) = f.new_output(0, 0);
     let toplevel = unsafe { Window::new(1) };
     let (_, toplevel_id) = f.create_toplevel(&comp, toplevel);
     let data = f.testwl.get_surface_data(toplevel_id).unwrap();
@@ -2046,6 +2049,7 @@ fn fractional_scale_small_popup() {
         .as_ref()
         .expect("Missing fracitonal scale data");
     fractional.preferred_scale(180); // 1.5 scale
+    f.testwl.move_surface_to_output(toplevel_id, &output);
     f.run();
     f.run();
 

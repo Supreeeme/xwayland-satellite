@@ -1350,11 +1350,11 @@ impl<C: XConnection> GlobalDispatch<WlOutput, Global> for ServerState<C> {
             (
                 server,
                 client,
-                event::OutputScaleFactor(1),
+                event::OutputScaleFactor::Output(1),
                 event::OutputDimensions::default(),
             ),
         );
-        state.output_scales_updated = true;
+        state.updated_outputs.push(entity);
     }
 }
 global_dispatch_with_events!(WlDrmServer, WlDrmClient);

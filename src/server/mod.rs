@@ -173,9 +173,6 @@ struct SurfaceAttach {
 #[derive(PartialEq, Eq)]
 struct SurfaceSerial([u32; 2]);
 
-#[derive(Copy, Clone)]
-struct SurfaceScaleFactor(f64);
-
 #[derive(Debug)]
 enum SurfaceRole {
     Toplevel(Option<ToplevelData>),
@@ -418,8 +415,8 @@ pub struct ServerState<C: XConnection> {
     activation_state: Option<ActivationState>,
     global_output_offset: GlobalOutputOffset,
     global_offset_updated: bool,
-    output_scales_updated: bool,
-    new_scale: Option<i32>,
+    updated_outputs: Vec<Entity>,
+    new_scale: Option<f64>,
 }
 
 impl<C: XConnection> ServerState<C> {
@@ -507,7 +504,7 @@ impl<C: XConnection> ServerState<C> {
                 },
             },
             global_offset_updated: false,
-            output_scales_updated: false,
+            updated_outputs: Vec::new(),
             new_scale: None,
             decoration_manager,
             world: MyWorld::new(global_list),
@@ -999,19 +996,42 @@ impl<C: XConnection> ServerState<C> {
             self.global_offset_updated = false;
         }
 
-        if self.output_scales_updated {
+        if !self.updated_outputs.is_empty() {
+            for output in self.updated_outputs.drain(..) {
+                let output_scale = self.world.get::<&OutputScaleFactor>(output).unwrap();
+                if matches!(*output_scale, OutputScaleFactor::Output(..)) {
+                    let mut surface_query = self
+                        .world
+                        .query::<(&OnOutput, &mut SurfaceScaleFactor)>()
+                        .with::<(&WindowData, &WlSurface)>();
+
+                    let mut surfaces = vec![];
+                    for (surface, (OnOutput(s_output), surface_scale)) in surface_query.iter() {
+                        if *s_output == output {
+                            surface_scale.0 = output_scale.get();
+                            surfaces.push(surface);
+                        }
+                    }
+
+                    drop(surface_query);
+                    for surface in surfaces {
+                        update_surface_viewport(self.world.query_one(surface).unwrap());
+                    }
+                }
+            }
+
             let mut mixed_scale = false;
             let mut scale;
 
             let mut outputs = self.world.query_mut::<&OutputScaleFactor>().into_iter();
             let (_, output_scale) = outputs.next().unwrap();
 
-            scale = output_scale.0;
+            scale = output_scale.get();
 
             for (_, output_scale) in outputs {
-                if output_scale.0 != scale {
+                if output_scale.get() != scale {
                     mixed_scale = true;
-                    scale = scale.min(output_scale.0);
+                    scale = scale.min(output_scale.get());
                 }
             }
 
@@ -1021,8 +1041,6 @@ impl<C: XConnection> ServerState<C> {
 
             debug!("Using new scale {scale}");
             self.new_scale = Some(scale);
-
-            self.output_scales_updated = false;
         }
 
         {
@@ -1049,7 +1067,7 @@ impl<C: XConnection> ServerState<C> {
             .expect("Failed flushing clientside events");
     }
 
-    pub fn new_global_scale(&mut self) -> Option<i32> {
+    pub fn new_global_scale(&mut self) -> Option<f64> {
         self.new_scale.take()
     }
 
@@ -1156,26 +1174,18 @@ impl<C: XConnection> ServerState<C> {
             }
         }
 
-        let initial_scale;
         let role = if let Some(parent) = popup_for {
-            let data;
-            (initial_scale, data) = self.create_popup(entity, xdg_surface, parent);
+            let data = self.create_popup(entity, xdg_surface, parent);
             SurfaceRole::Popup(Some(data))
         } else {
-            initial_scale = 1.0;
             let data = self.create_toplevel(entity, xdg_surface, fullscreen);
             SurfaceRole::Toplevel(Some(data))
         };
 
-        let (surface_role, scale_factor, client) = self
+        let (surface_role, client) = self
             .world
-            .query_one_mut::<(
-                Option<&SurfaceRole>,
-                &mut SurfaceScaleFactor,
-                &client::wl_surface::WlSurface,
-            )>(entity)
+            .query_one_mut::<(Option<&SurfaceRole>, &client::wl_surface::WlSurface)>(entity)
             .unwrap();
-        scale_factor.0 = initial_scale;
 
         let new_role_type = std::mem::discriminant(&role);
         if let Some(role) = surface_role {
@@ -1294,13 +1304,13 @@ impl<C: XConnection> ServerState<C> {
         }
     }
 
-    fn create_popup(
-        &mut self,
-        entity: Entity,
-        xdg: XdgSurface,
-        parent: x::Window,
-    ) -> (f64, PopupData) {
-        let window = self.world.get::<&WindowData>(entity).unwrap();
+    fn create_popup(&mut self, entity: Entity, xdg: XdgSurface, parent: x::Window) -> PopupData {
+        let mut query = self
+            .world
+            .query_one::<(&WindowData, &mut SurfaceScaleFactor)>(entity)
+            .unwrap();
+
+        let (window, scale) = query.get().unwrap();
         let mut parent_query = self
             .world
             .query_one::<(&WindowData, &SurfaceScaleFactor, &SurfaceRole)>(self.windows[&parent])
@@ -1308,6 +1318,7 @@ impl<C: XConnection> ServerState<C> {
         let (parent_window, parent_scale, parent_role) = parent_query.get().unwrap();
         let parent_dims = parent_window.attrs.dims;
         let initial_scale = parent_scale.0;
+        *scale = *parent_scale;
 
         debug!(
             "creating popup ({:?}) {:?} {:?} {:?} {entity:?} (scale: {initial_scale})",
@@ -1340,18 +1351,15 @@ impl<C: XConnection> ServerState<C> {
             entity,
         );
 
-        (
-            initial_scale,
-            PopupData {
-                popup,
-                positioner,
-                xdg: XdgSurfaceData {
-                    surface: xdg,
-                    configured: false,
-                    pending: None,
-                },
+        PopupData {
+            popup,
+            positioner,
+            xdg: XdgSurfaceData {
+                surface: xdg,
+                configured: false,
+                pending: None,
             },
-        )
+        }
     }
 
     fn close_x_window(&mut self, window: x::Window) {

@@ -27,7 +27,7 @@ impl XState {
         }
     }
 
-    pub(crate) fn update_global_scale(&mut self, scale: i32) {
+    pub(crate) fn update_global_scale(&mut self, scale: f64) {
         self.settings.set_scale(scale);
         self.connection
             .send_and_check_request(&x::ChangeProperty {
@@ -57,6 +57,7 @@ pub(super) struct Settings {
     settings: HashMap<&'static str, IntSetting>,
 }
 
+#[derive(Copy, Clone)]
 struct IntSetting {
     value: i32,
     last_change_serial: u32,
@@ -160,17 +161,26 @@ impl Settings {
         data
     }
 
-    fn set_scale(&mut self, scale: i32) {
+    fn set_scale(&mut self, scale: f64) {
         self.serial += 1;
 
-        self.settings.entry(XFT_DPI).insert_entry(IntSetting {
-            value: scale * DEFAULT_DPI * DPI_SCALE_FACTOR,
+        let setting = IntSetting {
+            value: (scale * DEFAULT_DPI as f64 * DPI_SCALE_FACTOR as f64).round() as i32,
             last_change_serial: self.serial,
-        });
+        };
+        self.settings.entry(XFT_DPI).insert_entry(setting);
+        // Gdk/WindowScalingFactor + Gdk/UnscaledDPI is identical to setting
+        // GDK_SCALE = scale and then GDK_DPI_SCALE = 1 / scale.
+        self.settings
+            .entry(GDK_UNSCALED_DPI)
+            .insert_entry(IntSetting {
+                value: setting.value / scale as i32,
+                last_change_serial: self.serial,
+            });
         self.settings
             .entry(GDK_WINDOW_SCALE)
             .insert_entry(IntSetting {
-                value: scale,
+                value: scale as i32,
                 last_change_serial: self.serial,
             });
     }

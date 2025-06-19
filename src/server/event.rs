@@ -44,12 +44,15 @@ use wayland_server::protocol::{
     wl_seat::WlSeat, wl_touch::WlTouch,
 };
 
+#[derive(Copy, Clone)]
+pub(super) struct SurfaceScaleFactor(pub f64);
+
 #[derive(hecs::Bundle)]
 pub(super) struct SurfaceBundle {
     pub client: client::wl_surface::WlSurface,
     pub server: WlSurface,
-    pub scale: SurfaceScaleFactor,
     pub viewport: WpViewport,
+    pub scale: SurfaceScaleFactor,
 }
 
 #[derive(Debug)]
@@ -86,12 +89,22 @@ impl Event for SurfaceEvents {
                 wp_fractional_scale_v1::Event::PreferredScale { scale } => {
                     let entity = state.world.entity(target).unwrap();
                     let factor = scale as f64 / 120.0;
-                    entity.get::<&mut SurfaceScaleFactor>().unwrap().0 = factor;
-                    log::debug!(
+                    debug!(
                         "{} scale factor: {}",
                         entity.get::<&WlSurface>().unwrap().id(),
                         factor
                     );
+
+                    entity.get::<&mut SurfaceScaleFactor>().unwrap().0 = factor;
+
+                    if let Some(OnOutput(output)) = entity.get::<&OnOutput>().as_deref().copied() {
+                        if update_output_scale(
+                            state.world.query_one(output).unwrap(),
+                            OutputScaleFactor::Fractional(factor),
+                        ) {
+                            state.updated_outputs.push(output);
+                        }
+                    }
                     if entity.has::<WindowData>() {
                         update_surface_viewport(state.world.query_one(target).unwrap());
                     }
@@ -126,11 +139,6 @@ impl SurfaceEvents {
                 surface.enter(&output);
                 let on_output = OnOutput(output_entity);
 
-                if state.fractional_scale.is_none() {
-                    data.get::<&mut SurfaceScaleFactor>().unwrap().0 =
-                        output_data.get::<&OutputScaleFactor>().unwrap().0 as f64;
-                }
-
                 debug!("{} entered {}", surface.id(), output.id());
 
                 let mut query = data.query::<(&x::Window, &mut WindowData)>();
@@ -151,9 +159,19 @@ impl SurfaceEvents {
                         conn.focus_window(*window, output);
                     }
 
-                    drop(query);
                     if state.fractional_scale.is_none() {
+                        let output_scale = output_data.get::<&OutputScaleFactor>().unwrap().get();
+                        data.get::<&mut SurfaceScaleFactor>().unwrap().0 = output_scale;
+                        drop(query);
                         update_surface_viewport(state.world.query_one(target).unwrap());
+                    } else {
+                        let scale = data.get::<&SurfaceScaleFactor>().unwrap();
+                        if update_output_scale(
+                            state.world.query_one(on_output.0).unwrap(),
+                            OutputScaleFactor::Fractional(scale.0),
+                        ) {
+                            state.updated_outputs.push(on_output.0);
+                        }
                     }
                 }
                 cmd.insert_one(target, on_output);
@@ -200,20 +218,19 @@ impl SurfaceEvents {
         drop(xdg);
 
         if let Some(pending) = pending {
-            let mut query = data.query::<(&mut SurfaceScaleFactor, &x::Window, &mut WindowData)>();
+            let mut query = data.query::<(&SurfaceScaleFactor, &x::Window, &mut WindowData)>();
             let (scale_factor, window, window_data) = query.get().unwrap();
-            let scale_factor = scale_factor.0;
 
             let window = *window;
-            let x = (pending.x as f64 * scale_factor) as i32 + window_data.output_offset.x;
-            let y = (pending.y as f64 * scale_factor) as i32 + window_data.output_offset.y;
+            let x = (pending.x as f64 * scale_factor.0) as i32 + window_data.output_offset.x;
+            let y = (pending.y as f64 * scale_factor.0) as i32 + window_data.output_offset.y;
             let width = if pending.width > 0 {
-                (pending.width as f64 * scale_factor) as u16
+                (pending.width as f64 * scale_factor.0) as u16
             } else {
                 window_data.attrs.dims.width
             };
             let height = if pending.height > 0 {
-                (pending.height as f64 * scale_factor) as u16
+                (pending.height as f64 * scale_factor.0) as u16
             } else {
                 window_data.attrs.dims.height
             };
@@ -452,7 +469,7 @@ impl Event for client::wl_pointer::Event {
 
                 let surface_is_popup = matches!(role, SurfaceRole::Popup(_));
                 let mut do_enter = || {
-                    debug!("pointer entering {} ({serial})", surface.id());
+                    debug!("pointer entering {} ({serial} {})", surface.id(), scale.0);
                     server.enter(serial, surface, surface_x * scale.0, surface_y * scale.0);
                     state.connection.as_mut().unwrap().raise_to_top(*window);
                     if !surface_is_popup {
@@ -488,6 +505,7 @@ impl Event for client::wl_pointer::Event {
                 cmd.run_on(&mut state.world);
             }
             client::wl_pointer::Event::Leave { serial, surface } => {
+                let _ = state.world.remove_one::<PendingEnter>(target);
                 if !surface.is_alive() {
                     return;
                 }
@@ -720,13 +738,47 @@ impl Event for client::wl_touch::Event {
     }
 }
 
+#[derive(Copy, Clone)]
 pub(super) struct OnOutput(pub Entity);
 struct OutputName(String);
 fn get_output_name(output: Option<&OnOutput>, world: &World) -> Option<String> {
     output.map(|o| world.get::<&OutputName>(o.0).unwrap().0.clone())
 }
 
-pub(super) struct OutputScaleFactor(pub i32);
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub(super) enum OutputScaleFactor {
+    Output(i32),
+    Fractional(f64),
+}
+
+impl OutputScaleFactor {
+    pub(super) fn get(&self) -> f64 {
+        match *self {
+            Self::Output(o) => o as _,
+            Self::Fractional(f) => f,
+        }
+    }
+}
+
+#[must_use]
+fn update_output_scale(
+    mut output_scale: hecs::QueryOne<&mut OutputScaleFactor>,
+    factor: OutputScaleFactor,
+) -> bool {
+    let output_scale = output_scale.get().unwrap();
+    if matches!(output_scale, OutputScaleFactor::Fractional(..))
+        && matches!(factor, OutputScaleFactor::Output(..))
+    {
+        return false;
+    }
+
+    if *output_scale != factor {
+        *output_scale = factor;
+        return true;
+    }
+
+    false
+}
 
 enum OutputDimensionsSource {
     // The data in this variant is the values needed for the wl_output.geometry event.
@@ -1012,26 +1064,15 @@ impl OutputEvent {
                     "{} scale: {factor}",
                     state.world.get::<&WlOutput>(target).unwrap().id()
                 );
-                state.world.get::<&mut OutputScaleFactor>(target).unwrap().0 = factor;
+                if update_output_scale(
+                    state.world.query_one(target).unwrap(),
+                    OutputScaleFactor::Output(factor),
+                ) {
+                    state.updated_outputs.push(target);
+                }
                 if state.fractional_scale.is_none() {
-                    let mut surfaces = vec![];
-                    for (entity, (scale, _)) in state
-                        .world
-                        .query_mut::<(&mut SurfaceScaleFactor, &OnOutput)>()
-                        .with::<&WindowData>()
-                        .into_iter()
-                        .filter(|(_, (_, o))| o.0 == target)
-                    {
-                        surfaces.push(entity);
-                        scale.0 = factor as f64;
-                    }
-                    for entity in surfaces {
-                        update_surface_viewport(state.world.query_one(entity).unwrap());
-                    }
-
                     state.world.get::<&WlOutput>(target).unwrap().scale(factor);
                 }
-                state.output_scales_updated = true;
             }
             Event::Name { name } => {
                 state
