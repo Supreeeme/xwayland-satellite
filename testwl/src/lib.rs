@@ -72,6 +72,7 @@ use wayland_server::{
         wl_shm::WlShm,
         wl_shm_pool::WlShmPool,
         wl_surface::WlSurface,
+        wl_touch::{self, WlTouch},
     },
     Client, Dispatch, Display, DisplayHandle, GlobalDispatch, Resource, WEnum,
 };
@@ -225,6 +226,7 @@ struct State {
     seat: Option<WlSeat>,
     pointer: Option<WlPointer>,
     keyboard: Option<KeyboardState>,
+    touch: Option<WlTouch>,
     configure_serial: u32,
     selection: Option<WlDataSource>,
     data_device_man: Option<WlDataDeviceManager>,
@@ -248,6 +250,7 @@ impl Default for State {
             seat: None,
             pointer: None,
             keyboard: None,
+            touch: None,
             configure_serial: 0,
             selection: None,
             data_device_man: None,
@@ -752,6 +755,11 @@ impl Server {
             .create_global::<State, WpFractionalScaleManagerV1, _>(1, ());
         self.display.flush_clients().unwrap();
     }
+
+    #[track_caller]
+    pub fn touch(&mut self) -> &WlTouch {
+        self.state.touch.as_ref().expect("No touch object created")
+    }
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -1067,6 +1075,9 @@ impl Dispatch<WlSeat, ()> for State {
                     current_focus: None,
                 });
             }
+            wl_seat::Request::GetTouch { id } => {
+                state.touch = Some(data_init.init(id, ()));
+            }
             wl_seat::Request::Release => {}
             other => todo!("unhandled request {other:?}"),
         }
@@ -1120,6 +1131,23 @@ impl Dispatch<WlKeyboard, ()> for State {
     ) {
         match request {
             wl_keyboard::Request::Release => {}
+            other => todo!("unhandled request {other:?}"),
+        }
+    }
+}
+
+impl Dispatch<WlTouch, ()> for State {
+    fn request(
+        _: &mut Self,
+        _: &Client,
+        _: &WlTouch,
+        request: <WlTouch as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_touch::Request::Release => {}
             other => todo!("unhandled request {other:?}"),
         }
     }

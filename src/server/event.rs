@@ -711,29 +711,49 @@ impl Event for client::wl_keyboard::Event {
 
 impl Event for client::wl_touch::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let touch = state.world.get::<&WlTouch>(target).unwrap();
+        match self {
+            Self::Down {
+                serial,
+                time,
+                surface,
+                id,
+                x,
+                y,
+            } => {
+                let mut cmd = CommandBuffer::new();
+                {
+                    let Some(mut s_query) = surface.data().copied().and_then(|key| {
+                        state
+                            .world
+                            .query_one::<(&WlSurface, &SurfaceScaleFactor)>(key)
+                            .ok()
+                    }) else {
+                        return;
+                    };
 
-        let s_surf;
-        simple_event_shunt! {
-            touch, self => [
-                Down {
-                    serial,
-                    time,
-                    |surface| {
-                        s_surf = surface.data().copied().and_then(|key| state.world.get::<&WlSurface>(key).ok());
-                        if let Some(s) = &s_surf { s } else { return; }
-                    },
-                    id,
-                    x,
-                    y
-                },
-                Up { serial, time, id },
-                Motion { time, id, x, y },
-                Frame,
-                Cancel,
-                Shape { id, major, minor },
-                Orientation { id, orientation }
-            ]
+                    let (s_surface, s_factor) = s_query.get().unwrap();
+                    cmd.insert(target, (*s_factor,));
+                    let touch = state.world.get::<&WlTouch>(target).unwrap();
+                    touch.down(serial, time, s_surface, id, x * s_factor.0, y * s_factor.0);
+                }
+                cmd.run_on(&mut state.world);
+            }
+            Self::Motion { time, id, x, y } => {
+                let (touch, scale) = state.world.query_one_mut::<(&WlTouch, &SurfaceScaleFactor)>(target).unwrap();
+                touch.motion(time, id, x * scale.0, y * scale.0);
+            }
+            _ => {
+                let touch = state.world.get::<&WlTouch>(target).unwrap();
+                simple_event_shunt! {
+                    touch, self => [
+                        Up { serial, time, id },
+                        Frame,
+                        Cancel,
+                        Shape { id, major, minor },
+                        Orientation { id, orientation }
+                    ]
+                }
+            }
         }
     }
 }

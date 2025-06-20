@@ -20,6 +20,7 @@ use wayland_client::{
         wl_shm::{Format, WlShm},
         wl_shm_pool::WlShmPool,
         wl_surface::WlSurface,
+        wl_touch::{self, WlTouch},
     },
     Connection, Proxy, WEnum,
 };
@@ -2244,6 +2245,49 @@ fn transient_for_toplevel() {
         sub_data.toplevel().parent,
         Some(toplevel_data.toplevel().toplevel.clone())
     );
+}
+
+#[test]
+fn touch_fractional_scale() {
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let comp = f.compositor();
+    let (_, output) = f.new_output(0, 0);
+    let touch = TestObject::<WlTouch>::from_request(&comp.seat.obj, wl_seat::Request::GetTouch {});
+    f.run();
+
+    let toplevel = unsafe { Window::new(1) };
+    let (_, id) = f.create_toplevel(&comp, toplevel);
+    f.testwl.move_surface_to_output(id, &output);
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let server_surface = data.surface.clone();
+    let fractional = data.fractional.as_ref().cloned().unwrap();
+
+    let do_touch = |f: &mut TestFixture, x, y| {
+        f.testwl.touch().down(0, 0, &server_surface, 0, x, y);
+        f.testwl.dispatch();
+        f.run();
+        f.run();
+        let events = &mut touch.data.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let event = events.pop().unwrap();
+        let wl_touch::Event::Down { x, y, .. } = event else {
+            panic!("Got unexpected event: {event:?}");
+        };
+        (x, y)
+    };
+
+    let (x, y) = do_touch(&mut f, 20.0, 40.0);
+    assert_eq!(x, 20.0);
+    assert_eq!(y, 40.0);
+
+    fractional.preferred_scale(180); // 1.5 scale
+    f.run();
+    let (x, y) = do_touch(&mut f, 20.0, 40.0);
+    assert_eq!(x, 20.0 * 1.5);
+    assert_eq!(y, 40.0 * 1.5);
 }
 
 /// See Pointer::handle_event for an explanation.
