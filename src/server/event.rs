@@ -19,7 +19,8 @@ use wayland_protocols::{
         tablet::zv2::{
             client::{
                 zwp_tablet_pad_group_v2, zwp_tablet_pad_ring_v2, zwp_tablet_pad_strip_v2,
-                zwp_tablet_pad_v2, zwp_tablet_seat_v2, zwp_tablet_tool_v2, zwp_tablet_v2,
+                zwp_tablet_pad_v2, zwp_tablet_seat_v2, zwp_tablet_tool_v2,
+                zwp_tablet_v2::{self, ZwpTabletV2 as TabletClient},
             },
             server::{
                 zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2 as TabletPadGroupServer,
@@ -739,7 +740,10 @@ impl Event for client::wl_touch::Event {
                 cmd.run_on(&mut state.world);
             }
             Self::Motion { time, id, x, y } => {
-                let (touch, scale) = state.world.query_one_mut::<(&WlTouch, &SurfaceScaleFactor)>(target).unwrap();
+                let (touch, scale) = state
+                    .world
+                    .query_one_mut::<(&WlTouch, &SurfaceScaleFactor)>(target)
+                    .unwrap();
                 touch.motion(time, id, x * scale.0, y * scale.0);
             }
             _ => {
@@ -1327,27 +1331,55 @@ impl Event for zwp_tablet_pad_v2::Event {
 
 impl Event for zwp_tablet_tool_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let tool = state.world.get::<&TabletToolServer>(target).unwrap();
         match self {
             Self::ProximityIn {
                 serial,
                 tablet,
                 surface,
             } => {
-                let (e_tab, s_tablet) = from_client::<TabletServer, _, _>(&tablet, state);
-                let Some(surface) = surface
-                    .data()
-                    .copied()
-                    .and_then(|key| state.world.get::<&WlSurface>(key).ok())
-                else {
-                    return;
-                };
-                tool.proximity_in(serial, &s_tablet, &surface);
-                drop(tool);
-                drop(surface);
-                state.world.spawn_at(e_tab, (tablet, s_tablet));
+                let mut cmd = CommandBuffer::new();
+                {
+                    let Some(mut query) = surface.data().copied().and_then(|key| {
+                        state
+                            .world
+                            .query_one::<(&WlSurface, &SurfaceScaleFactor)>(key)
+                            .ok()
+                    }) else {
+                        warn!("tablet tool proximity_in failed: stale surface");
+                        return;
+                    };
+                    let (surface, scale) = query.get().unwrap();
+                    cmd.insert(target, (*scale,));
+
+                    let Some(s_tablet) =
+                        tablet
+                            .data()
+                            .and_then(|key: &LateInitObjectKey<TabletClient>| {
+                                state.world.get::<&TabletServer>(key.get()).ok()
+                            })
+                    else {
+                        warn!("tablet tool proximity_in failed: stale tablet");
+                        return;
+                    };
+
+                    state
+                        .world
+                        .get::<&TabletToolServer>(target)
+                        .unwrap()
+                        .proximity_in(serial, &s_tablet, surface);
+                }
+                cmd.run_on(&mut state.world);
+            }
+            Self::Motion { x, y } => {
+                let (tool, scale) = state
+                    .world
+                    .query_one_mut::<(&TabletToolServer, Option<&SurfaceScaleFactor>)>(target)
+                    .unwrap();
+                let scale = scale.map(|s| s.0).unwrap_or(1.0);
+                tool.motion(x * scale, y * scale);
             }
             _ => {
+                let tool = state.world.get::<&TabletToolServer>(target).unwrap();
                 simple_event_shunt! {
                     tool, self => [
                         Type { |tool_type| convert_wenum(tool_type) },
@@ -1359,7 +1391,7 @@ impl Event for zwp_tablet_tool_v2::Event {
                         ProximityOut,
                         Down { serial },
                         Up,
-                        Motion { x, y },
+                        Distance { distance },
                         Pressure { pressure },
                         Tilt { tilt_x, tilt_y },
                         Rotation { degrees },

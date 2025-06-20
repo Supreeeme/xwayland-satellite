@@ -264,6 +264,10 @@ where
         }
     }
 
+    pub fn get(&self) -> Entity {
+        self.key.get().copied().expect("Object key is not set")
+    }
+
     fn new() -> Self {
         Self {
             key: OnceLock::new(),

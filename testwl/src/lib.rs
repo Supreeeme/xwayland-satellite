@@ -227,6 +227,8 @@ struct State {
     pointer: Option<WlPointer>,
     keyboard: Option<KeyboardState>,
     touch: Option<WlTouch>,
+    tablet: Option<ZwpTabletV2>,
+    tablet_tool: Option<ZwpTabletToolV2>,
     configure_serial: u32,
     selection: Option<WlDataSource>,
     data_device_man: Option<WlDataDeviceManager>,
@@ -251,6 +253,8 @@ impl Default for State {
             pointer: None,
             keyboard: None,
             touch: None,
+            tablet: None,
+            tablet_tool: None,
             configure_serial: 0,
             selection: None,
             data_device_man: None,
@@ -760,6 +764,19 @@ impl Server {
     pub fn touch(&mut self) -> &WlTouch {
         self.state.touch.as_ref().expect("No touch object created")
     }
+
+    #[track_caller]
+    pub fn tablet_tool(&mut self) -> &ZwpTabletToolV2 {
+        self.state
+            .tablet_tool
+            .as_ref()
+            .expect("No tablet tool created")
+    }
+
+    #[track_caller]
+    pub fn tablet(&mut self) -> &ZwpTabletV2 {
+        self.state.tablet.as_ref().expect("No tablet created")
+    }
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -779,7 +796,7 @@ simple_global_dispatch!(WpFractionalScaleManagerV1);
 
 impl Dispatch<ZwpTabletManagerV2, ()> for State {
     fn request(
-        _: &mut Self,
+        state: &mut Self,
         client: &Client,
         _: &ZwpTabletManagerV2,
         request: <ZwpTabletManagerV2 as Resource>::Request,
@@ -794,11 +811,13 @@ impl Dispatch<ZwpTabletManagerV2, ()> for State {
                 seat.tablet_added(&tablet);
                 tablet.name("tabby".to_owned());
                 tablet.done();
+                state.tablet = Some(tablet);
 
                 let tool = client.create_resource::<_, _, State>(dhandle, 1, ()).unwrap();
                 seat.tool_added(&tool);
                 tool._type(zwp_tablet_tool_v2::Type::Finger);
                 tool.done();
+                state.tablet_tool = Some(tool);
 
                 let pad = client.create_resource::<_, _, State>(dhandle, 1, ()).unwrap();
                 let group = client.create_resource::<_, _, State>(dhandle, 1, ()).unwrap();

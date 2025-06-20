@@ -2290,6 +2290,75 @@ fn touch_fractional_scale() {
     assert_eq!(y, 40.0 * 1.5);
 }
 
+#[test]
+fn tablet_tool_fractional_scale() {
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let comp = f.compositor();
+    let (_, output) = f.new_output(0, 0);
+    let toplevel = unsafe { Window::new(1) };
+    let (_, id) = f.create_toplevel(&comp, toplevel);
+    let surface_data = f.testwl.get_surface_data(id).unwrap();
+    let fractional = surface_data.fractional.as_ref().cloned().unwrap();
+    let server_surface = surface_data.surface.clone();
+    f.testwl.move_surface_to_output(id, &output);
+
+    let seat = TestObject::<ZwpTabletSeatV2>::from_request(
+        &comp.tablet_man.obj,
+        zwp_tablet_manager_v2::Request::GetTabletSeat {
+            seat: comp.seat.obj,
+        },
+    );
+    // Not sure why exactly this requires 4 runs but it works so idk
+    for _ in 0..4 {
+        f.run();
+    }
+
+    let mut tool = None;
+    for event in seat.data.events.lock().unwrap().drain(..) {
+        if let zwp_tablet_seat_v2::Event::ToolAdded { id } = event {
+            tool = Some(id.clone());
+            break;
+        }
+    }
+
+    let client_tool = tool.expect("Didn't get tool");
+    let client_data = f.object_data(&client_tool);
+    let server_tool = f.testwl.tablet_tool().clone();
+    let tablet = f.testwl.tablet().clone();
+
+    let get_motion = || {
+        let events = &mut *client_data.events.lock().unwrap();
+        let event = events.pop();
+        let Some(zwp_tablet_tool_v2::Event::Motion { x, y }) = event else {
+            panic!("Didn't get motion event: {event:?}");
+        };
+        (x, y)
+    };
+
+    server_tool.proximity_in(0, &tablet, &server_surface);
+    server_tool.motion(20.0, 40.0);
+    f.testwl.dispatch();
+    f.run();
+    f.run();
+
+    let (x, y) = get_motion();
+    assert_eq!(x, 20.0);
+    assert_eq!(y, 40.0);
+
+    fractional.preferred_scale(180); // 1.5 scale
+    server_tool.proximity_in(0, &tablet, &server_surface);
+    server_tool.motion(20.0, 40.0);
+    f.testwl.dispatch();
+    f.run();
+    f.run();
+
+    let (x, y) = get_motion();
+    assert_eq!(x, 20.0 * 1.5);
+    assert_eq!(y, 40.0 * 1.5);
+}
+
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}
