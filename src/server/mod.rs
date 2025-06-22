@@ -736,8 +736,10 @@ impl<C: XConnection> ServerState<C> {
             debug!("not reconfiguring unknown window {:?}", event.window());
             return;
         };
-
-        let mut win = data.get::<&mut WindowData>().unwrap();
+        let Some(mut win) = data.get::<&mut WindowData>() else {
+            debug!("not reconfiguring unknown window {:?}", event.window());
+            return;
+        };
 
         let dims = WindowDims {
             x: event.x(),

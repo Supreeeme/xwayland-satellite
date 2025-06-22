@@ -634,45 +634,51 @@ impl Event for client::wl_keyboard::Event {
                 surface,
                 keys,
             } => {
-                if let Some(mut query) = surface.data().copied().and_then(|key| {
+                let Some(mut query) = surface.data().copied().and_then(|key| {
                     state
                         .world
                         .query_one::<(&x::Window, &WlSurface, Option<&OnOutput>)>(key)
                         .ok()
-                }) {
-                    let (window, surface, output) = query.get().unwrap();
-                    state.last_kb_serial = Some((
-                        data.get::<&client::wl_seat::WlSeat>()
-                            .as_deref()
-                            .unwrap()
-                            .clone(),
-                        serial,
-                    ));
-                    let output_name = get_output_name(output, &state.world);
-                    state.to_focus = Some(FocusData {
-                        window: *window,
-                        output_name,
-                    });
-                    keyboard.enter(serial, surface, keys);
-                }
+                }) else {
+                    return;
+                };
+                let Some((window, surface, output)) = query.get() else {
+                    return;
+                };
+                state.last_kb_serial = Some((
+                    data.get::<&client::wl_seat::WlSeat>()
+                        .as_deref()
+                        .unwrap()
+                        .clone(),
+                    serial,
+                ));
+                let output_name = get_output_name(output, &state.world);
+                state.to_focus = Some(FocusData {
+                    window: *window,
+                    output_name,
+                });
+                keyboard.enter(serial, surface, keys);
             }
             client::wl_keyboard::Event::Leave { serial, surface } => {
                 if !surface.is_alive() {
                     return;
                 }
-                if let Some(mut query) = surface
+                let Some(mut query) = surface
                     .data()
                     .copied()
                     .and_then(|key| state.world.query_one::<(&x::Window, &WlSurface)>(key).ok())
-                {
-                    let (window, surface) = query.get().unwrap();
-                    if state.to_focus.as_ref().map(|d| d.window) == Some(*window) {
-                        state.to_focus.take();
-                    } else {
-                        state.unfocus = true;
-                    }
-                    keyboard.leave(serial, surface);
+                else {
+                    return;
+                };
+                let Some((window, surface)) = query.get() else {
+                    return;
+                };
+                if state.to_focus.as_ref().map(|d| d.window) == Some(*window) {
+                    state.to_focus.take();
+                } else {
+                    state.unfocus = true;
                 }
+                keyboard.leave(serial, surface);
             }
             client::wl_keyboard::Event::Key {
                 serial,
@@ -734,8 +740,10 @@ impl Event for client::wl_touch::Event {
                     }) else {
                         return;
                     };
+                    let Some((s_surface, s_factor)) = s_query.get() else {
+                        return;
+                    };
 
-                    let (s_surface, s_factor) = s_query.get().unwrap();
                     cmd.insert(target, (*s_factor,));
                     let touch = state.world.get::<&WlTouch>(target).unwrap();
                     touch.down(serial, time, s_surface, id, x * s_factor.0, y * s_factor.0);
