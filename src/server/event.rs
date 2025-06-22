@@ -464,8 +464,11 @@ impl Event for client::wl_pointer::Event {
                     warn!("could not enter surface: stale surface");
                     return;
                 };
+                let Some((surface, role, scale, window)) = query.get() else {
+                    warn!("could not enter surface: stale surface");
+                    return;
+                };
 
-                let (surface, role, scale, window) = query.get().unwrap();
                 cmd.insert(target, (*scale,));
 
                 let surface_is_popup = matches!(role, SurfaceRole::Popup(_));
