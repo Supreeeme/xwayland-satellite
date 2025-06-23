@@ -727,16 +727,13 @@ impl<C: XConnection> ServerState<C> {
     }
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
-        let Some(data) = self
+        let Some((mut win, data)) = self
             .windows
             .get(&event.window())
             .copied()
             .and_then(|id| self.world.entity(id).ok())
+            .and_then(|d| Some((d.get::<&mut WindowData>()?, d)))
         else {
-            debug!("not reconfiguring unknown window {:?}", event.window());
-            return;
-        };
-        let Some(mut win) = data.get::<&mut WindowData>() else {
             debug!("not reconfiguring unknown window {:?}", event.window());
             return;
         };
