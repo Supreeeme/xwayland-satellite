@@ -455,16 +455,14 @@ impl Event for client::wl_pointer::Event {
                 let mut cmd = CommandBuffer::new();
                 let pending_enter = state.world.remove_one::<PendingEnter>(target).ok();
                 let server = state.world.get::<&WlPointer>(target).unwrap();
-                let Some(mut query) = surface.data().copied().and_then(|e| {
+                let mut query = surface.data().copied().and_then(|e| {
                     state
                         .world
                         .query_one::<(&WlSurface, &SurfaceRole, &SurfaceScaleFactor, &x::Window)>(e)
                         .ok()
-                }) else {
-                    warn!("could not enter surface: stale surface");
-                    return;
-                };
-                let Some((surface, role, scale, window)) = query.get() else {
+                });
+                let Some((surface, role, scale, window)) = query.as_mut().and_then(|q| q.get())
+                else {
                     warn!("could not enter surface: stale surface");
                     return;
                 };
@@ -634,15 +632,13 @@ impl Event for client::wl_keyboard::Event {
                 surface,
                 keys,
             } => {
-                let Some(mut query) = surface.data().copied().and_then(|key| {
+                let mut query = surface.data().copied().and_then(|key| {
                     state
                         .world
                         .query_one::<(&x::Window, &WlSurface, Option<&OnOutput>)>(key)
                         .ok()
-                }) else {
-                    return;
-                };
-                let Some((window, surface, output)) = query.get() else {
+                });
+                let Some((window, surface, output)) = query.as_mut().and_then(|q| q.get()) else {
                     return;
                 };
                 state.last_kb_serial = Some((
@@ -663,14 +659,11 @@ impl Event for client::wl_keyboard::Event {
                 if !surface.is_alive() {
                     return;
                 }
-                let Some(mut query) = surface
+                let mut query = surface
                     .data()
                     .copied()
-                    .and_then(|key| state.world.query_one::<(&x::Window, &WlSurface)>(key).ok())
-                else {
-                    return;
-                };
-                let Some((window, surface)) = query.get() else {
+                    .and_then(|key| state.world.query_one::<(&x::Window, &WlSurface)>(key).ok());
+                let Some((window, surface)) = query.as_mut().and_then(|q| q.get()) else {
                     return;
                 };
                 if state.to_focus.as_ref().map(|d| d.window) == Some(*window) {
@@ -732,15 +725,13 @@ impl Event for client::wl_touch::Event {
             } => {
                 let mut cmd = CommandBuffer::new();
                 {
-                    let Some(mut s_query) = surface.data().copied().and_then(|key| {
+                    let mut s_query = surface.data().copied().and_then(|key| {
                         state
                             .world
                             .query_one::<(&WlSurface, &SurfaceScaleFactor)>(key)
                             .ok()
-                    }) else {
-                        return;
-                    };
-                    let Some((s_surface, s_factor)) = s_query.get() else {
+                    });
+                    let Some((s_surface, s_factor)) = s_query.as_mut().and_then(|q| q.get()) else {
                         return;
                     };
 
