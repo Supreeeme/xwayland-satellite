@@ -151,7 +151,7 @@ impl SurfaceEvents {
                             x: dimensions.x - state.global_output_offset.x.value,
                             y: dimensions.y - state.global_output_offset.y.value,
                         },
-                        state.connection.as_mut().unwrap(),
+                        &mut state.connection,
                     );
                     if state.last_focused_toplevel == Some(*window) {
                         let output = get_output_name(Some(&on_output), &state.world);
@@ -889,21 +889,19 @@ fn update_output_offset(
         );
     }
 
-    if let Some(connection) = state.connection.as_mut() {
-        update_window_output_offsets(
-            output,
-            &state.global_output_offset,
-            &state.world,
-            connection,
-        );
-    }
+    update_window_output_offsets(
+        output,
+        &state.global_output_offset,
+        &state.world,
+        &mut state.connection,
+    );
 }
 
 fn update_window_output_offsets(
     output: Entity,
     global_output_offset: &GlobalOutputOffset,
     world: &World,
-    connection: &mut impl XConnection,
+    connection: &mut Option<impl XConnection>,
 ) {
     let dimensions = world.get::<&OutputDimensions>(output).unwrap();
     let mut query = world.query::<(&x::Window, &mut WindowData, &OnOutput)>();
@@ -927,7 +925,7 @@ pub(super) fn update_global_output_offset(
     output: Entity,
     global_output_offset: &GlobalOutputOffset,
     world: &World,
-    connection: &mut impl XConnection,
+    connection: &mut Option<impl XConnection>,
 ) {
     let entity = world.entity(output).unwrap();
     let mut query = entity.query::<(&OutputDimensions, &WlOutput)>();

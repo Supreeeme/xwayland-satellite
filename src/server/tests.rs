@@ -321,8 +321,50 @@ impl PopupBuilder {
     }
 }
 
+trait PreConnectFn: Sized {
+    fn call(self, _: &mut testwl::Server) {}
+}
+impl<F: FnOnce(&mut testwl::Server)> PreConnectFn for F {
+    fn call(self, server: &mut testwl::Server) {
+        self(server);
+    }
+}
+impl PreConnectFn for () {}
+
+struct SetupOptions<F> {
+    pre_connect: Option<F>,
+    connect_x: bool,
+}
+
+impl SetupOptions<()> {
+    fn dont_connect_x() -> Self {
+        Self {
+            pre_connect: None,
+            connect_x: false,
+        }
+    }
+}
+
+impl<F: PreConnectFn> SetupOptions<F> {
+    fn pre_connect(pre_connect: F) -> Self {
+        Self {
+            pre_connect: Some(pre_connect),
+            connect_x: true,
+        }
+    }
+}
+
+impl Default for SetupOptions<()> {
+    fn default() -> Self {
+        Self {
+            pre_connect: None,
+            connect_x: true,
+        }
+    }
+}
+
 impl TestFixture {
-    fn new_pre_connect(pre_connect: impl FnOnce(&mut testwl::Server)) -> Self {
+    fn new_with_options<F: PreConnectFn>(options: SetupOptions<F>) -> Self {
         INIT.call_once(|| {
             env_logger::builder()
                 .is_test(true)
@@ -332,7 +374,9 @@ impl TestFixture {
 
         let (client_s, server_s) = UnixStream::pair().unwrap();
         let mut testwl = testwl::Server::new(true);
-        pre_connect(&mut testwl);
+        if let Some(pre_connect) = options.pre_connect {
+            pre_connect.call(&mut testwl);
+        }
         let display = Display::<FakeServerState>::new().unwrap();
         testwl.connect(server_s);
         // Handle initial globals roundtrip setup requirement
@@ -350,7 +394,9 @@ impl TestFixture {
         let (fake_client, xwls_server) = UnixStream::pair().unwrap();
         satellite.connect(xwls_server);
 
-        satellite.set_x_connection(FakeXConnection::default());
+        if options.connect_x {
+            satellite.set_x_connection(FakeXConnection::default());
+        }
 
         let xwls_connection = Connection::from_socket(fake_client).unwrap();
         let registry = TestObject::<WlRegistry>::from_request(
@@ -371,7 +417,11 @@ impl TestFixture {
     }
 
     fn new() -> Self {
-        Self::new_pre_connect(|_| {})
+        Self::new_with_options(SetupOptions::default())
+    }
+
+    fn new_pre_connect(pre_connect: impl FnOnce(&mut testwl::Server)) -> Self {
+        Self::new_with_options(SetupOptions::pre_connect(pre_connect))
     }
 
     fn new_with_compositor() -> (Self, Compositor) {
@@ -513,6 +563,7 @@ impl TestFixture {
                 id: (WlOutput::interface(), version),
             },
         );
+        self.run();
         self.run();
         (output, self.testwl.last_created_output())
     }
@@ -2359,6 +2410,23 @@ fn tablet_tool_fractional_scale() {
     assert_eq!(y, 40.0 * 1.5);
 }
 
+#[test]
+fn output_updated_before_x_connection() {
+    let mut f = TestFixture::new_with_options(SetupOptions::dont_connect_x());
+    let comp = f.compositor();
+    let (_, output) = f.new_output(-20, -20);
+
+    f.satellite.set_x_connection(FakeXConnection::default());
+
+    let window = unsafe { Window::new(1) };
+    let (_, surface_id) = f.create_toplevel(&comp, window);
+    f.testwl.move_surface_to_output(surface_id, &output);
+    f.run();
+    f.run();
+    let data = &f.connection().windows[&window];
+    assert_eq!(data.dims.x, 0);
+    assert_eq!(data.dims.y, 0);
+}
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}

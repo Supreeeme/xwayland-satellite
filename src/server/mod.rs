@@ -138,7 +138,7 @@ impl WindowData {
         &mut self,
         window: x::Window,
         offset: WindowOutputOffset,
-        connection: &mut C,
+        connection: &mut Option<C>,
     ) {
         log::trace!("offset: {offset:?}");
         if offset == self.output_offset {
@@ -150,15 +150,17 @@ impl WindowData {
         dims.y += (offset.y - self.output_offset.y) as i16;
         self.output_offset = offset;
 
-        connection.set_window_dims(
-            window,
-            PendingSurfaceState {
-                x: dims.x as i32,
-                y: dims.y as i32,
-                width: self.attrs.dims.width as _,
-                height: self.attrs.dims.height as _,
-            },
-        );
+        if let Some(connection) = connection.as_mut() {
+            connection.set_window_dims(
+                window,
+                PendingSurfaceState {
+                    x: dims.x as i32,
+                    y: dims.y as i32,
+                    width: self.attrs.dims.width as _,
+                    height: self.attrs.dims.height as _,
+                },
+            );
+        }
 
         debug!("set {:?} offset to {:?}", window, self.output_offset);
     }
@@ -989,7 +991,7 @@ impl<C: XConnection> ServerState<C> {
                     e,
                     &self.global_output_offset,
                     &self.world,
-                    self.connection.as_mut().unwrap(),
+                    &mut self.connection,
                 );
             }
             self.global_offset_updated = false;
