@@ -1095,6 +1095,11 @@ impl<C: XConnection> ServerState<C> {
                 }
             }
 
+            if self.world.selection_cancelled {
+                clipboard.source = None;
+                self.world.selection_cancelled = false;
+            }
+
             if clipboard.source.is_none() {
                 if let Some(offer) = self.world.selection_offer.take() {
                     if offer.inner().is_alive() {
@@ -1108,7 +1113,6 @@ impl<C: XConnection> ServerState<C> {
                         clipboard.source = None;
                     }
                 }
-                self.world.selection_cancelled = false;
             }
         }
     }
