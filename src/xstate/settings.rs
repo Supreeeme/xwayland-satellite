@@ -164,6 +164,7 @@ impl Settings {
     fn set_scale(&mut self, scale: f64) {
         self.serial += 1;
 
+        let scale = scale.max(1.0);
         let setting = IntSetting {
             value: (scale * DEFAULT_DPI as f64 * DPI_SCALE_FACTOR as f64).round() as i32,
             last_change_serial: self.serial,
