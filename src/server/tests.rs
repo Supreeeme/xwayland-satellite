@@ -2427,6 +2427,23 @@ fn output_updated_before_x_connection() {
     assert_eq!(data.dims.x, 0);
     assert_eq!(data.dims.y, 0);
 }
+
+#[test]
+fn quick_empty_data_offer() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
+    let win = unsafe { Window::new(1) };
+    let (_surface, _id) = f.create_toplevel(&comp, win);
+    f.testwl.create_data_offer(vec![testwl::PasteData {
+        mime_type: "text".to_string(),
+        data: b"abc".to_vec(),
+    }]);
+    f.testwl.empty_data_offer();
+    f.run();
+
+    let selection = f.satellite.new_selection();
+    assert!(selection.is_none());
+}
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}

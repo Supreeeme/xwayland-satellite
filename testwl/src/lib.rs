@@ -696,6 +696,20 @@ impl Server {
     }
 
     #[track_caller]
+    pub fn empty_data_offer(&mut self) {
+        let Some(dev) = &self.state.data_device else {
+            panic!("No data device created");
+        };
+
+        if let Some(selection) = self.state.selection.take() {
+            selection.cancelled();
+        }
+
+        dev.selection(None);
+        self.display.flush_clients().unwrap();
+    }
+
+    #[track_caller]
     pub fn move_pointer_to(&mut self, surface: SurfaceId, x: f64, y: f64) {
         let pointer = self.state.pointer.as_ref().expect("No pointer created");
         let data = self.state.surfaces.get(&surface).expect("No such surface");

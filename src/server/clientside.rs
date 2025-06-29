@@ -3,7 +3,8 @@ use hecs::{Entity, World};
 use smithay_client_toolkit::{
     activation::{ActivationHandler, RequestData, RequestDataExt},
     data_device_manager::{
-        data_device::DataDeviceHandler, data_offer::DataOfferHandler,
+        data_device::{DataDeviceData, DataDeviceHandler},
+        data_offer::{DataOfferHandler, SelectionOffer},
         data_source::DataSourceHandler,
     },
     delegate_activation, delegate_data_device,
@@ -78,7 +79,7 @@ pub(super) struct MyWorld {
     pub new_globals: Vec<Global>,
     events: Vec<(Entity, ObjectEvent)>,
     queued_events: Vec<mpsc::Receiver<(Entity, ObjectEvent)>>,
-    pub selection: Option<wayland_client::protocol::wl_data_device::WlDataDevice>,
+    pub selection_offer: Option<SelectionOffer>,
     pub selection_requests: Vec<(
         String,
         smithay_client_toolkit::data_device_manager::WritePipe,
@@ -95,7 +96,7 @@ impl MyWorld {
             new_globals: Vec::new(),
             events: Vec::new(),
             queued_events: Vec::new(),
-            selection: None,
+            selection_offer: None,
             selection_requests: Vec::new(),
             selection_cancelled: false,
             pending_activations: Vec::new(),
@@ -385,7 +386,8 @@ impl DataDeviceHandler for MyWorld {
         _: &wayland_client::QueueHandle<Self>,
         data_device: &wayland_client::protocol::wl_data_device::WlDataDevice,
     ) {
-        self.selection = Some(data_device.clone());
+        let data: &DataDeviceData = data_device.data().unwrap();
+        self.selection_offer = data.selection_offer();
     }
 
     fn drop_performed(

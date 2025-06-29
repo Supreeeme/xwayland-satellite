@@ -1095,16 +1095,18 @@ impl<C: XConnection> ServerState<C> {
                 }
             }
 
-            if clipboard.source.is_none() || self.world.selection_cancelled {
-                if self.world.selection.take().is_some() {
-                    let device = clipboard.device.as_ref().unwrap();
-                    let offer = device.data().selection_offer().unwrap();
-                    let mime_types: Box<[String]> = offer.with_mime_types(|mimes| mimes.into());
-                    let foreign = ForeignSelection {
-                        mime_types,
-                        inner: offer,
-                    };
-                    clipboard.source = Some(CopyPasteData::Foreign(foreign));
+            if clipboard.source.is_none() {
+                if let Some(offer) = self.world.selection_offer.take() {
+                    if offer.inner().is_alive() {
+                        let mime_types: Box<[String]> = offer.with_mime_types(|mimes| mimes.into());
+                        let foreign = ForeignSelection {
+                            mime_types,
+                            inner: offer,
+                        };
+                        clipboard.source = Some(CopyPasteData::Foreign(foreign));
+                    } else {
+                        clipboard.source = None;
+                    }
                 }
                 self.world.selection_cancelled = false;
             }
