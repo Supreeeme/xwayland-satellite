@@ -1,5 +1,5 @@
 use super::*;
-use hecs::CommandBuffer;
+use hecs::{CommandBuffer, DynamicBundle};
 use log::{debug, error, trace, warn};
 use macros::simple_event_shunt;
 use std::sync::{Arc, OnceLock};
@@ -1435,13 +1435,19 @@ impl<C: XConnection> Dispatch<XwaylandSurfaceV1, Entity> for ServerState<C> {
                     .map(|i| i.0);
 
                 if let Some(win_entity) = win_entity {
-                    let win = *state.world.get::<&x::Window>(win_entity).unwrap();
-                    debug!("associate {surface_id} with {win:?}");
-                    state.windows.insert(win, *entity);
+                    let bundle = state.world.take(win_entity).unwrap();
+                    if !bundle.has::<x::Window>() {
+                        warn!("Window with same serial ({serial:?}) as {surface_id} has been destroyed?");
+                        return;
+                    }
                     let mut builder = hecs::EntityBuilder::new();
-                    builder.add_bundle(state.world.take(win_entity).unwrap());
+                    builder.add_bundle(bundle);
                     state.world.insert(*entity, builder.build()).unwrap();
+                    state.world.remove_one::<SurfaceSerial>(*entity).unwrap();
                     let data = state.world.entity(*entity).unwrap();
+                    let win = data.get::<&x::Window>().as_deref().copied().unwrap();
+                    state.windows.insert(win, *entity);
+                    debug!("associate {surface_id} with {win:?} (serial {serial:?})");
                     if data.get::<&WindowData>().unwrap().mapped {
                         state.create_role_window(win, *entity);
                     }
@@ -1449,9 +1455,7 @@ impl<C: XConnection> Dispatch<XwaylandSurfaceV1, Entity> for ServerState<C> {
                     state.world.insert(*entity, (serial,)).unwrap();
                 }
             }
-            Request::Destroy => {
-                state.world.remove_one::<SurfaceSerial>(*entity).unwrap();
-            }
+            Request::Destroy => {}
             _ => unreachable!(),
         }
     }

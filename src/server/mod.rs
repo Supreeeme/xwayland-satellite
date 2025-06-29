@@ -172,7 +172,7 @@ struct SurfaceAttach {
     y: i32,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug)]
 struct SurfaceSerial([u32; 2]);
 
 #[derive(Debug)]
@@ -749,7 +749,7 @@ impl<C: XConnection> ServerState<C> {
         if dims == win.attrs.dims {
             return;
         }
-        debug!("Reconfiguring {win:?} {:?}", dims);
+        debug!("Reconfiguring {:?} {:?}", event.window(), dims);
         if !win.mapped {
             win.attrs.dims = dims;
             return;

@@ -2444,6 +2444,55 @@ fn quick_empty_data_offer() {
     let selection = f.satellite.new_selection();
     assert!(selection.is_none());
 }
+
+#[test]
+fn quick_destroy_window_with_serial() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+
+    let window = unsafe { Window::new(1) };
+    let data = WindowData {
+        mapped: true,
+        dims: WindowDims {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 50,
+        },
+        fullscreen: false,
+    };
+    f.new_window(window, false, data);
+    f.satellite.map_window(window);
+
+    let (_, surface) = comp.create_surface();
+    let xwl = TestObject::<XwaylandSurfaceV1>::from_request(
+        &comp.shell.obj,
+        Req::<XwaylandShellV1>::GetXwaylandSurface {
+            surface: surface.clone(),
+        },
+    );
+
+    let serial = f.surface_serial;
+    let serial_lo = (serial & 0xFF) as u32;
+    let serial_hi = ((serial >> 8) & 0xFF) as u32;
+    xwl.send_request(Req::<XwaylandSurfaceV1>::SetSerial {
+        serial_lo,
+        serial_hi,
+    })
+    .unwrap();
+    f.satellite
+        .set_window_serial(window, [serial_lo, serial_hi]);
+    f.satellite.unmap_window(window);
+    f.satellite.destroy_window(window);
+    f.run();
+
+    let id = f.testwl.last_created_surface_id().unwrap();
+    let surface_data = f.testwl.get_surface_data(id).unwrap();
+    assert!(
+        surface_data.role.is_none(),
+        "Surface unexpectedly has role: {:?}",
+        surface_data.role
+    );
+}
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}
