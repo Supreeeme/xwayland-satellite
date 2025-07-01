@@ -12,7 +12,7 @@ rustix = "0.38.31"
 all = "deny"
 
 [workspace.package]
-rust-version = "1.83.0"
+rust-version = "1.87.0"
 
 [package]
 name = "xwayland-satellite"
