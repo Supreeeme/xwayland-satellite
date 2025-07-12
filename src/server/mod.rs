@@ -1199,8 +1199,7 @@ impl<C: XConnection> ServerState<C> {
             let old_role_type = std::mem::discriminant(role);
             assert_eq!(
                 new_role_type, old_role_type,
-                "Surface for {:?} already had a role: {:?}",
-                window, role
+                "Surface for {window:?} already had a role: {role:?}"
             );
         }
 

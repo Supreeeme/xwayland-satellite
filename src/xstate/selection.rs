@@ -386,7 +386,7 @@ impl XState {
                         let Some(target) = mimes.iter().find(|t| t.atom == other) else {
                             if log::log_enabled!(log::Level::Debug) {
                                 let name = get_atom_name(&self.connection, other);
-                                debug!("refusing selection request because given atom could not be found ({})", name);
+                                debug!("refusing selection request because given atom could not be found ({name})");
                             }
                             refuse();
                             return true;
@@ -447,7 +447,7 @@ impl XState {
     }
 
     fn handle_new_selection_owner(&mut self, owner: x::Window, timestamp: u32) {
-        debug!("new selection owner: {:?}", owner);
+        debug!("new selection owner: {owner:?}");
         self.selection_data.last_selection_timestamp = timestamp;
         // Grab targets
         self.connection

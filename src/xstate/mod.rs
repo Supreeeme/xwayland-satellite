@@ -330,7 +330,7 @@ impl XState {
 
             match event {
                 xcb::Event::X(x::Event::CreateNotify(e)) => {
-                    debug!("new window: {:?}", e);
+                    debug!("new window: {e:?}");
                     server_state.new_window(
                         e.window(),
                         e.override_redirect(),
@@ -702,7 +702,7 @@ impl XState {
                 data.push(0);
             }
             let class = CString::from_vec_with_nul(data).unwrap();
-            trace!("{:?} class: {class:?}", window);
+            trace!("{window:?} class: {class:?}");
             class.to_string_lossy().to_string()
         };
         PropertyCookieWrapper {
@@ -1236,7 +1236,7 @@ impl XConnection for RealConnection {
             revert_to: x::InputFocus::None,
             time: x::CURRENT_TIME,
         }) {
-            debug!("SetInputFocus failed ({:?}: {:?})", window, e);
+            debug!("SetInputFocus failed ({window:?}: {e:?})");
             return;
         }
         if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty {
@@ -1246,7 +1246,7 @@ impl XConnection for RealConnection {
             r#type: x::ATOM_WINDOW,
             data: &[window],
         }) {
-            debug!("ChangeProperty failed ({:?}: {:?})", window, e);
+            debug!("ChangeProperty failed ({window:?}: {e:?})");
         }
         if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty {
             mode: x::PropMode::Replace,
@@ -1255,7 +1255,7 @@ impl XConnection for RealConnection {
             r#type: self.atoms.wm_state,
             data: &[WmState::Normal as u32, 0],
         }) {
-            debug!("ChangeProperty failed ({:?}: {:?})", window, e);
+            debug!("ChangeProperty failed ({window:?}: {e:?})");
         }
 
         if let Some(name) = output_name {

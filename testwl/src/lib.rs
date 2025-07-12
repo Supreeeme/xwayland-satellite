@@ -365,7 +365,7 @@ impl State {
             .expect("Surface does not exist");
         match &mut surface.role {
             Some(SurfaceRole::Toplevel(t)) => t,
-            other => panic!("Surface does not have toplevel role: {:?}", other),
+            other => panic!("Surface does not have toplevel role: {other:?}"),
         }
     }
 
@@ -1283,7 +1283,7 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                 let states = toplevel.states.clone();
                 state.configure_toplevel(*surface_id, 100, 100, states);
             }
-            xdg_toplevel::Request::UnsetFullscreen { .. } => {
+            xdg_toplevel::Request::UnsetFullscreen => {
                 let data = state.surfaces.get_mut(surface_id).unwrap();
                 let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
                     unreachable!();
@@ -1667,7 +1667,7 @@ impl Dispatch<WlSurface, ()> for State {
         let data = state
             .surfaces
             .get_mut(&SurfaceId(resource.id().protocol_id()))
-            .unwrap_or_else(|| panic!("{:?} missing from surface map", resource));
+            .unwrap_or_else(|| panic!("{resource:?} missing from surface map"));
 
         match request {
             Attach { buffer, .. } => {

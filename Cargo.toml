@@ -1,5 +1,5 @@
 [workspace]
-members = ["macros"]
+members = ["macros", "testwl"]
 
 [workspace.dependencies]
 wayland-client = "0.31.2"
@@ -16,7 +16,8 @@ name = "xwayland-satellite"
 version = "0.6.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lints]
+workspace = true
 
 [lib]
 crate-type = ["lib"]
