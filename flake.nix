@@ -78,6 +78,7 @@
               description = "Xwayland outside your Wayland";
               homepage = "https://github.com/Supreeeme/xwayland-satellite";
               license = licenses.mpl20;
+              mainProgram = "xwayland-satellite";
               platforms = platforms.linux;
             };
           };
