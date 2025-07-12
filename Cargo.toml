@@ -15,6 +15,7 @@ all = "deny"
 name = "xwayland-satellite"
 version = "0.6.0"
 edition = "2021"
+rust-version = "1.83.0"
 
 [lints]
 workspace = true
