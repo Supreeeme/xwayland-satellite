@@ -27,7 +27,10 @@ use wayland_client::{
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::client::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
-        pointer_constraints::zv1::client::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
+        pointer_constraints::zv1::client::{
+            zwp_locked_pointer_v1::ZwpLockedPointerV1,
+            zwp_pointer_constraints_v1::{self, ZwpPointerConstraintsV1},
+        },
         relative_pointer::zv1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
         tablet::zv2::client::{
             zwp_tablet_manager_v2::{self, ZwpTabletManagerV2},
@@ -104,7 +107,8 @@ struct Compositor {
     shm: TestObject<WlShm>,
     shell: TestObject<XwaylandShellV1>,
     seat: TestObject<WlSeat>,
-    tablet_man: TestObject<ZwpTabletManagerV2>
+    tablet_man: TestObject<ZwpTabletManagerV2>,
+    pointer_constraints: TestObject<ZwpPointerConstraintsV1>,
 } => CompositorOptional
 
 }
@@ -190,14 +194,12 @@ impl crate::X11Selection for Vec<testwl::PasteData> {
         mime: &str,
         mut pipe: smithay_client_toolkit::data_device_manager::WritePipe,
     ) {
-        println!("writing");
         let data = self
             .iter()
             .find(|data| data.mime_type == mime)
             .unwrap_or_else(|| panic!("Couldn't find mime type {mime}"));
         pipe.write_all(&data.data)
             .expect("Couldn't write paste data");
-        println!("goodbye pipe {mime}");
     }
 }
 
@@ -475,6 +477,9 @@ impl TestFixture {
                     x if x == XwaylandShellV1::interface().name => bind!(shell),
                     x if x == WlSeat::interface().name => bind!(seat),
                     x if x == ZwpTabletManagerV2::interface().name => bind!(tablet_man),
+                    x if x == ZwpPointerConstraintsV1::interface().name => {
+                        bind!(pointer_constraints)
+                    }
                     _ => {}
                 }
             }
@@ -2248,8 +2253,6 @@ fn subpopup_positioning() {
     f.testwl.move_pointer_to(id_popup, 1.0, 1.0);
     f.run();
 
-    println!("{:?}", f.satellite.last_hovered);
-
     let win_subpopup = unsafe { Window::new(3) };
 
     f.create_popup(
@@ -2493,6 +2496,53 @@ fn quick_destroy_window_with_serial() {
         surface_data.role
     );
 }
+
+#[test]
+fn scaled_pointer_lock_position_hint() {
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let comp = f.compositor();
+    let pointer =
+        TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+
+    let (_, output) = f.new_output(0, 0);
+    let win = unsafe { Window::new(1) };
+    let (surface, id) = f.create_toplevel(&comp, win);
+    let surface_data = f.testwl.get_surface_data(id).expect("No surface data");
+    let fractional = surface_data
+        .fractional
+        .as_ref()
+        .expect("No fractional scale for surface");
+    fractional.preferred_scale(180); // 1.5 scale
+    f.testwl.move_surface_to_output(id, &output);
+    f.run();
+    f.run();
+
+    let locked_pointer = TestObject::<ZwpLockedPointerV1>::from_request(
+        &comp.pointer_constraints.obj,
+        zwp_pointer_constraints_v1::Request::LockPointer {
+            surface: surface.obj.clone(),
+            pointer: pointer.obj.clone(),
+            region: None,
+            lifetime: WEnum::Value(zwp_pointer_constraints_v1::Lifetime::Persistent),
+        },
+    );
+    locked_pointer.set_cursor_position_hint(75.0, 75.0);
+    f.run();
+    f.run();
+
+    let lock_data = f
+        .testwl
+        .locked_pointer()
+        .expect("Missing locked pointer data");
+    assert_eq!(lock_data.surface, id);
+    assert_eq!(
+        lock_data.cursor_hint,
+        Some(testwl::Vec2f { x: 50.0, y: 50.0 })
+    );
+}
+
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}

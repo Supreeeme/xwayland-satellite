@@ -12,7 +12,10 @@ use wayland_protocols::{
             wp_fractional_scale_v1::{self, WpFractionalScaleV1},
         },
         linux_dmabuf::zv1::server::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
-        pointer_constraints::zv1::server::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
+        pointer_constraints::zv1::server::{
+            zwp_locked_pointer_v1::{self, ZwpLockedPointerV1},
+            zwp_pointer_constraints_v1::{self, ZwpPointerConstraintsV1},
+        },
         relative_pointer::zv1::server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
         tablet::zv2::server::{
             zwp_tablet_manager_v2::ZwpTabletManagerV2,
@@ -165,6 +168,12 @@ pub struct Vec2 {
     pub y: i32,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Default)]
+pub struct Vec2f {
+    pub x: f64,
+    pub y: f64,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct XdgSurfaceData {
     pub surface: XdgSurface,
@@ -187,6 +196,11 @@ impl XdgSurfaceData {
 
 #[derive(Debug, Hash, Clone, Copy, Eq, PartialEq)]
 pub struct SurfaceId(u32);
+impl From<&WlSurface> for SurfaceId {
+    fn from(value: &WlSurface) -> Self {
+        Self(value.id().protocol_id())
+    }
+}
 
 #[derive(Hash, Clone, Copy, Eq, PartialEq)]
 struct PositionerId(u32);
@@ -214,6 +228,15 @@ struct ActivationTokenData {
     constructed: bool,
 }
 
+pub struct LockedPointer {
+    pub surface: SurfaceId,
+    pub cursor_hint: Option<Vec2f>,
+}
+struct PointerState {
+    pointer: WlPointer,
+    locked: Option<LockedPointer>,
+}
+
 struct State {
     surfaces: HashMap<SurfaceId, SurfaceData>,
     outputs: HashMap<WlOutput, Output>,
@@ -224,7 +247,7 @@ struct State {
     last_output: Option<WlOutput>,
     callbacks: Vec<WlCallback>,
     seat: Option<WlSeat>,
-    pointer: Option<WlPointer>,
+    pointer: Option<PointerState>,
     keyboard: Option<KeyboardState>,
     touch: Option<WlTouch>,
     tablet: Option<ZwpTabletV2>,
@@ -417,9 +440,9 @@ impl Server {
         dh.create_global::<State, XdgActivationV1, _>(1, ());
         dh.create_global::<State, ZxdgDecorationManagerV1, _>(1, ());
         dh.create_global::<State, WpViewporter, _>(1, ());
+        dh.create_global::<State, ZwpPointerConstraintsV1, _>(1, ());
         global_noop!(ZwpLinuxDmabufV1);
         global_noop!(ZwpRelativePointerManagerV1);
-        global_noop!(ZwpPointerConstraintsV1);
 
         struct HandlerData;
         impl ObjectData<State> for HandlerData {
@@ -577,7 +600,12 @@ impl Server {
 
     #[track_caller]
     pub fn pointer(&self) -> &WlPointer {
-        self.state.pointer.as_ref().unwrap()
+        self.state.pointer.as_ref().map(|p| &p.pointer).unwrap()
+    }
+
+    #[track_caller]
+    pub fn locked_pointer(&self) -> Option<&LockedPointer> {
+        self.state.pointer.as_ref().unwrap().locked.as_ref()
     }
 
     #[track_caller]
@@ -714,8 +742,8 @@ impl Server {
         let pointer = self.state.pointer.as_ref().expect("No pointer created");
         let data = self.state.surfaces.get(&surface).expect("No such surface");
 
-        pointer.enter(24, &data.surface, x, y);
-        pointer.frame();
+        pointer.pointer.enter(24, &data.surface, x, y);
+        pointer.pointer.frame();
         self.display.flush_clients().unwrap();
     }
 
@@ -807,6 +835,7 @@ simple_global_dispatch!(ZwpTabletManagerV2);
 simple_global_dispatch!(ZxdgDecorationManagerV1);
 simple_global_dispatch!(WpViewporter);
 simple_global_dispatch!(WpFractionalScaleManagerV1);
+simple_global_dispatch!(ZwpPointerConstraintsV1);
 
 impl Dispatch<ZwpTabletManagerV2, ()> for State {
     fn request(
@@ -1100,7 +1129,10 @@ impl Dispatch<WlSeat, ()> for State {
     ) {
         match request {
             wl_seat::Request::GetPointer { id } => {
-                state.pointer = Some(data_init.init(id, ()));
+                state.pointer = Some(PointerState {
+                    pointer: data_init.init(id, ()),
+                    locked: None,
+                });
             }
             wl_seat::Request::GetKeyboard { id } => {
                 state.keyboard = Some(KeyboardState {
@@ -1130,10 +1162,7 @@ impl Dispatch<WlPointer, ()> for State {
         match request {
             wl_pointer::Request::SetCursor { surface, .. } => {
                 if let Some(surface) = surface {
-                    let data = state
-                        .surfaces
-                        .get_mut(&SurfaceId(surface.id().protocol_id()))
-                        .unwrap();
+                    let data = state.surfaces.get_mut(&SurfaceId::from(&surface)).unwrap();
 
                     assert!(
                         matches!(
@@ -2028,6 +2057,67 @@ impl Dispatch<WpFractionalScaleV1, SurfaceId> for State {
                 }
             }
             _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<ZwpPointerConstraintsV1, ()> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &ZwpPointerConstraintsV1,
+        request: <ZwpPointerConstraintsV1 as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_pointer_constraints_v1::Request::LockPointer {
+                id,
+                surface,
+                pointer,
+                region: _,
+                lifetime: _,
+            } => {
+                let pointer_state = state.pointer.as_mut().unwrap();
+                assert_eq!(pointer, pointer_state.pointer);
+                let surface_id = SurfaceId::from(&surface);
+
+                assert!(pointer_state.locked.is_none());
+                data_init.init(id, ());
+                pointer_state.locked = Some(LockedPointer {
+                    surface: surface_id,
+                    cursor_hint: None,
+                });
+            }
+            _ => todo!("{request:?}"),
+        }
+    }
+}
+
+impl Dispatch<ZwpLockedPointerV1, ()> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &ZwpLockedPointerV1,
+        request: <ZwpLockedPointerV1 as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_locked_pointer_v1::Request::SetCursorPositionHint {
+                surface_x,
+                surface_y,
+            } => {
+                let state = state.pointer.as_mut().unwrap();
+                let lock = state.locked.as_mut().unwrap();
+                lock.cursor_hint = Some(Vec2f {
+                    x: surface_x,
+                    y: surface_y,
+                });
+            }
+            _ => todo!("{request:?}"),
         }
     }
 }

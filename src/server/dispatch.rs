@@ -912,15 +912,31 @@ impl<C: XConnection> Dispatch<LockedPointerServer, Entity> for ServerState<C> {
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        let client = state.world.get::<&LockedPointerClient>(*entity).unwrap();
-        simple_event_shunt! {
-            client, request: lp::Request => [
-                SetCursorPositionHint { surface_x, surface_y },
-                SetRegion {
-                    |region| region.as_ref().map(|r| r.data().unwrap())
-                },
-                Destroy
-            ]
+        match request {
+            lp::Request::SetCursorPositionHint {
+                surface_x,
+                surface_y,
+            } => {
+                let (client, scale) = state
+                    .world
+                    .query_one_mut::<(&LockedPointerClient, &SurfaceScaleFactor)>(*entity)
+                    .unwrap();
+
+                // Xwayland believes that the surface is actually <surface scale factor> times bigger
+                // than it currently is, and therefore that the cursor position is also scaled up by the same
+                // amount. So we need to divide the cursor position from Xwayland by the surface scale
+                // to get where the cursor should actually be positioned.
+
+                client.set_cursor_position_hint(surface_x / scale.0, surface_y / scale.0);
+            }
+            lp::Request::Destroy => {
+                {
+                    let client = state.world.get::<&LockedPointerClient>(*entity).unwrap();
+                    client.destroy();
+                }
+                state.world.despawn(*entity).unwrap();
+            }
+            _ => warn!("unhandled locked pointer request: {request:?}"),
         }
     }
 }
@@ -983,8 +999,8 @@ impl<C: XConnection>
             } => {
                 let surf_key: Entity = surface.data().copied().unwrap();
                 let ptr_key: Entity = pointer.data().copied().unwrap();
-
                 let entity = state.world.reserve_entity();
+
                 let client = {
                     let c_surface = state
                         .world
@@ -1004,8 +1020,16 @@ impl<C: XConnection>
                     )
                 };
                 let server = data_init.init(id, entity);
+                let surface_scale = state
+                    .world
+                    .get::<&SurfaceScaleFactor>(surf_key)
+                    .as_deref()
+                    .copied()
+                    .unwrap();
 
-                state.world.spawn_at(entity, (client, server));
+                state
+                    .world
+                    .spawn_at(entity, (client, server, surface_scale));
             }
             Request::Destroy => {
                 client.destroy();
