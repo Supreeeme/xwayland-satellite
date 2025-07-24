@@ -7,7 +7,7 @@ edition = "2021"
 workspace = true
 
 [dependencies]
-wayland-protocols = { workspace = true, features = ["server", "unstable"] }
+wayland-protocols = { workspace = true, features = ["server", "staging", "unstable"] }
 wayland-server.workspace = true
 wl_drm = { path = "../wl_drm" }
 rustix = { workspace = true, features = ["pipe"] }
