@@ -1,6 +1,6 @@
 use std::collections::{hash_map, HashMap, HashSet};
 use std::io::Read;
-use std::io::Write;
+use std::io::{PipeWriter, Write};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1026,7 +1026,7 @@ impl Dispatch<WlDataOffer, Vec<PasteData>> for State {
                     .position(|data| data.mime_type == mime_type)
                     .unwrap_or_else(|| panic!("Invalid mime type: {mime_type}"));
 
-                let mut stream = UnixStream::from(fd);
+                let mut stream = PipeWriter::from(fd);
                 stream.write_all(&data[pos].data).unwrap();
             }
             wl_data_offer::Request::Destroy => {}
