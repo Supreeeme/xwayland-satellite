@@ -54,7 +54,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
     info!("Starting xwayland-satellite version {version}");
 
     let socket = ListeningSocket::bind_auto("xwls", 1..=128).unwrap();
-    let mut display = Display::<RealServerState>::new().unwrap();
+    let mut display = Display::new().unwrap();
     let dh = display.handle();
     data.created_server();
 
@@ -203,7 +203,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
             xstate.handle_events(&mut server_state);
         }
 
-        display.dispatch_clients(&mut server_state).unwrap();
+        display.dispatch_clients(server_state.inner_mut()).unwrap();
         server_state.run();
         display.flush_clients().unwrap();
 

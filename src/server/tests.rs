@@ -1,4 +1,4 @@
-use super::{ServerState, WindowDims};
+use super::{InnerServerState, ServerState, WindowDims};
 use crate::xstate::{SetState, WinSize, WmName};
 use rustix::event::{poll, PollFd, PollFlags};
 use std::collections::HashMap;
@@ -184,6 +184,7 @@ impl Default for FakeXConnection {
     }
 }
 
+type FakeX11Selection = Vec<testwl::PasteData>;
 impl crate::X11Selection for Vec<testwl::PasteData> {
     fn mime_types(&self) -> Vec<&str> {
         self.iter().map(|data| data.mime_type.as_str()).collect()
@@ -204,7 +205,7 @@ impl crate::X11Selection for Vec<testwl::PasteData> {
 }
 
 impl super::XConnection for FakeXConnection {
-    type X11Selection = Vec<testwl::PasteData>;
+    type X11Selection = FakeX11Selection;
     fn root_window(&self) -> Window {
         self.root
     }
@@ -259,7 +260,7 @@ struct TestFixture {
     /// Our connection to satellite - i.e., where Xwayland sends requests to
     xwls_connection: Arc<Connection>,
     /// Satellite's display - must dispatch this for our server state to advance
-    xwls_display: Display<FakeServerState>,
+    xwls_display: Display<InnerServerState<FakeX11Selection>>,
     surface_serial: u64,
     registry: TestObject<WlRegistry>,
 }
@@ -379,7 +380,7 @@ impl TestFixture {
         if let Some(pre_connect) = options.pre_connect {
             pre_connect.call(&mut testwl);
         }
-        let display = Display::<FakeServerState>::new().unwrap();
+        let display = Display::new().unwrap();
         testwl.connect(server_s);
         // Handle initial globals roundtrip setup requirement
         let thread = std::thread::spawn(move || {
@@ -513,7 +514,7 @@ impl TestFixture {
 
         // Have satellite dispatch our requests
         self.xwls_display
-            .dispatch_clients(&mut self.satellite)
+            .dispatch_clients(self.satellite.inner_mut())
             .unwrap();
         self.xwls_display.flush_clients().unwrap();
 
@@ -1428,12 +1429,12 @@ fn raise_window_on_pointer_event() {
     f.testwl.move_pointer_to(id2, 0.0, 0.0);
     f.run();
     assert_eq!(f.connection().focused_window, Some(win2));
-    assert_eq!(f.satellite.last_hovered, Some(win2));
+    assert_eq!(f.satellite.inner.last_hovered, Some(win2));
 
     f.testwl.move_pointer_to(id1, 0.0, 0.0);
     f.run();
     assert_eq!(f.connection().focused_window, Some(win2));
-    assert_eq!(f.satellite.last_hovered, Some(win1));
+    assert_eq!(f.satellite.inner.last_hovered, Some(win1));
 }
 
 #[test]
@@ -1450,7 +1451,7 @@ fn override_redirect_choose_hover_window() {
 
     f.testwl.move_pointer_to(id1, 0.0, 0.0);
     f.run();
-    assert_eq!(f.satellite.last_hovered, Some(win1));
+    assert_eq!(f.satellite.inner.last_hovered, Some(win1));
 
     let win3 = unsafe { Window::new(3) };
     let (buffer, surface) = comp.create_surface();
