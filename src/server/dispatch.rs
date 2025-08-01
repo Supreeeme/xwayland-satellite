@@ -65,7 +65,7 @@ use wayland_server::{
 };
 
 // noop
-impl<C: XConnection> Dispatch<WlCallback, ()> for ServerState<C> {
+impl<S: X11Selection> Dispatch<WlCallback, ()> for InnerServerState<S> {
     fn request(
         _: &mut Self,
         _: &wayland_server::Client,
@@ -79,7 +79,7 @@ impl<C: XConnection> Dispatch<WlCallback, ()> for ServerState<C> {
     }
 }
 
-impl<C: XConnection> Dispatch<WlSurface, Entity> for ServerState<C> {
+impl<S: X11Selection> Dispatch<WlSurface, Entity> for InnerServerState<S> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
@@ -182,7 +182,7 @@ impl<C: XConnection> Dispatch<WlSurface, Entity> for ServerState<C> {
     }
 }
 
-impl<C: XConnection> Dispatch<WlRegion, client::wl_region::WlRegion> for ServerState<C> {
+impl<S: X11Selection> Dispatch<WlRegion, client::wl_region::WlRegion> for InnerServerState<S> {
     fn request(
         _: &mut Self,
         _: &wayland_server::Client,
@@ -202,9 +202,9 @@ impl<C: XConnection> Dispatch<WlRegion, client::wl_region::WlRegion> for ServerS
     }
 }
 
-impl<C: XConnection>
+impl<S: X11Selection>
     Dispatch<WlCompositor, ClientGlobalWrapper<client::wl_compositor::WlCompositor>>
-    for ServerState<C>
+    for InnerServerState<S>
 {
     fn request(
         state: &mut Self,
@@ -251,7 +251,7 @@ impl<C: XConnection>
     }
 }
 
-impl<C: XConnection> Dispatch<WlBuffer, Entity> for ServerState<C> {
+impl<S: X11Selection> Dispatch<WlBuffer, Entity> for InnerServerState<S> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
@@ -272,7 +272,7 @@ impl<C: XConnection> Dispatch<WlBuffer, Entity> for ServerState<C> {
     }
 }
 
-impl<C: XConnection> Dispatch<WlShmPool, client::wl_shm_pool::WlShmPool> for ServerState<C> {
+impl<S: X11Selection> Dispatch<WlShmPool, client::wl_shm_pool::WlShmPool> for InnerServerState<S> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
@@ -316,8 +316,8 @@ impl<C: XConnection> Dispatch<WlShmPool, client::wl_shm_pool::WlShmPool> for Ser
     }
 }
 
-impl<C: XConnection> Dispatch<WlShm, ClientGlobalWrapper<client::wl_shm::WlShm>>
-    for ServerState<C>
+impl<S: X11Selection> Dispatch<WlShm, ClientGlobalWrapper<client::wl_shm::WlShm>>
+    for InnerServerState<S>
 {
     fn request(
         state: &mut Self,
@@ -340,7 +340,7 @@ impl<C: XConnection> Dispatch<WlShm, ClientGlobalWrapper<client::wl_shm::WlShm>>
     }
 }
 
-impl<C: XConnection> Dispatch<WlPointer, Entity> for ServerState<C> {
+impl<S: X11Selection> Dispatch<WlPointer, Entity> for InnerServerState<S> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
@@ -383,7 +383,7 @@ impl<C: XConnection> Dispatch<WlPointer, Entity> for ServerState<C> {
     }
 }
 
-impl<C: XConnection> Dispatch<WlKeyboard, Entity> for ServerState<C> {
+impl<S: X11Selection> Dispatch<WlKeyboard, Entity> for InnerServerState<S> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
@@ -407,7 +407,7 @@ impl<C: XConnection> Dispatch<WlKeyboard, Entity> for ServerState<C> {
     }
 }
 
-impl<C: XConnection> Dispatch<WlTouch, Entity> for ServerState<C> {
+impl<S: X11Selection> Dispatch<WlTouch, Entity> for InnerServerState<S> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
@@ -431,7 +431,7 @@ impl<C: XConnection> Dispatch<WlTouch, Entity> for ServerState<C> {
     }
 }
 
-impl<C: XConnection> Dispatch<WlSeat, Entity> for ServerState<C> {
+impl<S: X11Selection> Dispatch<WlSeat, Entity> for InnerServerState<S> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
@@ -484,7 +484,7 @@ impl<C: XConnection> Dispatch<WlSeat, Entity> for ServerState<C> {
 
 macro_rules! only_destroy_request_impl {
     ($server:ty, $client:ty) => {
-        impl<C: XConnection> Dispatch<$server, Entity> for ServerState<C> {
+        impl<S: X11Selection> Dispatch<$server, Entity> for InnerServerState<S> {
             fn request(
                 state: &mut Self,
                 _: &Client,
@@ -512,9 +512,9 @@ macro_rules! only_destroy_request_impl {
 
 only_destroy_request_impl!(RelativePointerServer, RelativePointerClient);
 
-impl<C: XConnection>
+impl<S: X11Selection>
     Dispatch<RelativePointerManServer, ClientGlobalWrapper<RelativePointerManClient>>
-    for ServerState<C>
+    for InnerServerState<S>
 {
     fn request(
         state: &mut Self,
@@ -545,7 +545,7 @@ impl<C: XConnection>
     }
 }
 
-impl<C: XConnection> Dispatch<WlOutput, Entity> for ServerState<C> {
+impl<S: X11Selection> Dispatch<WlOutput, Entity> for InnerServerState<S> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
@@ -569,9 +569,9 @@ impl<C: XConnection> Dispatch<WlOutput, Entity> for ServerState<C> {
     }
 }
 
-impl<C: XConnection>
+impl<S: X11Selection>
     Dispatch<s_dmabuf::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1, Entity>
-    for ServerState<C>
+    for InnerServerState<S>
 {
     fn request(
         state: &mut Self,
@@ -599,11 +599,11 @@ impl<C: XConnection>
     }
 }
 
-impl<C: XConnection>
+impl<S: X11Selection>
     Dispatch<
         s_dmabuf::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
         c_dmabuf::zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
-    > for ServerState<C>
+    > for InnerServerState<S>
 {
     fn request(
         state: &mut Self,
@@ -662,11 +662,11 @@ impl<C: XConnection>
     }
 }
 
-impl<C: XConnection>
+impl<S: X11Selection>
     Dispatch<
         s_dmabuf::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
         ClientGlobalWrapper<c_dmabuf::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1>,
-    > for ServerState<C>
+    > for InnerServerState<S>
 {
     fn request(
         state: &mut Self,
@@ -711,7 +711,7 @@ impl<C: XConnection>
     }
 }
 
-impl<C: XConnection> Dispatch<WlDrmServer, Entity> for ServerState<C> {
+impl<S: X11Selection> Dispatch<WlDrmServer, Entity> for InnerServerState<S> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
@@ -827,7 +827,7 @@ impl<C: XConnection> Dispatch<WlDrmServer, Entity> for ServerState<C> {
     }
 }
 
-impl<C: XConnection> Dispatch<XdgOutputServer, Entity> for ServerState<C> {
+impl<S: X11Selection> Dispatch<XdgOutputServer, Entity> for InnerServerState<S> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
@@ -849,8 +849,8 @@ impl<C: XConnection> Dispatch<XdgOutputServer, Entity> for ServerState<C> {
     }
 }
 
-impl<C: XConnection> Dispatch<OutputManServer, ClientGlobalWrapper<OutputManClient>>
-    for ServerState<C>
+impl<S: X11Selection> Dispatch<OutputManServer, ClientGlobalWrapper<OutputManClient>>
+    for InnerServerState<S>
 {
     fn request(
         state: &mut Self,
@@ -880,7 +880,7 @@ impl<C: XConnection> Dispatch<OutputManServer, ClientGlobalWrapper<OutputManClie
     }
 }
 
-impl<C: XConnection> Dispatch<ConfinedPointerServer, Entity> for ServerState<C> {
+impl<S: X11Selection> Dispatch<ConfinedPointerServer, Entity> for InnerServerState<S> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
@@ -902,7 +902,7 @@ impl<C: XConnection> Dispatch<ConfinedPointerServer, Entity> for ServerState<C> 
     }
 }
 
-impl<C: XConnection> Dispatch<LockedPointerServer, Entity> for ServerState<C> {
+impl<S: X11Selection> Dispatch<LockedPointerServer, Entity> for InnerServerState<S> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,
@@ -941,9 +941,9 @@ impl<C: XConnection> Dispatch<LockedPointerServer, Entity> for ServerState<C> {
     }
 }
 
-impl<C: XConnection>
+impl<S: X11Selection>
     Dispatch<PointerConstraintsServer, ClientGlobalWrapper<PointerConstraintsClient>>
-    for ServerState<C>
+    for InnerServerState<S>
 {
     fn request(
         state: &mut Self,
@@ -1039,11 +1039,11 @@ impl<C: XConnection>
     }
 }
 
-impl<C: XConnection>
+impl<S: X11Selection>
     Dispatch<
         s_tablet::zwp_tablet_manager_v2::ZwpTabletManagerV2,
         ClientGlobalWrapper<c_tablet::zwp_tablet_manager_v2::ZwpTabletManagerV2>,
-    > for ServerState<C>
+    > for InnerServerState<S>
 {
     fn request(
         state: &mut Self,
@@ -1091,8 +1091,8 @@ only_destroy_request_impl!(
     c_tablet::zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2
 );
 
-impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_v2::ZwpTabletPadV2, Entity>
-    for ServerState<C>
+impl<S: X11Selection> Dispatch<s_tablet::zwp_tablet_pad_v2::ZwpTabletPadV2, Entity>
+    for InnerServerState<S>
 {
     fn request(
         state: &mut Self,
@@ -1125,8 +1125,8 @@ impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_v2::ZwpTabletPadV2, Entit
     }
 }
 
-impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2, Entity>
-    for ServerState<C>
+impl<S: X11Selection> Dispatch<s_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2, Entity>
+    for InnerServerState<S>
 {
     fn request(
         state: &mut Self,
@@ -1167,8 +1167,8 @@ impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2, Ent
     }
 }
 
-impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2, Entity>
-    for ServerState<C>
+impl<S: X11Selection> Dispatch<s_tablet::zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2, Entity>
+    for InnerServerState<S>
 {
     fn request(
         state: &mut Self,
@@ -1200,8 +1200,8 @@ impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_ring_v2::ZwpTabletPadRing
     }
 }
 
-impl<C: XConnection> Dispatch<s_tablet::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2, Entity>
-    for ServerState<C>
+impl<S: X11Selection> Dispatch<s_tablet::zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2, Entity>
+    for InnerServerState<S>
 {
     fn request(
         state: &mut Self,
@@ -1251,9 +1251,9 @@ impl<T: Proxy> Default for ClientGlobalWrapper<T> {
 
 macro_rules! global_dispatch_no_events {
     ($server:ty, $client:ty) => {
-        impl<C: XConnection> GlobalDispatch<$server, Global> for ServerState<C>
+        impl<S: X11Selection> GlobalDispatch<$server, Global> for InnerServerState<S>
         where
-            ServerState<C>: Dispatch<$server, ClientGlobalWrapper<$client>>,
+            InnerServerState<S>: Dispatch<$server, ClientGlobalWrapper<$client>>,
             MyWorld: wayland_client::Dispatch<$client, ()>,
         {
             fn bind(
@@ -1282,11 +1282,11 @@ macro_rules! global_dispatch_no_events {
 
 macro_rules! global_dispatch_with_events {
     ($server:ty, $client:ty) => {
-        impl<C: XConnection> GlobalDispatch<$server, Global> for ServerState<C>
+        impl<S: X11Selection> GlobalDispatch<$server, Global> for InnerServerState<S>
         where
             $server: Resource,
             $client: Proxy,
-            ServerState<C>: Dispatch<$server, Entity>,
+            InnerServerState<S>: Dispatch<$server, Entity>,
             MyWorld: wayland_client::Dispatch<$client, Entity>,
         {
             fn bind(
@@ -1325,7 +1325,7 @@ global_dispatch_no_events!(
     c_tablet::zwp_tablet_manager_v2::ZwpTabletManagerV2
 );
 
-impl<C: XConnection> GlobalDispatch<WlSeat, Global> for ServerState<C> {
+impl<S: X11Selection> GlobalDispatch<WlSeat, Global> for InnerServerState<S> {
     fn bind(
         state: &mut Self,
         _: &DisplayHandle,
@@ -1348,7 +1348,7 @@ impl<C: XConnection> GlobalDispatch<WlSeat, Global> for ServerState<C> {
     }
 }
 
-impl<C: XConnection> GlobalDispatch<WlOutput, Global> for ServerState<C> {
+impl<S: X11Selection> GlobalDispatch<WlOutput, Global> for InnerServerState<S> {
     fn bind(
         state: &mut Self,
         _: &DisplayHandle,
@@ -1383,7 +1383,7 @@ impl<C: XConnection> GlobalDispatch<WlOutput, Global> for ServerState<C> {
 }
 global_dispatch_with_events!(WlDrmServer, WlDrmClient);
 
-impl<C: XConnection> GlobalDispatch<XwaylandShellV1, ()> for ServerState<C> {
+impl<S: X11Selection> GlobalDispatch<XwaylandShellV1, ()> for InnerServerState<S> {
     fn bind(
         _: &mut Self,
         _: &DisplayHandle,
@@ -1396,7 +1396,7 @@ impl<C: XConnection> GlobalDispatch<XwaylandShellV1, ()> for ServerState<C> {
     }
 }
 
-impl<C: XConnection> Dispatch<XwaylandShellV1, ()> for ServerState<C> {
+impl<S: X11Selection> Dispatch<XwaylandShellV1, ()> for InnerServerState<S> {
     fn request(
         state: &mut Self,
         client: &wayland_server::Client,
@@ -1432,7 +1432,7 @@ impl<C: XConnection> Dispatch<XwaylandShellV1, ()> for ServerState<C> {
     }
 }
 
-impl<C: XConnection> Dispatch<XwaylandSurfaceV1, Entity> for ServerState<C> {
+impl<S: X11Selection> Dispatch<XwaylandSurfaceV1, Entity> for InnerServerState<S> {
     fn request(
         state: &mut Self,
         _: &wayland_server::Client,

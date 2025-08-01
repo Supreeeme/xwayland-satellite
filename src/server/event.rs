@@ -88,7 +88,7 @@ impl Event for SurfaceEvents {
             SurfaceEvents::Popup(event) => Self::popup_event(event, target, state),
             SurfaceEvents::FractionalScale(event) => match event {
                 wp_fractional_scale_v1::Event::PreferredScale { scale } => {
-                    let entity = state.world.entity(target).unwrap();
+                    let entity = state.inner.world.entity(target).unwrap();
                     let factor = scale as f64 / 120.0;
                     debug!(
                         "{} scale factor: {}",
@@ -100,14 +100,14 @@ impl Event for SurfaceEvents {
 
                     if let Some(OnOutput(output)) = entity.get::<&OnOutput>().as_deref().copied() {
                         if update_output_scale(
-                            state.world.query_one(output).unwrap(),
+                            state.inner.world.query_one(output).unwrap(),
                             OutputScaleFactor::Fractional(factor),
                         ) {
-                            state.updated_outputs.push(output);
+                            state.inner.updated_outputs.push(output);
                         }
                     }
                     if entity.has::<WindowData>() {
-                        update_surface_viewport(state.world.query_one(target).unwrap());
+                        update_surface_viewport(state.inner.world.query_one(target).unwrap());
                     }
                 }
                 _ => unreachable!(),
@@ -123,6 +123,8 @@ impl SurfaceEvents {
         state: &mut ServerState<impl XConnection>,
     ) {
         use client::wl_surface::Event;
+        let connection = &mut state.connection;
+        let state = &mut state.inner;
 
         let data = state.world.entity(target).unwrap();
         let surface = data.get::<&WlSurface>().unwrap();
@@ -151,11 +153,11 @@ impl SurfaceEvents {
                             x: dimensions.x - state.global_output_offset.x.value,
                             y: dimensions.y - state.global_output_offset.y.value,
                         },
-                        &mut state.connection,
+                        connection,
                     );
                     if state.last_focused_toplevel == Some(*window) {
                         let output = get_output_name(Some(&on_output), &state.world);
-                        let conn = state.connection.as_mut().unwrap();
+                        let conn = connection.as_mut().unwrap();
                         debug!("focused window changed outputs - resetting primary output");
                         conn.focus_window(*window, output);
                     }
@@ -204,6 +206,7 @@ impl SurfaceEvents {
         state: &mut ServerState<C>,
     ) {
         let connection = state.connection.as_mut().unwrap();
+        let state = &mut state.inner;
         let xdg_surface::Event::Configure { serial } = event else {
             unreachable!();
         };
@@ -287,7 +290,7 @@ impl SurfaceEvents {
         target: Entity,
         state: &mut ServerState<C>,
     ) {
-        let data = state.world.entity(target).unwrap();
+        let data = state.inner.world.entity(target).unwrap();
         match event {
             xdg_toplevel::Event::Configure {
                 width,
@@ -334,7 +337,7 @@ impl SurfaceEvents {
         target: Entity,
         state: &mut ServerState<C>,
     ) {
-        let data = state.world.entity(target).unwrap();
+        let data = state.inner.world.entity(target).unwrap();
         match event {
             xdg_popup::Event::Configure {
                 x,
@@ -416,13 +419,18 @@ pub(super) fn update_surface_viewport(
 impl Event for client::wl_buffer::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
         // The only event from a buffer would be the release.
-        state.world.get::<&WlBuffer>(target).unwrap().release();
+        state
+            .inner
+            .world
+            .get::<&WlBuffer>(target)
+            .unwrap()
+            .release();
     }
 }
 
 impl Event for client::wl_seat::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let server = state.world.get::<&WlSeat>(target).unwrap();
+        let server = state.inner.world.get::<&WlSeat>(target).unwrap();
         simple_event_shunt! {
             server, self => [
                 Capabilities { |capabilities| convert_wenum(capabilities) },
@@ -453,10 +461,11 @@ impl Event for client::wl_pointer::Event {
                 surface_y,
             } => {
                 let mut cmd = CommandBuffer::new();
-                let pending_enter = state.world.remove_one::<PendingEnter>(target).ok();
-                let server = state.world.get::<&WlPointer>(target).unwrap();
+                let pending_enter = state.inner.world.remove_one::<PendingEnter>(target).ok();
+                let server = state.inner.world.get::<&WlPointer>(target).unwrap();
                 let mut query = surface.data().copied().and_then(|e| {
                     state
+                        .inner
                         .world
                         .query_one::<(&WlSurface, &SurfaceRole, &SurfaceScaleFactor, &x::Window)>(e)
                         .ok()
@@ -475,7 +484,7 @@ impl Event for client::wl_pointer::Event {
                     server.enter(serial, surface, surface_x * scale.0, surface_y * scale.0);
                     state.connection.as_mut().unwrap().raise_to_top(*window);
                     if !surface_is_popup {
-                        state.last_hovered = Some(*window);
+                        state.inner.last_hovered = Some(*window);
                     }
                 };
 
@@ -504,21 +513,22 @@ impl Event for client::wl_pointer::Event {
                 }
                 drop(query);
                 drop(server);
-                cmd.run_on(&mut state.world);
+                cmd.run_on(&mut state.inner.world);
             }
             client::wl_pointer::Event::Leave { serial, surface } => {
-                let _ = state.world.remove_one::<PendingEnter>(target);
+                let _ = state.inner.world.remove_one::<PendingEnter>(target);
                 if !surface.is_alive() {
                     return;
                 }
                 debug!("leaving surface ({serial})");
-                let _ = state.world.remove_one::<PendingEnter>(target);
+                let _ = state.inner.world.remove_one::<PendingEnter>(target);
                 if let Some(surface) = surface
                     .data()
                     .copied()
-                    .and_then(|key| state.world.get::<&WlSurface>(key).ok())
+                    .and_then(|key| state.inner.world.get::<&WlSurface>(key).ok())
                 {
                     state
+                        .inner
                         .world
                         .get::<&WlPointer>(target)
                         .unwrap()
@@ -532,7 +542,7 @@ impl Event for client::wl_pointer::Event {
                 surface_x,
                 surface_y,
             } => {
-                let pending_enter = state.world.get::<&PendingEnter>(target).ok();
+                let pending_enter = state.inner.world.get::<&PendingEnter>(target).ok();
                 match pending_enter.as_deref() {
                     Some(p) => {
                         let PendingEnter(client::wl_pointer::Event::Enter {
@@ -547,7 +557,7 @@ impl Event for client::wl_pointer::Event {
                         if surface
                             .data()
                             .copied()
-                            .is_some_and(|key| state.world.contains(key))
+                            .is_some_and(|key| state.inner.world.contains(key))
                         {
                             trace!("resending enter ({serial}) before motion");
                             let enter_event = client::wl_pointer::Event::Enter {
@@ -567,6 +577,7 @@ impl Event for client::wl_pointer::Event {
                     None => {
                         drop(pending_enter);
                         let (server, scale) = state
+                            .inner
                             .world
                             .query_one_mut::<(&WlPointer, &SurfaceScaleFactor)>(target)
                             .unwrap();
@@ -581,7 +592,7 @@ impl Event for client::wl_pointer::Event {
                 }
             }
             _ => {
-                let server = state.world.get::<&WlPointer>(target).unwrap();
+                let server = state.inner.world.get::<&WlPointer>(target).unwrap();
                 simple_event_shunt! {
                     server, self => [
                         Frame,
@@ -624,6 +635,7 @@ impl Event for client::wl_pointer::Event {
 
 impl Event for client::wl_keyboard::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
+        let state = state.inner_mut();
         let data = state.world.entity(target).unwrap();
         let keyboard = data.get::<&WlKeyboard>().unwrap();
         match self {
@@ -714,6 +726,7 @@ impl Event for client::wl_keyboard::Event {
 
 impl Event for client::wl_touch::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
+        let state = state.inner_mut();
         match self {
             Self::Down {
                 serial,
@@ -855,6 +868,8 @@ fn update_output_offset(
     y: i32,
     state: &mut ServerState<impl XConnection>,
 ) {
+    let connection = &mut state.connection;
+    let state = &mut state.inner;
     {
         let mut dimensions = state.world.get::<&mut OutputDimensions>(output).unwrap();
         if matches!(source, OutputDimensionsSource::Wl { .. })
@@ -893,7 +908,7 @@ fn update_output_offset(
         output,
         &state.global_output_offset,
         &state.world,
-        &mut state.connection,
+        connection,
     );
 }
 
@@ -1027,6 +1042,7 @@ impl OutputEvent {
                     y,
                     state,
                 );
+                let state = state.inner_mut();
 
                 let (output, dimensions, xdg) = state
                     .world
@@ -1068,6 +1084,7 @@ impl OutputEvent {
                 height,
                 refresh,
             } => {
+                let state = state.inner_mut();
                 let (output, dimensions) = state
                     .world
                     .query_one_mut::<(&WlOutput, &mut OutputDimensions)>(target)
@@ -1084,6 +1101,7 @@ impl OutputEvent {
                 output.mode(convert_wenum(flags), width, height, refresh);
             }
             Event::Scale { factor } => {
+                let state = state.inner_mut();
                 debug!(
                     "{} scale: {factor}",
                     state.world.get::<&WlOutput>(target).unwrap().id()
@@ -1099,6 +1117,7 @@ impl OutputEvent {
                 }
             }
             Event::Name { name } => {
+                let state = state.inner_mut();
                 state
                     .world
                     .get::<&WlOutput>(target)
@@ -1107,7 +1126,7 @@ impl OutputEvent {
                 state.world.insert(target, (OutputName(name),)).unwrap();
             }
             _ => simple_event_shunt! {
-                state.world.get::<&WlOutput>(target).unwrap(),
+                state.inner.world.get::<&WlOutput>(target).unwrap(),
                 event: client::wl_output::Event => [
                     Description { description },
                     Done
@@ -1126,6 +1145,7 @@ impl OutputEvent {
         match event {
             Event::LogicalPosition { x, y } => {
                 update_output_offset(target, OutputDimensionsSource::Xdg, x, y, state);
+                let state = state.inner_mut();
                 state
                     .world
                     .get::<&XdgOutputServer>(target)
@@ -1136,6 +1156,7 @@ impl OutputEvent {
                     );
             }
             Event::LogicalSize { .. } => {
+                let state = state.inner_mut();
                 let (xdg, dimensions) = state
                     .world
                     .query_one_mut::<(&XdgOutputServer, &OutputDimensions)>(target)
@@ -1147,7 +1168,7 @@ impl OutputEvent {
                 }
             }
             _ => simple_event_shunt! {
-                state.world.get::<&XdgOutputServer>(target).unwrap(),
+                state.inner.world.get::<&XdgOutputServer>(target).unwrap(),
                 event: zxdg_output_v1::Event => [
                     Done,
                     Name { name },
@@ -1160,7 +1181,7 @@ impl OutputEvent {
 
 impl Event for wl_drm::client::wl_drm::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let server = state.world.get::<&WlDrmServer>(target).unwrap();
+        let server = state.inner.world.get::<&WlDrmServer>(target).unwrap();
         simple_event_shunt! {
             server, self => [
                 Device { name },
@@ -1175,6 +1196,7 @@ impl Event for wl_drm::client::wl_drm::Event {
 impl Event for c_dmabuf::zwp_linux_dmabuf_feedback_v1::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
         let server = state
+            .inner
             .world
             .get::<&s_dmabuf::zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1>(target)
             .unwrap();
@@ -1194,7 +1216,11 @@ impl Event for c_dmabuf::zwp_linux_dmabuf_feedback_v1::Event {
 
 impl Event for zwp_relative_pointer_v1::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let server = state.world.get::<&RelativePointerServer>(target).unwrap();
+        let server = state
+            .inner
+            .world
+            .get::<&RelativePointerServer>(target)
+            .unwrap();
         simple_event_shunt! {
             server, self => [
                 RelativeMotion {
@@ -1212,7 +1238,11 @@ impl Event for zwp_relative_pointer_v1::Event {
 
 impl Event for zwp_locked_pointer_v1::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let server = state.world.get::<&LockedPointerServer>(target).unwrap();
+        let server = state
+            .inner
+            .world
+            .get::<&LockedPointerServer>(target)
+            .unwrap();
         simple_event_shunt! {
             server, self => [
                 Locked,
@@ -1224,7 +1254,11 @@ impl Event for zwp_locked_pointer_v1::Event {
 
 impl Event for zwp_confined_pointer_v1::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let server = state.world.get::<&ConfinedPointerServer>(target).unwrap();
+        let server = state
+            .inner
+            .world
+            .get::<&ConfinedPointerServer>(target)
+            .unwrap();
         simple_event_shunt! {
             server, self => [
                 Confined,
@@ -1236,6 +1270,7 @@ impl Event for zwp_confined_pointer_v1::Event {
 
 impl Event for zwp_tablet_seat_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
+        let state = state.inner_mut();
         let seat = state.world.get::<&TabletSeatServer>(target).unwrap();
         match self {
             Self::TabletAdded { id } => {
@@ -1263,7 +1298,7 @@ impl Event for zwp_tablet_seat_v2::Event {
 
 impl Event for zwp_tablet_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let tab = state.world.get::<&TabletServer>(target).unwrap();
+        let tab = state.inner.world.get::<&TabletServer>(target).unwrap();
         simple_event_shunt! {
             tab, self => [
                 Name { name },
@@ -1278,6 +1313,7 @@ impl Event for zwp_tablet_v2::Event {
 
 impl Event for zwp_tablet_pad_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
+        let state = state.inner_mut();
         let pad = state.world.get::<&TabletPadServer>(target).unwrap();
         let s_surf;
         match self {
@@ -1331,6 +1367,7 @@ impl Event for zwp_tablet_pad_v2::Event {
 
 impl Event for zwp_tablet_tool_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
+        let state = state.inner_mut();
         match self {
             Self::ProximityIn {
                 serial,
@@ -1407,20 +1444,24 @@ impl Event for zwp_tablet_tool_v2::Event {
 }
 
 #[must_use]
-fn from_client<Server: Resource + 'static, Client: Proxy + Send + Sync + 'static, C: XConnection>(
+fn from_client<
+    Server: Resource + 'static,
+    Client: Proxy + Send + Sync + 'static,
+    S: X11Selection + 'static,
+>(
     client: &Client,
-    state: &ServerState<C>,
+    state: &InnerServerState<S>,
 ) -> (Entity, Server)
 where
     Client::Event: Send + Into<ObjectEvent>,
-    ServerState<C>: wayland_server::Dispatch<Server, Entity>,
+    InnerServerState<S>: wayland_server::Dispatch<Server, Entity>,
 {
     let entity = state.world.reserve_entity();
     let server = state
         .client
         .as_ref()
         .unwrap()
-        .create_resource::<_, _, ServerState<C>>(&state.dh, 1, entity)
+        .create_resource::<_, _, InnerServerState<S>>(&state.dh, 1, entity)
         .unwrap();
     let obj_key: &LateInitObjectKey<Client> = client.data().unwrap();
     obj_key.init(entity);
@@ -1429,6 +1470,7 @@ where
 
 impl Event for zwp_tablet_pad_group_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
+        let state = state.inner_mut();
         let group = state.world.get::<&TabletPadGroupServer>(target).unwrap();
         match self {
             Self::Buttons { buttons } => group.buttons(buttons),
@@ -1457,6 +1499,7 @@ impl Event for zwp_tablet_pad_group_v2::Event {
 
 impl Event for zwp_tablet_pad_ring_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
+        let state = state.inner_mut();
         let ring = state.world.get::<&TabletPadRingServer>(target).unwrap();
         simple_event_shunt! {
             ring, self => [
@@ -1471,6 +1514,7 @@ impl Event for zwp_tablet_pad_ring_v2::Event {
 
 impl Event for zwp_tablet_pad_strip_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
+        let state = state.inner_mut();
         let strip = state.world.get::<&TabletPadStripServer>(target).unwrap();
         simple_event_shunt! {
             strip, self => [
