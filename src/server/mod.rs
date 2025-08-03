@@ -138,7 +138,7 @@ impl WindowData {
         &mut self,
         window: x::Window,
         offset: WindowOutputOffset,
-        connection: &mut Option<C>,
+        connection: &mut C,
     ) {
         log::trace!("offset: {offset:?}");
         if offset == self.output_offset {
@@ -150,19 +150,17 @@ impl WindowData {
         dims.y += (offset.y - self.output_offset.y) as i16;
         self.output_offset = offset;
 
-        if let Some(connection) = connection.as_mut() {
-            connection.set_window_dims(
-                window,
-                PendingSurfaceState {
-                    x: dims.x as i32,
-                    y: dims.y as i32,
-                    width: self.attrs.dims.width as _,
-                    height: self.attrs.dims.height as _,
-                },
-            );
+        if connection.set_window_dims(
+            window,
+            PendingSurfaceState {
+                x: dims.x as i32,
+                y: dims.y as i32,
+                width: self.attrs.dims.width as _,
+                height: self.attrs.dims.height as _,
+            },
+        ) {
+            debug!("set {:?} offset to {:?}", window, self.output_offset);
         }
-
-        debug!("set {:?} offset to {:?}", window, self.output_offset);
     }
 }
 
@@ -415,14 +413,15 @@ impl<S: X11Selection> XConnection for EarlyConnection<S> {
     fn set_fullscreen(&mut self, _: x::Window, _: bool) {
         debug!("could not toggle fullscreen without XWayland initialized");
     }
-    fn set_window_dims(&mut self, _: x::Window, _: crate::server::PendingSurfaceState) {
+    fn set_window_dims(&mut self, _: x::Window, _: crate::server::PendingSurfaceState) -> bool {
         debug!("could not set window dimensions without XWayland initialized");
+        false
     }
 }
 
 pub struct ServerState<C: XConnection> {
     inner: InnerServerState<C::X11Selection>,
-    pub connection: Option<C>,
+    pub connection: C,
 }
 
 pub struct InnerServerState<S: X11Selection> {
@@ -433,7 +432,7 @@ pub struct InnerServerState<S: X11Selection> {
     world: MyWorld,
     queue: EventQueue<MyWorld>,
     qh: QueueHandle<MyWorld>,
-    client: Option<Client>,
+    client: Client,
     to_focus: Option<FocusData>,
     unfocus: bool,
     last_focused_toplevel: Option<x::Window>,
@@ -453,7 +452,11 @@ pub struct InnerServerState<S: X11Selection> {
 }
 
 impl<S: X11Selection> ServerState<EarlyConnection<S>> {
-    pub fn new(dh: DisplayHandle, server_connection: Option<UnixStream>) -> Self {
+    pub fn new(
+        mut dh: DisplayHandle,
+        server_connection: Option<UnixStream>,
+        client: UnixStream,
+    ) -> Self {
         let connection = if let Some(stream) = server_connection {
             Connection::from_socket(stream).unwrap()
         } else {
@@ -508,10 +511,12 @@ impl<S: X11Selection> ServerState<EarlyConnection<S>> {
             .contents()
             .with_list(|globals| handle_globals::<S>(&dh, globals));
 
+        let client = dh.insert_client(client, std::sync::Arc::new(())).unwrap();
+
         let inner = InnerServerState {
             windows: HashMap::new(),
             pids: HashSet::new(),
-            client: None,
+            client,
             queue,
             qh,
             dh,
@@ -543,9 +548,9 @@ impl<S: X11Selection> ServerState<EarlyConnection<S>> {
         };
         Self {
             inner,
-            connection: Some(EarlyConnection {
+            connection: EarlyConnection {
                 _p: std::marker::PhantomData,
-            }),
+            },
         }
     }
 
@@ -555,7 +560,7 @@ impl<S: X11Selection> ServerState<EarlyConnection<S>> {
     {
         ServerState {
             inner: self.inner,
-            connection: Some(connection),
+            connection,
         }
     }
 }
@@ -569,16 +574,8 @@ impl<C: XConnection> ServerState<C> {
         self.inner.clientside_fd()
     }
 
-    pub fn connect(&mut self, connection: UnixStream) {
-        self.inner.connect(connection)
-    }
-
     fn handle_new_globals(&mut self) {
         self.inner.handle_new_globals()
-    }
-
-    pub fn set_x_connection(&mut self, connection: C) {
-        self.connection = Some(connection);
     }
 
     pub fn new_window(
@@ -761,13 +758,11 @@ impl<C: XConnection> ServerState<C> {
                 output_name,
             }) = self.inner.to_focus.take()
             {
-                let conn = self.connection.as_mut().unwrap();
                 debug!("focusing window {window:?}");
-                conn.focus_window(window, output_name);
+                self.connection.focus_window(window, output_name);
                 self.inner.last_focused_toplevel = Some(window);
             } else if self.inner.unfocus {
-                let conn = self.connection.as_mut().unwrap();
-                conn.focus_window(x::WINDOW_NONE, None);
+                self.connection.focus_window(x::WINDOW_NONE, None);
             }
             self.inner.unfocus = false;
         }
@@ -806,7 +801,7 @@ impl<C: XConnection> ServerState<C> {
 
     fn close_x_window(&mut self, window: x::Window) {
         debug!("sending close request to {window:?}");
-        self.connection.as_mut().unwrap().close_window(window);
+        self.connection.close_window(window);
         if self.inner.last_focused_toplevel == Some(window) {
             self.inner.last_focused_toplevel.take();
         }
@@ -819,14 +814,6 @@ impl<C: XConnection> ServerState<C> {
 impl<S: X11Selection + 'static> InnerServerState<S> {
     fn clientside_fd(&self) -> BorrowedFd<'_> {
         self.queue.as_fd()
-    }
-
-    fn connect(&mut self, connection: UnixStream) {
-        self.client = Some(
-            self.dh
-                .insert_client(connection, std::sync::Arc::new(()))
-                .unwrap(),
-        );
     }
 
     fn handle_new_globals(&mut self) {

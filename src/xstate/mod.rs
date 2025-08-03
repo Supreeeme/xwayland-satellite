@@ -44,17 +44,22 @@ impl From<xcb::ProtocolError> for MaybeBadWindow {
 
 type XResult<T> = Result<T, MaybeBadWindow>;
 macro_rules! unwrap_or_skip_bad_window {
-    ($err:expr) => {
+    ($err:expr, $skip:expr) => {
         match $err {
             Ok(v) => v,
             Err(e) => {
                 let err = MaybeBadWindow::from(e);
                 match err {
-                    MaybeBadWindow::BadWindow => return,
+                    MaybeBadWindow::BadWindow => $skip,
                     MaybeBadWindow::Other(other) => panic!("X11 protocol error: {other:?}"),
                 }
             }
         }
+    };
+}
+macro_rules! unwrap_or_skip_bad_window_ret {
+    ($err:expr) => {
+        unwrap_or_skip_bad_window!($err, return)
     };
 }
 
@@ -310,16 +315,7 @@ impl XState {
     pub fn handle_events(&mut self, server_state: &mut super::RealServerState) {
         macro_rules! unwrap_or_skip_bad_window_cont {
             ($err:expr) => {
-                match $err {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let err = MaybeBadWindow::from(e);
-                        match err {
-                            MaybeBadWindow::BadWindow => continue,
-                            MaybeBadWindow::Other(other) => panic!("X11 protocol error: {other:?}"),
-                        }
-                    }
-                }
+                unwrap_or_skip_bad_window!($err, continue)
             };
         }
 
@@ -412,8 +408,6 @@ impl XState {
                         // The connection on the server state stores state.
                         server_state
                             .connection
-                            .as_mut()
-                            .unwrap()
                             .focus_window(x::Window::none(), None);
                     }
 
@@ -506,11 +500,7 @@ impl XState {
                 xcb::Event::RandR(xcb::randr::Event::Notify(e))
                     if matches!(e.u(), xcb::randr::NotifyData::Rc(_)) =>
                 {
-                    server_state
-                        .connection
-                        .as_mut()
-                        .unwrap()
-                        .update_outputs(self.root);
+                    server_state.connection.update_outputs(self.root);
                 }
                 other => {
                     warn!("unhandled event: {other:?}");
@@ -850,31 +840,34 @@ impl XState {
         match event.atom() {
             x if x == x::ATOM_WM_HINTS => {
                 let hints =
-                    unwrap_or_skip_bad_window!(self.get_wm_hints(window).resolve()).unwrap();
+                    unwrap_or_skip_bad_window_ret!(self.get_wm_hints(window).resolve()).unwrap();
                 server_state.set_win_hints(window, hints);
             }
             x if x == x::ATOM_WM_NORMAL_HINTS => {
                 let hints =
-                    unwrap_or_skip_bad_window!(self.get_wm_size_hints(window).resolve()).unwrap();
+                    unwrap_or_skip_bad_window_ret!(self.get_wm_size_hints(window).resolve())
+                        .unwrap();
                 server_state.set_size_hints(window, hints);
             }
             x if x == x::ATOM_WM_NAME => {
-                let name = unwrap_or_skip_bad_window!(self.get_wm_name(window).resolve()).unwrap();
+                let name =
+                    unwrap_or_skip_bad_window_ret!(self.get_wm_name(window).resolve()).unwrap();
                 server_state.set_win_title(window, name);
             }
             x if x == self.atoms.net_wm_name => {
                 let name =
-                    unwrap_or_skip_bad_window!(self.get_net_wm_name(window).resolve()).unwrap();
+                    unwrap_or_skip_bad_window_ret!(self.get_net_wm_name(window).resolve()).unwrap();
                 server_state.set_win_title(window, name);
             }
             x if x == x::ATOM_WM_CLASS => {
                 let class =
-                    unwrap_or_skip_bad_window!(self.get_wm_class(window).resolve()).unwrap();
+                    unwrap_or_skip_bad_window_ret!(self.get_wm_class(window).resolve()).unwrap();
                 server_state.set_win_class(window, class);
             }
             x if x == self.atoms.motif_wm_hints => {
                 let motif_hints =
-                    unwrap_or_skip_bad_window!(self.get_motif_wm_hints(window).resolve()).unwrap();
+                    unwrap_or_skip_bad_window_ret!(self.get_motif_wm_hints(window).resolve())
+                        .unwrap();
                 if let Some(decorations) = motif_hints.decorations {
                     server_state.set_win_decorations(window, decorations);
                 }
@@ -1197,17 +1190,25 @@ impl RealConnection {
 
 impl XConnection for RealConnection {
     type X11Selection = Selection;
-    fn set_window_dims(&mut self, window: x::Window, dims: crate::server::PendingSurfaceState) {
+    fn set_window_dims(
+        &mut self,
+        window: x::Window,
+        dims: crate::server::PendingSurfaceState,
+    ) -> bool {
         trace!("set window dimensions {window:?} {dims:?}");
-        unwrap_or_skip_bad_window!(self.connection.send_and_check_request(&x::ConfigureWindow {
-            window,
-            value_list: &[
-                x::ConfigWindow::X(dims.x),
-                x::ConfigWindow::Y(dims.y),
-                x::ConfigWindow::Width(dims.width as _),
-                x::ConfigWindow::Height(dims.height as _),
-            ]
-        }));
+        unwrap_or_skip_bad_window!(
+            self.connection.send_and_check_request(&x::ConfigureWindow {
+                window,
+                value_list: &[
+                    x::ConfigWindow::X(dims.x),
+                    x::ConfigWindow::Y(dims.y),
+                    x::ConfigWindow::Width(dims.width as _),
+                    x::ConfigWindow::Height(dims.height as _),
+                ]
+            }),
+            return false
+        );
+        true
     }
 
     fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool) {
@@ -1299,7 +1300,7 @@ impl XConnection for RealConnection {
             long_offset: 0,
             long_length: 10,
         });
-        let reply = unwrap_or_skip_bad_window!(self.connection.wait_for_reply(cookie));
+        let reply = unwrap_or_skip_bad_window_ret!(self.connection.wait_for_reply(cookie));
 
         if reply
             .value::<x::Atom>()
@@ -1312,30 +1313,32 @@ impl XConnection for RealConnection {
                 x::ClientMessageData::Data32(data),
             );
 
-            unwrap_or_skip_bad_window!(self.connection.send_and_check_request(&x::SendEvent {
+            unwrap_or_skip_bad_window_ret!(self.connection.send_and_check_request(&x::SendEvent {
                 destination: x::SendEventDest::Window(window),
                 propagate: false,
                 event_mask: x::EventMask::empty(),
                 event,
             }));
         } else {
-            unwrap_or_skip_bad_window!(self.connection.send_and_check_request(&x::KillClient {
+            unwrap_or_skip_bad_window_ret!(self.connection.send_and_check_request(&x::KillClient {
                 resource: window.resource_id()
             }))
         }
     }
 
     fn unmap_window(&mut self, window: x::Window) {
-        unwrap_or_skip_bad_window!(self
+        unwrap_or_skip_bad_window_ret!(self
             .connection
             .send_and_check_request(&x::UnmapWindow { window }));
     }
 
     fn raise_to_top(&mut self, window: x::Window) {
-        unwrap_or_skip_bad_window!(self.connection.send_and_check_request(&x::ConfigureWindow {
-            window,
-            value_list: &[x::ConfigWindow::StackMode(x::StackMode::Above)],
-        }));
+        unwrap_or_skip_bad_window_ret!(self.connection.send_and_check_request(
+            &x::ConfigureWindow {
+                window,
+                value_list: &[x::ConfigWindow::StackMode(x::StackMode::Above)],
+            }
+        ));
     }
 }
 
