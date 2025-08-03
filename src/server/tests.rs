@@ -1,5 +1,6 @@
-use super::{InnerServerState, ServerState, WindowDims};
+use super::{EarlyConnection, InnerServerState, ServerState, WindowDims};
 use crate::xstate::{SetState, WinSize, WmName};
+use crate::XConnection;
 use rustix::event::{poll, PollFd, PollFlags};
 use std::collections::HashMap;
 use std::io::Write;
@@ -152,8 +153,8 @@ struct WindowData {
     fullscreen: bool,
     dims: WindowDims,
 }
+#[derive(Default)]
 struct FakeXConnection {
-    root: Window,
     focused_window: Option<Window>,
     windows: HashMap<Window, WindowData>,
 }
@@ -171,16 +172,6 @@ impl FakeXConnection {
         self.windows
             .get(&window)
             .unwrap_or_else(|| panic!("Unknown window: {window:?}"))
-    }
-}
-
-impl Default for FakeXConnection {
-    fn default() -> Self {
-        Self {
-            root: unsafe { Window::new(9001) },
-            focused_window: None,
-            windows: HashMap::new(),
-        }
     }
 }
 
@@ -206,10 +197,6 @@ impl crate::X11Selection for Vec<testwl::PasteData> {
 
 impl super::XConnection for FakeXConnection {
     type X11Selection = FakeX11Selection;
-    fn root_window(&self) -> Window {
-        self.root
-    }
-
     #[track_caller]
     fn close_window(&mut self, window: Window) {
         log::debug!("closing window {window:?}");
@@ -252,15 +239,16 @@ impl super::XConnection for FakeXConnection {
     }
 }
 
-type FakeServerState = ServerState<FakeXConnection>;
+type EarlyServerState = ServerState<EarlyConnection<FakeX11Selection>>;
+type EarlyTestFixture = TestFixture<EarlyConnection<FakeX11Selection>>;
 
-struct TestFixture {
+struct TestFixture<C: XConnection> {
     testwl: testwl::Server,
-    satellite: FakeServerState,
+    satellite: ServerState<C>,
     /// Our connection to satellite - i.e., where Xwayland sends requests to
     xwls_connection: Arc<Connection>,
     /// Satellite's display - must dispatch this for our server state to advance
-    xwls_display: Display<InnerServerState<FakeX11Selection>>,
+    xwls_display: Display<InnerServerState<C::X11Selection>>,
     surface_serial: u64,
     registry: TestObject<WlRegistry>,
 }
@@ -336,38 +324,24 @@ impl PreConnectFn for () {}
 
 struct SetupOptions<F> {
     pre_connect: Option<F>,
-    connect_x: bool,
-}
-
-impl SetupOptions<()> {
-    fn dont_connect_x() -> Self {
-        Self {
-            pre_connect: None,
-            connect_x: false,
-        }
-    }
 }
 
 impl<F: PreConnectFn> SetupOptions<F> {
     fn pre_connect(pre_connect: F) -> Self {
         Self {
             pre_connect: Some(pre_connect),
-            connect_x: true,
         }
     }
 }
 
 impl Default for SetupOptions<()> {
     fn default() -> Self {
-        Self {
-            pre_connect: None,
-            connect_x: true,
-        }
+        Self { pre_connect: None }
     }
 }
 
-impl TestFixture {
-    fn new_with_options<F: PreConnectFn>(options: SetupOptions<F>) -> Self {
+impl EarlyTestFixture {
+    fn new_early_with_options<F: PreConnectFn>(options: SetupOptions<F>) -> Self {
         INIT.call_once(|| {
             env_logger::builder()
                 .is_test(true)
@@ -391,15 +365,11 @@ impl TestFixture {
             testwl.dispatch();
             testwl
         });
-        let mut satellite = FakeServerState::new(display.handle(), Some(client_s));
-        let testwl = thread.join().unwrap();
 
         let (fake_client, xwls_server) = UnixStream::pair().unwrap();
+        let mut satellite = EarlyServerState::new(display.handle(), Some(client_s));
+        let testwl = thread.join().unwrap();
         satellite.connect(xwls_server);
-
-        if options.connect_x {
-            satellite.set_x_connection(FakeXConnection::default());
-        }
 
         let xwls_connection = Connection::from_socket(fake_client).unwrap();
         let registry = TestObject::<WlRegistry>::from_request(
@@ -407,7 +377,7 @@ impl TestFixture {
             Req::<WlDisplay>::GetRegistry {},
         );
 
-        let mut f = TestFixture {
+        let mut f = EarlyTestFixture {
             testwl,
             satellite,
             xwls_connection: xwls_connection.into(),
@@ -419,24 +389,19 @@ impl TestFixture {
         f
     }
 
-    fn new() -> Self {
-        Self::new_with_options(SetupOptions::default())
+    fn upgrade_connection(self, connection: FakeXConnection) -> TestFixture<FakeXConnection> {
+        TestFixture {
+            testwl: self.testwl,
+            satellite: self.satellite.upgrade_connection(connection),
+            xwls_connection: self.xwls_connection,
+            xwls_display: self.xwls_display,
+            surface_serial: self.surface_serial,
+            registry: self.registry,
+        }
     }
+}
 
-    fn new_pre_connect(pre_connect: impl FnOnce(&mut testwl::Server)) -> Self {
-        Self::new_with_options(SetupOptions::pre_connect(pre_connect))
-    }
-
-    fn new_with_compositor() -> (Self, Compositor) {
-        let mut f = Self::new();
-        let compositor = f.compositor();
-        (f, compositor)
-    }
-
-    fn connection(&self) -> &FakeXConnection {
-        self.satellite.connection.as_ref().unwrap()
-    }
-
+impl<C: XConnection> TestFixture<C> {
     fn compositor(&mut self) -> Compositor {
         let mut ret = CompositorOptional::default();
         let events = std::mem::take(&mut *self.registry.data.events.lock().unwrap());
@@ -493,18 +458,6 @@ impl TestFixture {
         );
 
         ret.into()
-    }
-
-    fn object_data<P>(&self, obj: &P) -> Arc<TestObjectData<P>>
-    where
-        P: Proxy + Send + Sync + 'static,
-        P::Event: Send + Sync + std::fmt::Debug,
-    {
-        self.xwls_connection
-            .get_object_data(obj.id())
-            .unwrap()
-            .downcast_arc::<TestObjectData<P>>()
-            .unwrap()
     }
 
     /// Cascade our requests/events through satellite and testwl
@@ -572,6 +525,43 @@ impl TestFixture {
         self.run();
         self.run();
         (output, self.testwl.last_created_output())
+    }
+}
+
+impl TestFixture<FakeXConnection> {
+    fn new_with_options<F: PreConnectFn>(options: SetupOptions<F>) -> Self {
+        EarlyTestFixture::new_early_with_options(options)
+            .upgrade_connection(FakeXConnection::default())
+    }
+
+    fn new() -> Self {
+        Self::new_with_options(SetupOptions::default())
+    }
+
+    fn new_pre_connect(pre_connect: impl FnOnce(&mut testwl::Server)) -> Self {
+        Self::new_with_options(SetupOptions::pre_connect(pre_connect))
+    }
+
+    fn new_with_compositor() -> (Self, Compositor) {
+        let mut f = Self::new();
+        let compositor = f.compositor();
+        (f, compositor)
+    }
+
+    fn connection(&self) -> &FakeXConnection {
+        self.satellite.connection.as_ref().unwrap()
+    }
+
+    fn object_data<P>(&self, obj: &P) -> Arc<TestObjectData<P>>
+    where
+        P: Proxy + Send + Sync + 'static,
+        P::Event: Send + Sync + std::fmt::Debug,
+    {
+        self.xwls_connection
+            .get_object_data(obj.id())
+            .unwrap()
+            .downcast_arc::<TestObjectData<P>>()
+            .unwrap()
     }
 
     fn enable_xdg_output(&mut self) -> TestObject<ZxdgOutputManagerV1> {
@@ -1561,7 +1551,7 @@ fn output_offset_change() {
     f.testwl.move_surface_to_output(id, &output);
     f.run();
 
-    let test_position = |f: &TestFixture, x, y| {
+    let test_position = |f: &TestFixture<_>, x, y| {
         let data = &f.connection().windows[&window];
         assert_eq!(data.dims.x, x);
         assert_eq!(data.dims.y, y);
@@ -2320,7 +2310,7 @@ fn touch_fractional_scale() {
     let server_surface = data.surface.clone();
     let fractional = data.fractional.as_ref().cloned().unwrap();
 
-    let do_touch = |f: &mut TestFixture, x, y| {
+    let do_touch = |f: &mut TestFixture<_>, x, y| {
         f.testwl.touch().down(0, 0, &server_surface, 0, x, y);
         f.testwl.dispatch();
         f.run();
@@ -2416,11 +2406,11 @@ fn tablet_tool_fractional_scale() {
 
 #[test]
 fn output_updated_before_x_connection() {
-    let mut f = TestFixture::new_with_options(SetupOptions::dont_connect_x());
+    let mut f = EarlyTestFixture::new_early_with_options(SetupOptions::default());
     let comp = f.compositor();
     let (_, output) = f.new_output(-20, -20);
 
-    f.satellite.set_x_connection(FakeXConnection::default());
+    let mut f = f.upgrade_connection(FakeXConnection::default());
 
     let window = unsafe { Window::new(1) };
     let (_, surface_id) = f.create_toplevel(&comp, window);

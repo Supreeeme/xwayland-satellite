@@ -227,10 +227,13 @@ impl XState {
         r
     }
 
-    pub fn server_state_setup(&self, server_state: &mut super::RealServerState) {
+    pub fn server_state_setup(
+        &self,
+        server_state: super::EarlyServerState,
+    ) -> super::RealServerState {
         let mut c = RealConnection::new(self.connection.clone(), self.atoms.clone());
         c.update_outputs(self.root);
-        server_state.set_x_connection(c);
+        server_state.upgrade_connection(c)
     }
 
     fn set_root_property<P: x::PropEl>(&self, property: x::Atom, r#type: x::Atom, data: &[P]) {
@@ -1186,15 +1189,14 @@ impl RealConnection {
             self.outputs, self.primary_output
         );
     }
-}
-
-impl XConnection for RealConnection {
-    type X11Selection = Selection;
 
     fn root_window(&self) -> x::Window {
         self.connection.get_setup().roots().next().unwrap().root()
     }
+}
 
+impl XConnection for RealConnection {
+    type X11Selection = Selection;
     fn set_window_dims(&mut self, window: x::Window, dims: crate::server::PendingSurfaceState) {
         trace!("set window dimensions {window:?} {dims:?}");
         unwrap_or_skip_bad_window!(self.connection.send_and_check_request(&x::ConfigureWindow {
