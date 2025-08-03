@@ -209,13 +209,14 @@ impl super::XConnection for FakeXConnection {
     }
 
     #[track_caller]
-    fn set_window_dims(&mut self, window: Window, state: super::PendingSurfaceState) {
+    fn set_window_dims(&mut self, window: Window, state: super::PendingSurfaceState) -> bool {
         self.window_mut(window).dims = WindowDims {
             x: state.x as _,
             y: state.y as _,
             width: state.width as _,
             height: state.height as _,
         };
+        true
     }
 
     #[track_caller]
@@ -367,9 +368,8 @@ impl EarlyTestFixture {
         });
 
         let (fake_client, xwls_server) = UnixStream::pair().unwrap();
-        let mut satellite = EarlyServerState::new(display.handle(), Some(client_s));
+        let satellite = EarlyServerState::new(display.handle(), Some(client_s), xwls_server);
         let testwl = thread.join().unwrap();
-        satellite.connect(xwls_server);
 
         let xwls_connection = Connection::from_socket(fake_client).unwrap();
         let registry = TestObject::<WlRegistry>::from_request(
@@ -549,7 +549,7 @@ impl TestFixture<FakeXConnection> {
     }
 
     fn connection(&self) -> &FakeXConnection {
-        self.satellite.connection.as_ref().unwrap()
+        &self.satellite.connection
     }
 
     fn object_data<P>(&self, obj: &P) -> Arc<TestObjectData<P>>
@@ -612,12 +612,7 @@ impl TestFixture<FakeXConnection> {
     }
 
     fn register_window(&mut self, window: Window, data: WindowData) {
-        self.satellite
-            .connection
-            .as_mut()
-            .unwrap()
-            .windows
-            .insert(window, data);
+        self.satellite.connection.windows.insert(window, data);
     }
 
     fn new_window(&mut self, window: Window, override_redirect: bool, data: WindowData) {
@@ -940,7 +935,7 @@ fn toplevel_flow() {
     f.testwl.close_toplevel(testwl_id);
     f.run();
 
-    assert!(!f.satellite.connection.as_ref().unwrap().windows[&window].mapped);
+    assert!(!f.satellite.connection.windows[&window].mapped);
 
     assert!(
         f.testwl.get_surface_data(testwl_id).is_some(),

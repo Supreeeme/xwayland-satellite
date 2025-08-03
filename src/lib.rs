@@ -16,7 +16,7 @@ use xcb::x;
 pub trait XConnection: Sized + 'static {
     type X11Selection: X11Selection;
 
-    fn set_window_dims(&mut self, window: x::Window, dims: PendingSurfaceState);
+    fn set_window_dims(&mut self, window: x::Window, dims: PendingSurfaceState) -> bool;
     fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool);
     fn focus_window(&mut self, window: x::Window, output_name: Option<String>);
     fn close_window(&mut self, window: x::Window);
@@ -134,8 +134,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
         }
     };
 
-    let mut server_state = EarlyServerState::new(dh, data.server());
-    server_state.connect(connection);
+    let mut server_state = EarlyServerState::new(dh, data.server(), connection);
     server_state.run();
 
     // Remove the lifetimes on our fds to avoid borrowing issues, since we know they will exist for
@@ -177,8 +176,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
         display.flush_clients().unwrap();
     }
 
-    let mut xstate: Option<XState> = None;
-    let xstate = xstate.insert(XState::new(xsock_wl.as_fd()));
+    let mut xstate = XState::new(xsock_wl.as_fd());
     let mut reader = BufReader::new(&ready_rx);
     {
         let mut display = String::new();

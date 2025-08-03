@@ -157,9 +157,8 @@ impl SurfaceEvents {
                     );
                     if state.last_focused_toplevel == Some(*window) {
                         let output = get_output_name(Some(&on_output), &state.world);
-                        let conn = connection.as_mut().unwrap();
                         debug!("focused window changed outputs - resetting primary output");
-                        conn.focus_window(*window, output);
+                        connection.focus_window(*window, output);
                     }
 
                     if state.fractional_scale.is_none() {
@@ -205,7 +204,7 @@ impl SurfaceEvents {
         target: Entity,
         state: &mut ServerState<C>,
     ) {
-        let connection = state.connection.as_mut().unwrap();
+        let connection = &mut state.connection;
         let state = &mut state.inner;
         let xdg_surface::Event::Configure { serial } = event else {
             unreachable!();
@@ -308,7 +307,7 @@ impl SurfaceEvents {
                     toplevel.fullscreen =
                         states.contains(&(u32::from(xdg_toplevel::State::Fullscreen) as u8));
                     if toplevel.fullscreen != prev_fs {
-                        state.connection.as_mut().unwrap().set_fullscreen(
+                        state.connection.set_fullscreen(
                             *data.get::<&x::Window>().unwrap(),
                             toplevel.fullscreen,
                         );
@@ -364,8 +363,6 @@ impl SurfaceEvents {
             xdg_popup::Event::PopupDone => {
                 state
                     .connection
-                    .as_mut()
-                    .unwrap()
                     .unmap_window(*data.get::<&x::Window>().unwrap());
             }
             other => todo!("{other:?}"),
@@ -482,7 +479,7 @@ impl Event for client::wl_pointer::Event {
                 let mut do_enter = || {
                     debug!("pointer entering {} ({serial} {})", surface.id(), scale.0);
                     server.enter(serial, surface, surface_x * scale.0, surface_y * scale.0);
-                    state.connection.as_mut().unwrap().raise_to_top(*window);
+                    state.connection.raise_to_top(*window);
                     if !surface_is_popup {
                         state.inner.last_hovered = Some(*window);
                     }
@@ -916,7 +913,7 @@ fn update_window_output_offsets(
     output: Entity,
     global_output_offset: &GlobalOutputOffset,
     world: &World,
-    connection: &mut Option<impl XConnection>,
+    connection: &mut impl XConnection,
 ) {
     let dimensions = world.get::<&OutputDimensions>(output).unwrap();
     let mut query = world.query::<(&x::Window, &mut WindowData, &OnOutput)>();
@@ -940,7 +937,7 @@ pub(super) fn update_global_output_offset(
     output: Entity,
     global_output_offset: &GlobalOutputOffset,
     world: &World,
-    connection: &mut Option<impl XConnection>,
+    connection: &mut impl XConnection,
 ) {
     let entity = world.entity(output).unwrap();
     let mut query = entity.query::<(&OutputDimensions, &WlOutput)>();
@@ -1459,8 +1456,6 @@ where
     let entity = state.world.reserve_entity();
     let server = state
         .client
-        .as_ref()
-        .unwrap()
         .create_resource::<_, _, InnerServerState<S>>(&state.dh, 1, entity)
         .unwrap();
     let obj_key: &LateInitObjectKey<Client> = client.data().unwrap();
