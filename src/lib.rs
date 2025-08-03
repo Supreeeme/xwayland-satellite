@@ -59,6 +59,11 @@ pub fn main(mut data: impl RunData) -> Option<()> {
     data.created_server();
 
     let (xsock_wl, xsock_xwl) = UnixStream::pair().unwrap();
+    // XCB takes responsibility for cleaning up this FD, but since connecting takes a RawFd at the
+    // FFI level, see (`XState::new`), `xsock_wl`'s destructor also closes the FD, leading the FD
+    // being closed twice. This mainly caused problems in the integration tests, where `xsock_wl`'s
+    // destructor would be run after the descriptor was freed, leading to an opaque abort message.
+    let xsock_wl = Box::leak(Box::new(xsock_wl));
     // Prevent creation of new Xwayland command from closing fd
     rustix::io::fcntl_setfd(&xsock_xwl, rustix::io::FdFlags::empty()).unwrap();
 
