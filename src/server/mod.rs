@@ -393,6 +393,33 @@ struct GlobalOutputOffset {
     y: GlobalOutputOffsetDimension,
 }
 
+/// The state of the X11 connection before XState has been fully initialized.
+/// It implements XConnection minimally, gracefully doing nothing but logging the called functions.
+pub struct EarlyConnection<S: X11Selection + 'static> {
+    _p: std::marker::PhantomData<S>,
+}
+impl<S: X11Selection> XConnection for EarlyConnection<S> {
+    type X11Selection = S;
+    fn focus_window(&mut self, _: x::Window, _: Option<String>) {
+        debug!("could not focus window without XWayland initialized");
+    }
+    fn close_window(&mut self, _: x::Window) {
+        debug!("could not close window without XWayland initialized");
+    }
+    fn unmap_window(&mut self, _: x::Window) {
+        debug!("could not unmap window without XWayland initialized");
+    }
+    fn raise_to_top(&mut self, _: x::Window) {
+        debug!("could not raise window to top without XWayland initialized");
+    }
+    fn set_fullscreen(&mut self, _: x::Window, _: bool) {
+        debug!("could not toggle fullscreen without XWayland initialized");
+    }
+    fn set_window_dims(&mut self, _: x::Window, _: crate::server::PendingSurfaceState) {
+        debug!("could not set window dimensions without XWayland initialized");
+    }
+}
+
 pub struct ServerState<C: XConnection> {
     inner: InnerServerState<C::X11Selection>,
     pub connection: Option<C>,
@@ -425,7 +452,7 @@ pub struct InnerServerState<S: X11Selection> {
     new_scale: Option<f64>,
 }
 
-impl<C: XConnection> ServerState<C> {
+impl<S: X11Selection> ServerState<EarlyConnection<S>> {
     pub fn new(dh: DisplayHandle, server_connection: Option<UnixStream>) -> Self {
         let connection = if let Some(stream) = server_connection {
             Connection::from_socket(stream).unwrap()
@@ -460,7 +487,7 @@ impl<C: XConnection> ServerState<C> {
         let clipboard_data = manager.map(|manager| ClipboardData {
             manager,
             device: None,
-            source: None::<CopyPasteData<C::X11Selection>>,
+            source: None::<CopyPasteData<S>>,
         });
 
         let activation_state = ActivationState::bind(&global_list, &qh)
@@ -476,10 +503,10 @@ impl<C: XConnection> ServerState<C> {
             })
             .ok();
 
-        dh.create_global::<InnerServerState<C::X11Selection>, XwaylandShellV1, _>(1, ());
+        dh.create_global::<InnerServerState<S>, XwaylandShellV1, _>(1, ());
         global_list
             .contents()
-            .with_list(|globals| handle_globals::<C::X11Selection>(&dh, globals));
+            .with_list(|globals| handle_globals::<S>(&dh, globals));
 
         let inner = InnerServerState {
             windows: HashMap::new(),
@@ -516,7 +543,19 @@ impl<C: XConnection> ServerState<C> {
         };
         Self {
             inner,
-            connection: None,
+            connection: Some(EarlyConnection {
+                _p: std::marker::PhantomData,
+            }),
+        }
+    }
+
+    pub fn upgrade_connection<C>(self, connection: C) -> ServerState<C>
+    where
+        C: XConnection<X11Selection = S>,
+    {
+        ServerState {
+            inner: self.inner,
+            connection: Some(connection),
         }
     }
 }
