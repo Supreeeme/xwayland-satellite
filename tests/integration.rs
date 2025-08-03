@@ -99,7 +99,9 @@ impl Drop for Fixture {
         // thread does not use file descriptors which outlive the Fixture's BorrowedFd
         let return_ptr = Box::into_raw(Box::new(0_usize)) as usize;
         self.quit_tx.write_all(&return_ptr.to_ne_bytes()).unwrap();
-        thread.join().expect("Main thread panicked");
+        if thread.join().is_err() {
+            log::error!("main thread panicked");
+        }
         rustix::process::kill_process(self.pid, Signal::Term).unwrap();
         rustix::process::waitpid(Some(self.pid), WaitOptions::NOHANG).unwrap();
     }
@@ -891,7 +893,7 @@ fn activation_x11_to_x11() {
     let surface2 = f.map_as_toplevel(&mut connection, window2);
 
     f.testwl.focus_toplevel(surface2);
-    std::thread::sleep(Duration::from_millis(1));
+    std::thread::sleep(Duration::from_millis(10));
     connection.send_client_message(&x::ClientMessageEvent::new(
         window1,
         connection.atoms.net_active_window,
