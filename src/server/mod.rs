@@ -18,6 +18,7 @@ use smithay_client_toolkit::data_device_manager::{
 };
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
+use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::rc::{Rc, Weak};
@@ -393,10 +394,10 @@ struct GlobalOutputOffset {
 
 /// The state of the X11 connection before XState has been fully initialized.
 /// It implements XConnection minimally, gracefully doing nothing but logging the called functions.
-pub struct EarlyConnection<S: X11Selection + 'static> {
+pub struct NoConnection<S: X11Selection + 'static> {
     _p: std::marker::PhantomData<S>,
 }
-impl<S: X11Selection> XConnection for EarlyConnection<S> {
+impl<S: X11Selection> XConnection for NoConnection<S> {
     type X11Selection = S;
     fn focus_window(&mut self, _: x::Window, _: Option<String>) {
         debug!("could not focus window without XWayland initialized");
@@ -422,6 +423,17 @@ impl<S: X11Selection> XConnection for EarlyConnection<S> {
 pub struct ServerState<C: XConnection> {
     inner: InnerServerState<C::X11Selection>,
     pub connection: C,
+}
+impl<C: XConnection> Deref for ServerState<C> {
+    type Target = InnerServerState<C::X11Selection>;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+impl<C: XConnection> DerefMut for ServerState<C> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
 }
 
 pub struct InnerServerState<S: X11Selection> {
@@ -451,7 +463,7 @@ pub struct InnerServerState<S: X11Selection> {
     new_scale: Option<f64>,
 }
 
-impl<S: X11Selection> ServerState<EarlyConnection<S>> {
+impl<S: X11Selection> ServerState<NoConnection<S>> {
     pub fn new(
         mut dh: DisplayHandle,
         server_connection: Option<UnixStream>,
@@ -548,7 +560,7 @@ impl<S: X11Selection> ServerState<EarlyConnection<S>> {
         };
         Self {
             inner,
-            connection: EarlyConnection {
+            connection: NoConnection {
                 _p: std::marker::PhantomData,
             },
         }
@@ -566,103 +578,18 @@ impl<S: X11Selection> ServerState<EarlyConnection<S>> {
 }
 
 impl<C: XConnection> ServerState<C> {
-    pub fn inner_mut(&mut self) -> &mut InnerServerState<C::X11Selection> {
-        &mut self.inner
-    }
-
-    pub fn clientside_fd(&self) -> BorrowedFd<'_> {
-        self.inner.clientside_fd()
-    }
-
-    fn handle_new_globals(&mut self) {
-        self.inner.handle_new_globals()
-    }
-
-    pub fn new_window(
-        &mut self,
-        window: x::Window,
-        override_redirect: bool,
-        dims: WindowDims,
-        pid: Option<u32>,
-    ) {
-        self.inner.new_window(window, override_redirect, dims, pid)
-    }
-
-    pub fn set_popup(&mut self, window: x::Window, is_popup: bool) {
-        self.inner.set_popup(window, is_popup)
-    }
-
-    pub fn set_win_title(&mut self, window: x::Window, name: WmName) {
-        self.inner.set_win_title(window, name);
-    }
-
-    pub fn set_win_class(&mut self, window: x::Window, class: String) {
-        self.inner.set_win_class(window, class)
-    }
-
-    pub fn set_win_hints(&mut self, window: x::Window, hints: WmHints) {
-        self.inner.set_win_hints(window, hints)
-    }
-
-    pub fn set_size_hints(&mut self, window: x::Window, hints: WmNormalHints) {
-        self.inner.set_size_hints(window, hints)
-    }
-
-    pub fn set_win_decorations(&mut self, window: x::Window, decorations: Decorations) {
-        self.inner.set_win_decorations(window, decorations)
-    }
-
-    pub fn set_window_serial(&mut self, window: x::Window, serial: [u32; 2]) {
-        self.inner.set_window_serial(window, serial)
-    }
-
-    pub fn can_change_position(&self, window: x::Window) -> bool {
-        self.inner.can_change_position(window)
-    }
-
-    pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
-        self.inner.reconfigure_window(event)
-    }
-
-    pub fn map_window(&mut self, window: x::Window) {
-        self.inner.map_window(window)
-    }
-
-    pub fn unmap_window(&mut self, window: x::Window) {
-        self.inner.unmap_window(window)
-    }
-
-    pub fn set_fullscreen(&mut self, window: x::Window, state: super::xstate::SetState) {
-        self.inner.set_fullscreen(window, state)
-    }
-
-    pub fn set_transient_for(&mut self, window: x::Window, parent: x::Window) {
-        self.inner.set_transient_for(window, parent)
-    }
-
-    pub fn activate_window(&mut self, window: x::Window) {
-        self.inner.activate_window(window)
-    }
-
-    pub fn destroy_window(&mut self, window: x::Window) {
-        self.inner.destroy_window(window)
-    }
-
-    pub(crate) fn set_copy_paste_source(&mut self, selection: &Rc<C::X11Selection>) {
-        self.inner.set_copy_paste_source(selection)
-    }
-
     pub fn run(&mut self) {
-        if let Some(r) = self.inner.queue.prepare_read() {
+        if let Some(r) = self.queue.prepare_read() {
             let fd = r.connection_fd();
             let pollfd = PollFd::new(&fd, PollFlags::IN);
             if poll(&mut [pollfd], 0).unwrap() > 0 {
                 let _ = r.read();
             }
         }
-        self.inner
+        let state = self.deref_mut();
+        state
             .queue
-            .dispatch_pending(&mut self.inner.world)
+            .dispatch_pending(&mut state.world)
             .expect("Failed dispatching client side Wayland events");
         self.handle_clientside_events();
     }
@@ -670,42 +597,43 @@ impl<C: XConnection> ServerState<C> {
     pub fn handle_clientside_events(&mut self) {
         self.handle_new_globals();
 
-        for (target, event) in self.inner.world.read_events() {
-            if !self.inner.world.contains(target) {
+        for (target, event) in self.world.read_events() {
+            if !self.world.contains(target) {
                 warn!("could not handle clientside event: stale object");
                 continue;
             }
             event.handle(target, self);
         }
 
-        if self.inner.global_offset_updated {
-            if self.inner.global_output_offset.x.owner.is_none()
-                || self.inner.global_output_offset.y.owner.is_none()
+        if self.global_offset_updated {
+            if self.global_output_offset.x.owner.is_none()
+                || self.global_output_offset.y.owner.is_none()
             {
                 self.calc_global_output_offset();
             }
 
             debug!(
                 "updated global output offset: {}x{}",
-                self.inner.global_output_offset.x.value, self.inner.global_output_offset.y.value
+                self.global_output_offset.x.value, self.global_output_offset.y.value
             );
-            for (e, _) in self.inner.world.query::<&WlOutput>().iter() {
+            let state = &self.inner;
+            for (e, _) in state.world.query::<&WlOutput>().iter() {
                 event::update_global_output_offset(
                     e,
-                    &self.inner.global_output_offset,
-                    &self.inner.world,
+                    &state.global_output_offset,
+                    &state.world,
                     &mut self.connection,
                 );
             }
-            self.inner.global_offset_updated = false;
+            self.global_offset_updated = false;
         }
 
-        if !self.inner.updated_outputs.is_empty() {
-            for output in self.inner.updated_outputs.drain(..) {
-                let output_scale = self.inner.world.get::<&OutputScaleFactor>(output).unwrap();
+        if !self.updated_outputs.is_empty() {
+            let state = self.deref_mut();
+            for output in state.updated_outputs.drain(..) {
+                let output_scale = state.world.get::<&OutputScaleFactor>(output).unwrap();
                 if matches!(*output_scale, OutputScaleFactor::Output(..)) {
-                    let mut surface_query = self
-                        .inner
+                    let mut surface_query = state
                         .world
                         .query::<(&OnOutput, &mut SurfaceScaleFactor)>()
                         .with::<(&WindowData, &WlSurface)>();
@@ -720,7 +648,7 @@ impl<C: XConnection> ServerState<C> {
 
                     drop(surface_query);
                     for surface in surfaces {
-                        update_surface_viewport(self.inner.world.query_one(surface).unwrap());
+                        update_surface_viewport(state.world.query_one(surface).unwrap());
                     }
                 }
             }
@@ -728,11 +656,7 @@ impl<C: XConnection> ServerState<C> {
             let mut mixed_scale = false;
             let mut scale;
 
-            let mut outputs = self
-                .inner
-                .world
-                .query_mut::<&OutputScaleFactor>()
-                .into_iter();
+            let mut outputs = self.world.query_mut::<&OutputScaleFactor>().into_iter();
             let (_, output_scale) = outputs.next().unwrap();
 
             scale = output_scale.get();
@@ -749,70 +673,45 @@ impl<C: XConnection> ServerState<C> {
             }
 
             debug!("Using new scale {scale}");
-            self.inner.new_scale = Some(scale);
+            self.new_scale = Some(scale);
         }
 
         {
             if let Some(FocusData {
                 window,
                 output_name,
-            }) = self.inner.to_focus.take()
+            }) = self.to_focus.take()
             {
                 debug!("focusing window {window:?}");
                 self.connection.focus_window(window, output_name);
-                self.inner.last_focused_toplevel = Some(window);
-            } else if self.inner.unfocus {
+                self.last_focused_toplevel = Some(window);
+            } else if self.unfocus {
                 self.connection.focus_window(x::WINDOW_NONE, None);
             }
-            self.inner.unfocus = false;
+            self.unfocus = false;
         }
 
         self.handle_clipboard_events();
         self.handle_activations();
-        self.inner
-            .queue
+        self.queue
             .flush()
             .expect("Failed flushing clientside events");
     }
 
-    pub fn new_global_scale(&mut self) -> Option<f64> {
-        self.inner.new_global_scale()
-    }
-
-    pub fn new_selection(&mut self) -> Option<ForeignSelection> {
-        self.inner.new_selection()
-    }
-
-    fn handle_clipboard_events(&mut self) {
-        self.inner.handle_clipboard_events()
-    }
-
-    fn handle_activations(&mut self) {
-        self.inner.handle_activations()
-    }
-
-    fn calc_global_output_offset(&mut self) {
-        self.inner.calc_global_output_offset()
-    }
-
-    // create_role_window is only called in a Dispatch impl, a trait impl necessarily moved to be
-    // on the ineer value. create_toplevel and create_popup are only called by that create_role_window
-    // call, so none of them need wrapper functions.
-
     fn close_x_window(&mut self, window: x::Window) {
         debug!("sending close request to {window:?}");
         self.connection.close_window(window);
-        if self.inner.last_focused_toplevel == Some(window) {
-            self.inner.last_focused_toplevel.take();
+        if self.last_focused_toplevel == Some(window) {
+            self.last_focused_toplevel.take();
         }
-        if self.inner.last_hovered == Some(window) {
-            self.inner.last_hovered.take();
+        if self.last_hovered == Some(window) {
+            self.last_hovered.take();
         }
     }
 }
 
 impl<S: X11Selection + 'static> InnerServerState<S> {
-    fn clientside_fd(&self) -> BorrowedFd<'_> {
+    pub fn clientside_fd(&self) -> BorrowedFd<'_> {
         self.queue.as_fd()
     }
 
@@ -821,7 +720,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         handle_globals::<S>(&self.dh, globals.iter());
     }
 
-    fn new_window(
+    pub fn new_window(
         &mut self,
         window: x::Window,
         override_redirect: bool,
@@ -846,7 +745,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         self.windows.insert(window, id);
     }
 
-    fn set_popup(&mut self, window: x::Window, is_popup: bool) {
+    pub fn set_popup(&mut self, window: x::Window, is_popup: bool) {
         let Some(id) = self.windows.get(&window).copied() else {
             debug!("not setting popup for unknown window {window:?}");
             return;
@@ -859,7 +758,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             .is_popup = is_popup;
     }
 
-    fn set_win_title(&mut self, window: x::Window, name: WmName) {
+    pub fn set_win_title(&mut self, window: x::Window, name: WmName) {
         let Some(data) = self
             .windows
             .get(&window)
@@ -897,7 +796,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    fn set_win_class(&mut self, window: x::Window, class: String) {
+    pub fn set_win_class(&mut self, window: x::Window, class: String) {
         let Some(data) = self
             .windows
             .get(&window)
@@ -918,7 +817,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    fn set_win_hints(&mut self, window: x::Window, hints: WmHints) {
+    pub fn set_win_hints(&mut self, window: x::Window, hints: WmHints) {
         let Some(id) = self.windows.get(&window).copied() else {
             debug!("not setting hints for unknown window {window:?}");
             return;
@@ -927,7 +826,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         self.world.get::<&mut WindowData>(id).unwrap().attrs.group = hints.window_group;
     }
 
-    fn set_size_hints(&mut self, window: x::Window, hints: WmNormalHints) {
+    pub fn set_size_hints(&mut self, window: x::Window, hints: WmNormalHints) {
         let Some(data) = self
             .windows
             .get(&window)
@@ -961,7 +860,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    fn set_win_decorations(&mut self, window: x::Window, decorations: Decorations) {
+    pub fn set_win_decorations(&mut self, window: x::Window, decorations: Decorations) {
         if self.decoration_manager.is_none() {
             return;
         };
@@ -992,7 +891,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    fn set_window_serial(&mut self, window: x::Window, serial: [u32; 2]) {
+    pub fn set_window_serial(&mut self, window: x::Window, serial: [u32; 2]) {
         let Some(id) = self.windows.get(&window).copied() else {
             warn!("Tried to set serial for unknown window {window:?}");
             return;
@@ -1001,7 +900,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         self.world.insert(id, (SurfaceSerial(serial),)).unwrap();
     }
 
-    fn can_change_position(&self, window: x::Window) -> bool {
+    pub fn can_change_position(&self, window: x::Window) -> bool {
         let Some(win) = self
             .windows
             .get(&window)
@@ -1015,7 +914,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         !win.mapped || win.attrs.is_popup
     }
 
-    fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
+    pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
         let Some((mut win, data)) = self
             .windows
             .get(&event.window())
@@ -1074,7 +973,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    fn map_window(&mut self, window: x::Window) {
+    pub fn map_window(&mut self, window: x::Window) {
         debug!("mapping {window:?}");
 
         let Some(mut win) = self
@@ -1091,7 +990,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         win.mapped = true;
     }
 
-    fn unmap_window(&mut self, window: x::Window) {
+    pub fn unmap_window(&mut self, window: x::Window) {
         let entity = self.windows.get(&window).copied();
 
         {
@@ -1119,7 +1018,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    fn set_fullscreen(&mut self, window: x::Window, state: super::xstate::SetState) {
+    pub fn set_fullscreen(&mut self, window: x::Window, state: super::xstate::SetState) {
         let Some(data) = self
             .windows
             .get(&window)
@@ -1154,7 +1053,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    fn set_transient_for(&mut self, window: x::Window, parent: x::Window) {
+    pub fn set_transient_for(&mut self, window: x::Window, parent: x::Window) {
         let Some(mut win) = self
             .windows
             .get(&window)
@@ -1168,7 +1067,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         win.attrs.transient_for = Some(parent);
     }
 
-    fn activate_window(&mut self, window: x::Window) {
+    pub fn activate_window(&mut self, window: x::Window) {
         let Some(activation_state) = self.activation_state.as_ref() else {
             return;
         };
@@ -1205,7 +1104,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         );
     }
 
-    fn destroy_window(&mut self, window: x::Window) {
+    pub fn destroy_window(&mut self, window: x::Window) {
         if let Some(id) = self.windows.remove(&window) {
             self.world.remove::<(x::Window, WindowData)>(id).unwrap();
             if self.world.entity(id).unwrap().is_empty() {
@@ -1214,7 +1113,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    fn set_copy_paste_source(&mut self, selection: &Rc<S>) {
+    pub(crate) fn set_copy_paste_source(&mut self, selection: &Rc<S>) {
         if let Some(d) = &mut self.clipboard_data {
             let src = d
                 .manager
@@ -1237,11 +1136,11 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    fn new_global_scale(&mut self) -> Option<f64> {
+    pub fn new_global_scale(&mut self) -> Option<f64> {
         self.new_scale.take()
     }
 
-    fn new_selection(&mut self) -> Option<ForeignSelection> {
+    pub fn new_selection(&mut self) -> Option<ForeignSelection> {
         self.clipboard_data.as_mut().and_then(|c| {
             c.source.take().and_then(|s| match s {
                 CopyPasteData::Foreign(f) => Some(f),

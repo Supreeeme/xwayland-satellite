@@ -1,7 +1,7 @@
 mod server;
 pub mod xstate;
 
-use crate::server::{EarlyConnection, PendingSurfaceState, ServerState};
+use crate::server::{NoConnection, PendingSurfaceState, ServerState};
 use crate::xstate::{RealConnection, XState};
 use log::{error, info};
 use rustix::event::{poll, PollFd, PollFlags};
@@ -29,7 +29,7 @@ pub trait X11Selection {
     fn write_to(&self, mime: &str, pipe: WritePipe);
 }
 
-type EarlyServerState = ServerState<EarlyConnection<<RealConnection as XConnection>::X11Selection>>;
+type EarlyServerState = ServerState<NoConnection<<RealConnection as XConnection>::X11Selection>>;
 type RealServerState = ServerState<RealConnection>;
 
 pub trait RunData {
@@ -63,6 +63,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
     // FFI level, see (`XState::new`), `xsock_wl`'s destructor also closes the FD, leading the FD
     // being closed twice. This mainly caused problems in the integration tests, where `xsock_wl`'s
     // destructor would be run after the descriptor was freed, leading to an opaque abort message.
+    // See https://github.com/rust-x-bindings/rust-xcb/issues/282 for further explanation.
     let xsock_wl = Box::leak(Box::new(xsock_wl));
     // Prevent creation of new Xwayland command from closing fd
     rustix::io::fcntl_setfd(&xsock_xwl, rustix::io::FdFlags::empty()).unwrap();
@@ -176,7 +177,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
             Err(other) => panic!("Poll failed: {other:?}"),
         }
 
-        display.dispatch_clients(server_state.inner_mut()).unwrap();
+        display.dispatch_clients(&mut *server_state).unwrap();
         server_state.run();
         display.flush_clients().unwrap();
     }
@@ -207,7 +208,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
     loop {
         xstate.handle_events(&mut server_state);
 
-        display.dispatch_clients(server_state.inner_mut()).unwrap();
+        display.dispatch_clients(&mut *server_state).unwrap();
         server_state.run();
         display.flush_clients().unwrap();
 
