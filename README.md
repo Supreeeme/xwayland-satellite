@@ -61,3 +61,11 @@ Additionally, satellite can *optionally* take advantage of the following protoco
 - Pointer constraints
 - Tablet input
 - Fractional scale
+
+## Compositor integration
+Satellite supports passing through the `-listenfd` Xwayland argument. What this means is you can integrate satellite
+(and by extension Xwayland) into your compositor, and do things like on demand activation. Note that you *must* pass
+a display number to satellite as the first argument, and then the `-listenfd` argument.
+
+You can view [Niri's implementation of this integration](https://github.com/YaLTeR/niri/pull/1728/files) for understanding
+how it should work.
