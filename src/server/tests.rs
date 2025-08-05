@@ -1,4 +1,4 @@
-use super::{EarlyConnection, InnerServerState, ServerState, WindowDims};
+use super::{InnerServerState, NoConnection, ServerState, WindowDims};
 use crate::xstate::{SetState, WinSize, WmName};
 use crate::XConnection;
 use rustix::event::{poll, PollFd, PollFlags};
@@ -240,8 +240,7 @@ impl super::XConnection for FakeXConnection {
     }
 }
 
-type EarlyServerState = ServerState<EarlyConnection<FakeX11Selection>>;
-type EarlyTestFixture = TestFixture<EarlyConnection<FakeX11Selection>>;
+type EarlyTestFixture = TestFixture<NoConnection<FakeX11Selection>>;
 
 struct TestFixture<C: XConnection> {
     testwl: testwl::Server,
@@ -368,7 +367,7 @@ impl EarlyTestFixture {
         });
 
         let (fake_client, xwls_server) = UnixStream::pair().unwrap();
-        let satellite = EarlyServerState::new(display.handle(), Some(client_s), xwls_server);
+        let satellite = ServerState::new(display.handle(), Some(client_s), xwls_server);
         let testwl = thread.join().unwrap();
 
         let xwls_connection = Connection::from_socket(fake_client).unwrap();
@@ -467,7 +466,7 @@ impl<C: XConnection> TestFixture<C> {
 
         // Have satellite dispatch our requests
         self.xwls_display
-            .dispatch_clients(self.satellite.inner_mut())
+            .dispatch_clients(&mut *self.satellite)
             .unwrap();
         self.xwls_display.flush_clients().unwrap();
 
@@ -1414,12 +1413,12 @@ fn raise_window_on_pointer_event() {
     f.testwl.move_pointer_to(id2, 0.0, 0.0);
     f.run();
     assert_eq!(f.connection().focused_window, Some(win2));
-    assert_eq!(f.satellite.inner.last_hovered, Some(win2));
+    assert_eq!(f.satellite.last_hovered, Some(win2));
 
     f.testwl.move_pointer_to(id1, 0.0, 0.0);
     f.run();
     assert_eq!(f.connection().focused_window, Some(win2));
-    assert_eq!(f.satellite.inner.last_hovered, Some(win1));
+    assert_eq!(f.satellite.last_hovered, Some(win1));
 }
 
 #[test]
@@ -1436,7 +1435,7 @@ fn override_redirect_choose_hover_window() {
 
     f.testwl.move_pointer_to(id1, 0.0, 0.0);
     f.run();
-    assert_eq!(f.satellite.inner.last_hovered, Some(win1));
+    assert_eq!(f.satellite.last_hovered, Some(win1));
 
     let win3 = unsafe { Window::new(3) };
     let (buffer, surface) = comp.create_surface();
