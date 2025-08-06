@@ -718,7 +718,6 @@ impl Event for client::wl_keyboard::Event {
 
 impl Event for client::wl_touch::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let state = state.deref_mut();
         match self {
             Self::Down {
                 serial,
@@ -1034,7 +1033,7 @@ impl OutputEvent {
                     y,
                     state,
                 );
-                let state = state.deref_mut();
+                let global_output_offset = state.global_output_offset;
 
                 let (output, dimensions, xdg) = state
                     .world
@@ -1044,8 +1043,8 @@ impl OutputEvent {
                     .unwrap();
 
                 output.geometry(
-                    x - state.global_output_offset.x.value,
-                    y - state.global_output_offset.y.value,
+                    x - global_output_offset.x.value,
+                    y - global_output_offset.y.value,
                     physical_width,
                     physical_height,
                     convert_wenum(subpixel),
@@ -1076,7 +1075,6 @@ impl OutputEvent {
                 height,
                 refresh,
             } => {
-                let state = state.deref_mut();
                 let (output, dimensions) = state
                     .world
                     .query_one_mut::<(&WlOutput, &mut OutputDimensions)>(target)
@@ -1093,7 +1091,6 @@ impl OutputEvent {
                 output.mode(convert_wenum(flags), width, height, refresh);
             }
             Event::Scale { factor } => {
-                let state = state.deref_mut();
                 debug!(
                     "{} scale: {factor}",
                     state.world.get::<&WlOutput>(target).unwrap().id()
@@ -1109,7 +1106,6 @@ impl OutputEvent {
                 }
             }
             Event::Name { name } => {
-                let state = state.deref_mut();
                 state
                     .world
                     .get::<&WlOutput>(target)
@@ -1137,7 +1133,6 @@ impl OutputEvent {
         match event {
             Event::LogicalPosition { x, y } => {
                 update_output_offset(target, OutputDimensionsSource::Xdg, x, y, state);
-                let state = state.deref_mut();
                 state
                     .world
                     .get::<&XdgOutputServer>(target)
@@ -1148,7 +1143,6 @@ impl OutputEvent {
                     );
             }
             Event::LogicalSize { .. } => {
-                let state = state.deref_mut();
                 let (xdg, dimensions) = state
                     .world
                     .query_one_mut::<(&XdgOutputServer, &OutputDimensions)>(target)
@@ -1249,7 +1243,6 @@ impl Event for zwp_confined_pointer_v1::Event {
 
 impl Event for zwp_tablet_seat_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let state = state.deref_mut();
         let seat = state.world.get::<&TabletSeatServer>(target).unwrap();
         match self {
             Self::TabletAdded { id } => {
@@ -1292,7 +1285,6 @@ impl Event for zwp_tablet_v2::Event {
 
 impl Event for zwp_tablet_pad_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let state = state.deref_mut();
         let pad = state.world.get::<&TabletPadServer>(target).unwrap();
         let s_surf;
         match self {
@@ -1346,7 +1338,6 @@ impl Event for zwp_tablet_pad_v2::Event {
 
 impl Event for zwp_tablet_tool_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let state = state.deref_mut();
         match self {
             Self::ProximityIn {
                 serial,
@@ -1447,7 +1438,6 @@ where
 
 impl Event for zwp_tablet_pad_group_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let state = state.deref_mut();
         let group = state.world.get::<&TabletPadGroupServer>(target).unwrap();
         match self {
             Self::Buttons { buttons } => group.buttons(buttons),
@@ -1476,7 +1466,6 @@ impl Event for zwp_tablet_pad_group_v2::Event {
 
 impl Event for zwp_tablet_pad_ring_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let state = state.deref_mut();
         let ring = state.world.get::<&TabletPadRingServer>(target).unwrap();
         simple_event_shunt! {
             ring, self => [
@@ -1491,7 +1480,6 @@ impl Event for zwp_tablet_pad_ring_v2::Event {
 
 impl Event for zwp_tablet_pad_strip_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
-        let state = state.deref_mut();
         let strip = state.world.get::<&TabletPadStripServer>(target).unwrap();
         simple_event_shunt! {
             strip, self => [

@@ -629,18 +629,17 @@ impl<C: XConnection> ServerState<C> {
         }
 
         if !self.updated_outputs.is_empty() {
-            let state = self.deref_mut();
-            for output in state.updated_outputs.drain(..) {
-                let output_scale = state.world.get::<&OutputScaleFactor>(output).unwrap();
+            for output in self.updated_outputs.iter() {
+                let output_scale = self.world.get::<&OutputScaleFactor>(*output).unwrap();
                 if matches!(*output_scale, OutputScaleFactor::Output(..)) {
-                    let mut surface_query = state
+                    let mut surface_query = self
                         .world
                         .query::<(&OnOutput, &mut SurfaceScaleFactor)>()
                         .with::<(&WindowData, &WlSurface)>();
 
                     let mut surfaces = vec![];
                     for (surface, (OnOutput(s_output), surface_scale)) in surface_query.iter() {
-                        if *s_output == output {
+                        if s_output == output {
                             surface_scale.0 = output_scale.get();
                             surfaces.push(surface);
                         }
@@ -648,10 +647,11 @@ impl<C: XConnection> ServerState<C> {
 
                     drop(surface_query);
                     for surface in surfaces {
-                        update_surface_viewport(state.world.query_one(surface).unwrap());
+                        update_surface_viewport(self.world.query_one(surface).unwrap());
                     }
                 }
             }
+            self.updated_outputs.clear();
 
             let mut mixed_scale = false;
             let mut scale;
@@ -1463,7 +1463,7 @@ impl ForeignSelection {
         state: &ServerState<impl XConnection>,
     ) -> Vec<u8> {
         let mut pipe = self.inner.receive(mime_type).unwrap();
-        state.inner.queue.flush().unwrap();
+        state.queue.flush().unwrap();
         let mut data = Vec::new();
         pipe.read_to_end(&mut data).unwrap();
         data
