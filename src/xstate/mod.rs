@@ -567,7 +567,7 @@ impl XState {
         ty: x::Atom,
         len: u32,
         resolver: F,
-    ) -> PropertyCookieWrapper<F> {
+    ) -> PropertyCookieWrapper<'_, F> {
         PropertyCookieWrapper {
             connection: &self.connection,
             cookie: self.get_property_cookie(window, property, ty, len),
@@ -679,7 +679,7 @@ impl XState {
     fn get_wm_class(
         &self,
         window: x::Window,
-    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = String>> {
+    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = String>> {
         let cookie = self.get_property_cookie(window, x::ATOM_WM_CLASS, x::ATOM_STRING, 256);
         let resolver = move |reply: x::GetPropertyReply| {
             let data: &[u8] = reply.value();
@@ -708,7 +708,7 @@ impl XState {
     fn get_wm_name(
         &self,
         window: x::Window,
-    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = WmName>> {
+    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = WmName>> {
         let cookie = self.get_property_cookie(window, x::ATOM_WM_NAME, x::ATOM_STRING, 256);
         let resolver = |reply: x::GetPropertyReply| {
             let data: &[u8] = reply.value();
@@ -729,7 +729,7 @@ impl XState {
     fn get_net_wm_name(
         &self,
         window: x::Window,
-    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = WmName>> {
+    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = WmName>> {
         let cookie =
             self.get_property_cookie(window, self.atoms.net_wm_name, self.atoms.utf8_string, 256);
         let resolver = |reply: x::GetPropertyReply| {
@@ -749,7 +749,7 @@ impl XState {
     fn get_wm_hints(
         &self,
         window: x::Window,
-    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = WmHints>> {
+    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = WmHints>> {
         let cookie = self.get_property_cookie(window, x::ATOM_WM_HINTS, x::ATOM_WM_HINTS, 9);
         let resolver = |reply: x::GetPropertyReply| {
             let data: &[u32] = reply.value();
@@ -767,7 +767,7 @@ impl XState {
     fn get_wm_size_hints(
         &self,
         window: x::Window,
-    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = WmNormalHints>> {
+    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = WmNormalHints>> {
         let cookie =
             self.get_property_cookie(window, x::ATOM_WM_NORMAL_HINTS, x::ATOM_WM_SIZE_HINTS, 9);
         let resolver = |reply: x::GetPropertyReply| {
@@ -785,7 +785,7 @@ impl XState {
     fn get_motif_wm_hints(
         &self,
         window: x::Window,
-    ) -> PropertyCookieWrapper<impl PropertyResolver<Output = motif::Hints>> {
+    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = motif::Hints>> {
         let cookie = self.get_property_cookie(
             window,
             self.atoms.motif_wm_hints,
