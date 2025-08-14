@@ -5,6 +5,7 @@ use crate::server::{NoConnection, PendingSurfaceState, ServerState};
 use crate::xstate::{RealConnection, XState};
 use log::{error, info};
 use rustix::event::{poll, PollFd, PollFlags};
+use server::selection::{Clipboard, Primary};
 use smithay_client_toolkit::data_device_manager::WritePipe;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
@@ -212,8 +213,12 @@ pub fn main(mut data: impl RunData) -> Option<()> {
         server_state.run();
         display.flush_clients().unwrap();
 
-        if let Some(sel) = server_state.new_selection() {
+        if let Some(sel) = server_state.new_selection::<Clipboard>() {
             xstate.set_clipboard(sel);
+        }
+
+        if let Some(sel) = server_state.new_selection::<Primary>() {
+            xstate.set_primary_selection(sel);
         }
 
         if let Some(scale) = server_state.new_global_scale() {

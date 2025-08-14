@@ -1341,9 +1341,8 @@ impl<S: X11Selection> GlobalDispatch<WlSeat, Global> for InnerServerState<S> {
             .global_list
             .registry()
             .bind::<client::wl_seat::WlSeat, _, _>(data.name, server.version(), &state.qh, entity);
-        if let Some(c) = &mut state.clipboard_data {
-            c.device = Some(c.manager.get_data_device(&state.qh, &client));
-        }
+
+        state.selection_states.seat_created(&state.qh, &client);
         state.world.spawn_at(entity, (server, client));
     }
 }

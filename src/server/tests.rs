@@ -1,4 +1,5 @@
-use super::{InnerServerState, NoConnection, ServerState, WindowDims};
+use super::{selection::Clipboard, InnerServerState, NoConnection, ServerState, WindowDims};
+use crate::server::selection::{Primary, SelectionType};
 use crate::xstate::{SetState, WinSize, WmName};
 use crate::XConnection;
 use rustix::event::{poll, PollFd, PollFlags};
@@ -7,6 +8,7 @@ use std::io::Write;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
+use testwl::SendDataForMimeFn;
 use wayland_client::{
     backend::{protocol::Message, Backend, ObjectData, ObjectId, WaylandError},
     protocol::{
@@ -1267,8 +1269,70 @@ fn window_group_properties() {
     assert_eq!(data.toplevel().app_id, Some("class".into()));
 }
 
-#[test]
-fn copy_from_x11() {
+trait SelectionTest {
+    type SelectionType: SelectionType;
+    fn mimes(testwl: &mut testwl::Server) -> Vec<String>;
+    fn paste_data(
+        testwl: &mut testwl::Server,
+        send_data: impl SendDataForMimeFn,
+    ) -> Vec<testwl::PasteData>;
+    fn create_offer(testwl: &mut testwl::Server, data: Vec<testwl::PasteData>);
+}
+
+macro_rules! selection_tests {
+    ($name:ident, $selection_type:ty, $get_mime_fn:ident, $get_paste_data_fn:ident, $create_offer_fn:ident) => {
+        impl SelectionTest for $selection_type {
+            type SelectionType = $selection_type;
+            fn mimes(testwl: &mut testwl::Server) -> Vec<String> {
+                testwl.$get_mime_fn()
+            }
+            fn paste_data(
+                testwl: &mut testwl::Server,
+                send_data: impl SendDataForMimeFn,
+            ) -> Vec<testwl::PasteData> {
+                testwl.$get_paste_data_fn(send_data)
+            }
+            fn create_offer(testwl: &mut testwl::Server, data: Vec<testwl::PasteData>) {
+                testwl.$create_offer_fn(data);
+            }
+        }
+
+        mod $name {
+            use super::*;
+            #[test]
+            fn copy_from_x11() {
+                super::copy_from_x11::<$selection_type>();
+            }
+
+            #[test]
+            fn copy_from_wayland() {
+                super::copy_from_wayland::<$selection_type>();
+            }
+
+            #[test]
+            fn x11_then_wayland() {
+                super::selection_x11_then_wayland::<$selection_type>();
+            }
+        }
+    };
+}
+
+selection_tests!(
+    clipboard,
+    Clipboard,
+    data_source_mimes,
+    clipboard_paste_data,
+    create_data_offer
+);
+selection_tests!(
+    primary,
+    Primary,
+    primary_source_mimes,
+    primary_paste_data,
+    create_primary_offer
+);
+
+fn copy_from_x11<T: SelectionTest>() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     let win = unsafe { Window::new(1) };
     let (_surface, _id) = f.create_toplevel(&comp, win);
@@ -1284,23 +1348,22 @@ fn copy_from_x11() {
         },
     ]);
 
-    f.satellite.set_copy_paste_source(&mimes);
+    f.satellite.set_selection_source::<T::SelectionType>(&mimes);
     f.run();
 
-    let server_mimes = f.testwl.data_source_mimes();
+    let server_mimes = T::mimes(&mut f.testwl);
     for mime in mimes.iter() {
         assert!(server_mimes.contains(&mime.mime_type));
     }
 
-    let data = f.testwl.paste_data(|_, _| {
+    let data = T::paste_data(&mut f.testwl, |_, _| {
         f.satellite.run();
         true
     });
     assert_eq!(*mimes, data);
 }
 
-#[test]
-fn copy_from_wayland() {
+fn copy_from_wayland<T: SelectionTest>() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
     let win = unsafe { Window::new(1) };
@@ -1316,10 +1379,13 @@ fn copy_from_wayland() {
             data: vec![1, 2, 3, 4, 6, 10],
         },
     ];
-    f.testwl.create_data_offer(mimes.clone());
+    T::create_offer(&mut f.testwl, mimes.clone());
     f.run();
 
-    let selection = f.satellite.new_selection().expect("No new selection");
+    let selection = f
+        .satellite
+        .new_selection::<T::SelectionType>()
+        .expect("No new selection");
     for mime in &mimes {
         let data = std::thread::scope(|s| {
             // receive requires a queue flush - dispatch testwl from another thread
@@ -1341,8 +1407,7 @@ fn copy_from_wayland() {
     }
 }
 
-#[test]
-fn clipboard_x11_then_wayland() {
+fn selection_x11_then_wayland<T: SelectionTest>() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
     let win = unsafe { Window::new(1) };
@@ -1359,7 +1424,8 @@ fn clipboard_x11_then_wayland() {
         },
     ]);
 
-    f.satellite.set_copy_paste_source(&x11data);
+    f.satellite
+        .set_selection_source::<T::SelectionType>(&x11data);
     f.run();
 
     let waylanddata = vec![
@@ -1372,11 +1438,14 @@ fn clipboard_x11_then_wayland() {
             data: vec![10, 20, 40, 50],
         },
     ];
-    f.testwl.create_data_offer(waylanddata.clone());
+    T::create_offer(&mut f.testwl, waylanddata.clone());
     f.run();
     f.run();
 
-    let selection = f.satellite.new_selection().expect("No new selection");
+    let selection = f
+        .satellite
+        .new_selection::<T::SelectionType>()
+        .expect("No new selection");
     for mime in &waylanddata {
         let data = std::thread::scope(|s| {
             // receive requires a queue flush - dispatch testwl from another thread
@@ -2429,7 +2498,7 @@ fn quick_empty_data_offer() {
     f.testwl.empty_data_offer();
     f.run();
 
-    let selection = f.satellite.new_selection();
+    let selection = f.satellite.new_selection::<Clipboard>();
     assert!(selection.is_none());
 }
 

@@ -1,6 +1,7 @@
 mod clientside;
 mod dispatch;
 mod event;
+pub(crate) mod selection;
 #[cfg(test)]
 mod tests;
 
@@ -12,16 +13,10 @@ use hecs::{Entity, World};
 use log::{debug, warn};
 use rustix::event::{poll, PollFd, PollFlags};
 use smithay_client_toolkit::activation::ActivationState;
-use smithay_client_toolkit::data_device_manager::{
-    data_device::DataDevice, data_offer::SelectionOffer, data_source::CopyPasteSource,
-    DataDeviceManagerState,
-};
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
-use std::rc::{Rc, Weak};
 use wayland_client::{
     globals::{registry_queue_init, Global},
     protocol as client, Connection, EventQueue, Proxy, QueueHandle,
@@ -47,7 +42,7 @@ use wayland_protocols::{
             zwp_tablet_pad_v2, zwp_tablet_seat_v2, zwp_tablet_tool_v2, zwp_tablet_v2,
         },
         tablet::zv2::server::zwp_tablet_manager_v2::ZwpTabletManagerV2,
-        viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
+        viewporter::client::wp_viewporter::WpViewporter,
     },
     xdg::{
         shell::client::{
@@ -454,7 +449,7 @@ pub struct InnerServerState<S: X11Selection> {
     viewporter: WpViewporter,
     fractional_scale: Option<WpFractionalScaleManagerV1>,
     decoration_manager: Option<ZxdgDecorationManagerV1>,
-    clipboard_data: Option<ClipboardData<S>>,
+    selection_states: selection::SelectionStates<S>,
     last_kb_serial: Option<(client::wl_seat::WlSeat, u32)>,
     activation_state: Option<ActivationState>,
     global_output_offset: GlobalOutputOffset,
@@ -494,17 +489,6 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             .inspect_err(|e| warn!("Couldn't bind fractional scale manager: {e}. Fractional scaling will not work."))
             .ok();
 
-        let manager = DataDeviceManagerState::bind(&global_list, &qh)
-            .inspect_err(|e| {
-                warn!("Could not bind data device manager ({e:?}). Clipboard will not work.")
-            })
-            .ok();
-        let clipboard_data = manager.map(|manager| ClipboardData {
-            manager,
-            device: None,
-            source: None::<CopyPasteData<S>>,
-        });
-
         let activation_state = ActivationState::bind(&global_list, &qh)
             .inspect_err(|e| {
                 warn!("Could not bind xdg activation ({e:?}). Windows might not receive focus depending on compositor focus stealing policy.")
@@ -518,7 +502,10 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             })
             .ok();
 
+        let selection_states = selection::SelectionStates::new(&global_list, &qh);
+
         dh.create_global::<InnerServerState<S>, XwaylandShellV1, _>(1, ());
+
         global_list
             .contents()
             .with_list(|globals| handle_globals::<S>(&dh, globals));
@@ -539,7 +526,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             xdg_wm_base,
             viewporter,
             fractional_scale,
-            clipboard_data,
+            selection_states,
             last_kb_serial: None,
             activation_state,
             global_output_offset: GlobalOutputOffset {
@@ -691,7 +678,7 @@ impl<C: XConnection> ServerState<C> {
             self.unfocus = false;
         }
 
-        self.handle_clipboard_events();
+        self.handle_selection_events();
         self.handle_activations();
         self.queue
             .flush()
@@ -1113,76 +1100,8 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    pub(crate) fn set_copy_paste_source(&mut self, selection: &Rc<S>) {
-        if let Some(d) = &mut self.clipboard_data {
-            let src = d
-                .manager
-                .create_copy_paste_source(&self.qh, selection.mime_types());
-            let data = CopyPasteData::X11 {
-                inner: src,
-                data: Rc::downgrade(selection),
-            };
-            let CopyPasteData::X11 { inner, .. } = d.source.insert(data) else {
-                unreachable!();
-            };
-            if let Some(serial) = self
-                .last_kb_serial
-                .as_ref()
-                .map(|(_seat, serial)| serial)
-                .copied()
-            {
-                inner.set_selection(d.device.as_ref().unwrap(), serial);
-            }
-        }
-    }
-
     pub fn new_global_scale(&mut self) -> Option<f64> {
         self.new_scale.take()
-    }
-
-    pub fn new_selection(&mut self) -> Option<ForeignSelection> {
-        self.clipboard_data.as_mut().and_then(|c| {
-            c.source.take().and_then(|s| match s {
-                CopyPasteData::Foreign(f) => Some(f),
-                CopyPasteData::X11 { .. } => {
-                    c.source = Some(s);
-                    None
-                }
-            })
-        })
-    }
-
-    fn handle_clipboard_events(&mut self) {
-        if let Some(clipboard) = self.clipboard_data.as_mut() {
-            for (mime_type, fd) in std::mem::take(&mut self.world.selection_requests) {
-                let CopyPasteData::X11 { data, .. } = clipboard.source.as_ref().unwrap() else {
-                    unreachable!("Got selection request without having set the selection?")
-                };
-                if let Some(data) = data.upgrade() {
-                    data.write_to(&mime_type, fd);
-                }
-            }
-
-            if self.world.selection_cancelled {
-                clipboard.source = None;
-                self.world.selection_cancelled = false;
-            }
-
-            if clipboard.source.is_none() {
-                if let Some(offer) = self.world.selection_offer.take() {
-                    if offer.inner().is_alive() {
-                        let mime_types: Box<[String]> = offer.with_mime_types(|mimes| mimes.into());
-                        let foreign = ForeignSelection {
-                            mime_types,
-                            inner: offer,
-                        };
-                        clipboard.source = Some(CopyPasteData::Foreign(foreign));
-                    } else {
-                        clipboard.source = None;
-                    }
-                }
-            }
-        }
     }
 
     fn handle_activations(&mut self) {
@@ -1443,43 +1362,4 @@ pub struct PendingSurfaceState {
     pub y: i32,
     pub width: i32,
     pub height: i32,
-}
-
-struct ClipboardData<X: X11Selection> {
-    manager: DataDeviceManagerState,
-    device: Option<DataDevice>,
-    source: Option<CopyPasteData<X>>,
-}
-
-pub struct ForeignSelection {
-    pub mime_types: Box<[String]>,
-    inner: SelectionOffer,
-}
-
-impl ForeignSelection {
-    pub(crate) fn receive(
-        &self,
-        mime_type: String,
-        state: &ServerState<impl XConnection>,
-    ) -> Vec<u8> {
-        let mut pipe = self.inner.receive(mime_type).unwrap();
-        state.queue.flush().unwrap();
-        let mut data = Vec::new();
-        pipe.read_to_end(&mut data).unwrap();
-        data
-    }
-}
-
-impl Drop for ForeignSelection {
-    fn drop(&mut self) {
-        self.inner.destroy();
-    }
-}
-
-enum CopyPasteData<X: X11Selection> {
-    X11 {
-        inner: CopyPasteSource,
-        data: Weak<X>,
-    },
-    Foreign(ForeignSelection),
 }

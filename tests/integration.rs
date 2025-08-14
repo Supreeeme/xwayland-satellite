@@ -1004,7 +1004,7 @@ fn copy_from_x11() {
         );
     }
 
-    let data = f.testwl.paste_data(|mime, _| {
+    let data = f.testwl.clipboard_paste_data(|mime, _| {
         let request = connection.await_selection_request();
         let data = mimes_truth
             .iter()
@@ -1201,7 +1201,7 @@ fn bad_clipboard_data() {
     connection.send_selection_notify(&request);
 
     f.wait_and_dispatch();
-    let mut data = f.testwl.paste_data(|_, _| {
+    let mut data = f.testwl.clipboard_paste_data(|_, _| {
         let request = connection.await_selection_request();
         assert_eq!(request.target(), connection.atoms.mime2);
         // Don't actually set any data as requested - just report success
@@ -1388,7 +1388,7 @@ fn incr_copy_from_x11() {
         .take(3000)
         .collect();
     let mut it = data.chunks(500).enumerate();
-    let mut paste_data = f.testwl.paste_data(|_, testwl| {
+    let mut paste_data = f.testwl.clipboard_paste_data(|_, testwl| {
         if let Some(begin) = begin_incr.take() {
             destination_property = begin(&mut connection);
             testwl.dispatch();

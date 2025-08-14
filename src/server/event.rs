@@ -32,6 +32,7 @@ use wayland_protocols::{
                 zwp_tablet_v2::ZwpTabletV2 as TabletServer,
             },
         },
+        viewporter::client::wp_viewport::WpViewport,
     },
     xdg::{
         shell::client::{xdg_popup, xdg_surface, xdg_toplevel},

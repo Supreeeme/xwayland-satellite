@@ -1,7 +1,7 @@
 mod settings;
 use settings::Settings;
 mod selection;
-use selection::{Selection, SelectionData};
+use selection::{Selection, SelectionState};
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
 
 use crate::XConnection;
@@ -117,7 +117,7 @@ pub struct XState {
     window_atoms: WindowTypes,
     root: x::Window,
     wm_window: x::Window,
-    selection_data: SelectionData,
+    selection_state: SelectionState,
     settings: Settings,
 }
 
@@ -201,6 +201,15 @@ impl XState {
                     | SelectionEventMask::SELECTION_CLIENT_CLOSE,
             })
             .unwrap();
+        connection
+            .send_and_check_request(&xcb::xfixes::SelectSelectionInput {
+                window: root,
+                selection: atoms.primary,
+                event_mask: SelectionEventMask::SET_SELECTION_OWNER
+                    | SelectionEventMask::SELECTION_WINDOW_DESTROY
+                    | SelectionEventMask::SELECTION_CLIENT_CLOSE,
+            })
+            .unwrap();
         {
             // Setup default cursor theme
             let ctx = CursorContext::new(&connection, screen).unwrap();
@@ -214,7 +223,7 @@ impl XState {
         }
 
         let wm_window = connection.generate_id();
-        let selection_data = SelectionData::new(&connection, root);
+        let selection_state = SelectionState::new(&connection, root, &atoms);
         let window_atoms = WindowTypes::intern_all(&connection).unwrap();
         let settings = Settings::new(&connection, &atoms, root);
 
@@ -224,7 +233,7 @@ impl XState {
             root,
             atoms,
             window_atoms,
-            selection_data,
+            selection_state,
             settings,
         };
         r.create_ewmh_window();
@@ -917,6 +926,7 @@ xcb::atoms_struct! {
         incr => b"INCR" only_if_exists = false,
         xsettings => b"_XSETTINGS_S0" only_if_exists = false,
         xsettings_settings => b"_XSETTINGS_SETTINGS" only_if_exists = false,
+        primary => b"PRIMARY" only_if_exists = false,
     }
 }
 

@@ -7,7 +7,12 @@ use smithay_client_toolkit::{
         data_offer::{DataOfferHandler, SelectionOffer},
         data_source::DataSourceHandler,
     },
-    delegate_activation, delegate_data_device,
+    delegate_activation, delegate_data_device, delegate_primary_selection,
+    primary_selection::{
+        device::{PrimarySelectionDeviceData, PrimarySelectionDeviceHandler},
+        offer::PrimarySelectionOffer,
+        selection::PrimarySelectionSourceHandler,
+    },
 };
 use std::sync::{mpsc, Mutex, OnceLock};
 use wayland_client::protocol::{
@@ -41,6 +46,11 @@ use wayland_protocols::{
             zwp_locked_pointer_v1::ZwpLockedPointerV1,
             zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
         },
+        primary_selection::zv1::client::{
+            zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1,
+            zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1,
+            zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1,
+        },
         tablet::zv2::client::{
             zwp_tablet_manager_v2::ZwpTabletManagerV2,
             zwp_tablet_pad_group_v2::{ZwpTabletPadGroupV2, EVT_RING_OPCODE, EVT_STRIP_OPCODE},
@@ -73,18 +83,33 @@ use wayland_server::protocol as server;
 use wl_drm::client::wl_drm::WlDrm;
 use xcb::x;
 
+pub(super) struct SelectionEvents<T> {
+    pub offer: Option<T>,
+    pub requests: Vec<(
+        String,
+        smithay_client_toolkit::data_device_manager::WritePipe,
+    )>,
+    pub cancelled: bool,
+}
+
+impl<T> Default for SelectionEvents<T> {
+    fn default() -> Self {
+        Self {
+            offer: None,
+            requests: Default::default(),
+            cancelled: false,
+        }
+    }
+}
+
 pub(super) struct MyWorld {
     pub world: World,
     pub global_list: GlobalList,
     pub new_globals: Vec<Global>,
     events: Vec<(Entity, ObjectEvent)>,
     queued_events: Vec<mpsc::Receiver<(Entity, ObjectEvent)>>,
-    pub selection_offer: Option<SelectionOffer>,
-    pub selection_requests: Vec<(
-        String,
-        smithay_client_toolkit::data_device_manager::WritePipe,
-    )>,
-    pub selection_cancelled: bool,
+    pub clipboard: SelectionEvents<SelectionOffer>,
+    pub primary: SelectionEvents<PrimarySelectionOffer>,
     pub pending_activations: Vec<(xcb::x::Window, String)>,
 }
 
@@ -96,9 +121,8 @@ impl MyWorld {
             new_globals: Vec::new(),
             events: Vec::new(),
             queued_events: Vec::new(),
-            selection_offer: None,
-            selection_requests: Vec::new(),
-            selection_cancelled: false,
+            clipboard: Default::default(),
+            primary: Default::default(),
             pending_activations: Vec::new(),
         }
     }
@@ -156,6 +180,7 @@ delegate_noop!(MyWorld: XdgActivationV1);
 delegate_noop!(MyWorld: ZxdgDecorationManagerV1);
 delegate_noop!(MyWorld: WpFractionalScaleManagerV1);
 delegate_noop!(MyWorld: ignore ZxdgToplevelDecorationV1);
+delegate_noop!(MyWorld: ZwpPrimarySelectionDeviceManagerV1);
 
 impl Dispatch<WlRegistry, GlobalListContents> for MyWorld {
     fn event(
@@ -387,7 +412,7 @@ impl DataDeviceHandler for MyWorld {
         data_device: &wayland_client::protocol::wl_data_device::WlDataDevice,
     ) {
         let data: &DataDeviceData = data_device.data().unwrap();
-        self.selection_offer = data.selection_offer();
+        self.clipboard.offer = data.selection_offer();
     }
 
     fn drop_performed(
@@ -437,7 +462,7 @@ impl DataSourceHandler for MyWorld {
         mime: String,
         fd: smithay_client_toolkit::data_device_manager::WritePipe,
     ) {
-        self.selection_requests.push((mime, fd));
+        self.clipboard.requests.push((mime, fd));
     }
 
     fn cancelled(
@@ -446,7 +471,7 @@ impl DataSourceHandler for MyWorld {
         _: &wayland_client::QueueHandle<Self>,
         _: &wayland_client::protocol::wl_data_source::WlDataSource,
     ) {
-        self.selection_cancelled = true;
+        self.clipboard.cancelled = true;
     }
 
     fn action(
@@ -536,5 +561,44 @@ impl ActivationHandler for MyWorld {
 
     fn new_token(&mut self, token: String, data: &Self::RequestData) {
         self.pending_activations.push((data.window, token));
+    }
+}
+
+delegate_primary_selection!(MyWorld);
+
+impl PrimarySelectionDeviceHandler for MyWorld {
+    fn selection(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        primary_selection_device: &ZwpPrimarySelectionDeviceV1,
+    ) {
+        let Some(data) = primary_selection_device.data::<PrimarySelectionDeviceData>() else {
+            return;
+        };
+
+        self.primary.offer = data.selection_offer();
+    }
+}
+
+impl PrimarySelectionSourceHandler for MyWorld {
+    fn send_request(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpPrimarySelectionSourceV1,
+        mime: String,
+        write_pipe: smithay_client_toolkit::data_device_manager::WritePipe,
+    ) {
+        self.primary.requests.push((mime, write_pipe));
+    }
+
+    fn cancelled(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &ZwpPrimarySelectionSourceV1,
+    ) {
+        self.primary.cancelled = true;
     }
 }
