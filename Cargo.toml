@@ -11,10 +11,14 @@ rustix = "0.38.31"
 [workspace.lints.clippy]
 all = "deny"
 
+[workspace.package]
+rust-version = "1.83.0"
+
 [package]
 name = "xwayland-satellite"
 version = "0.6.0"
 edition = "2021"
+rust-version.workspace = true
 
 [lints]
 workspace = true
@@ -51,3 +55,9 @@ testwl = { path = "testwl" }
 [build-dependencies]
 anyhow = "1.0.98"
 vergen-gitcl = "1.0.8"
+
+[profile.ci]
+inherits = "dev"
+# Shrink bloat in ./target which negatively affects build caching
+incremental = false
+debug = false
