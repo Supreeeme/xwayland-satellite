@@ -9,7 +9,7 @@ use bitflags::bitflags;
 use log::{debug, trace, warn};
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::BorrowedFd;
 use std::rc::Rc;
 use xcb::{x, Xid, XidNew};
 use xcb_util_cursor::{Cursor, CursorContext};
@@ -124,8 +124,8 @@ pub struct XState {
 impl XState {
     pub fn new(fd: BorrowedFd) -> Self {
         let connection = Rc::new(
-            xcb::Connection::connect_to_fd_with_extensions(
-                fd.as_raw_fd(),
+            xcb::Connection::connect_with_fd_and_extensions(
+                BorrowedFd::try_clone_to_owned(&fd).unwrap(),
                 None,
                 &[
                     xcb::Extension::Composite,

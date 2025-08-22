@@ -28,7 +28,7 @@ rustix = { workspace = true, features = ["event"] }
 wayland-client.workspace = true
 wayland-protocols = { workspace = true, features = ["client", "server", "staging", "unstable"] }
 wayland-server.workspace = true
-xcb = { version = "1.3.0", features = ["composite", "randr", "res"] }
+xcb = { version = "1.6.0", features = ["composite", "randr", "res"] }
 wl_drm = { path = "wl_drm" }
 log = "0.4.21"
 env_logger = "0.11.3"
