@@ -131,7 +131,7 @@ impl Fixture {
         // wait for connection
         let fd = unsafe { BorrowedFd::borrow_raw(testwl.poll_fd().as_raw_fd()) };
         let pollfd = PollFd::from_borrowed_fd(fd, PollFlags::IN);
-        assert!(poll(&mut [pollfd.clone()], -1).unwrap() > 0);
+        assert!(poll(&mut [pollfd.clone()], 1000).unwrap() > 0);
         testwl.dispatch();
 
         let try_bool_timeout = |b: &AtomicBool| {
