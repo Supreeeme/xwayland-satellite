@@ -35,7 +35,6 @@ wayland-server.workspace = true
 xcb = { version = "1.6.0", features = ["composite", "randr", "res"] }
 wl_drm = { path = "wl_drm" }
 log = "0.4.21"
-env_logger = "0.11.3"
 pretty_env_logger = "0.5.0"
 xcb-util-cursor = "0.3.2"
 smithay-client-toolkit = { version = "0.19.1", default-features = false }

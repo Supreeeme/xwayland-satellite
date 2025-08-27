@@ -345,7 +345,7 @@ impl Default for SetupOptions<()> {
 impl EarlyTestFixture {
     fn new_early_with_options<F: PreConnectFn>(options: SetupOptions<F>) -> Self {
         INIT.call_once(|| {
-            env_logger::builder()
+            pretty_env_logger::env_logger::builder()
                 .is_test(true)
                 .filter_level(log::LevelFilter::Trace)
                 .init()
