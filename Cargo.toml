@@ -1,5 +1,5 @@
 [workspace]
-members = ["macros", "testwl"]
+members = ["macros", "testwl", "wl_drm"]
 
 [workspace.dependencies]
 wayland-client = "0.31.2"
@@ -12,7 +12,7 @@ rustix = "0.38.31"
 all = "deny"
 
 [workspace.package]
-rust-version = "1.87.0"
+rust-version = "1.83.0"
 
 [package]
 name = "xwayland-satellite"
