@@ -1,6 +1,7 @@
 use std::collections::{hash_map, HashMap, HashSet};
-use std::io::Read;
-use std::io::{PipeWriter, Write};
+#[rustversion::since(1.87)]
+use std::io::PipeWriter;
+use std::io::{Read, Write};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -908,6 +909,33 @@ pub struct PasteData {
     pub data: Vec<u8>,
 }
 
+#[rustversion::since(1.87)]
+pub struct TransferFd(PipeWriter);
+#[rustversion::since(1.87)]
+impl From<OwnedFd> for TransferFd {
+    fn from(value: OwnedFd) -> Self {
+        Self(PipeWriter::from(value))
+    }
+}
+
+#[rustversion::before(1.87)]
+pub struct TransferFd(UnixStream);
+#[rustversion::before(1.87)]
+impl From<OwnedFd> for TransferFd {
+    fn from(value: OwnedFd) -> Self {
+        Self(UnixStream::from(value))
+    }
+}
+
+impl Write for TransferFd {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
 simple_global_dispatch!(WlShm);
 simple_global_dispatch!(WlCompositor);
 simple_global_dispatch!(XdgWmBase);
@@ -1134,8 +1162,7 @@ impl Dispatch<ZwpPrimarySelectionOfferV1, Vec<PasteData>> for State {
                     .position(|data| data.mime_type == mime_type)
                     .unwrap_or_else(|| panic!("Invalid mime type: {mime_type}"));
 
-                let mut stream = PipeWriter::from(fd);
-                stream.write_all(&data[pos].data).unwrap();
+                TransferFd::from(fd).write_all(&data[pos].data).unwrap();
             }
             Request::Destroy => {}
             other => todo!("{other:?}"),
@@ -1219,8 +1246,7 @@ impl Dispatch<WlDataOffer, Vec<PasteData>> for State {
                     .position(|data| data.mime_type == mime_type)
                     .unwrap_or_else(|| panic!("Invalid mime type: {mime_type}"));
 
-                let mut stream = PipeWriter::from(fd);
-                stream.write_all(&data[pos].data).unwrap();
+                TransferFd::from(fd).write_all(&data[pos].data).unwrap();
             }
             wl_data_offer::Request::Destroy => {}
             other => todo!("unhandled request: {other:?}"),

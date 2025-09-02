@@ -11,3 +11,4 @@ wayland-protocols = { workspace = true, features = ["server", "staging", "unstab
 wayland-server.workspace = true
 wl_drm = { path = "../wl_drm" }
 rustix = { workspace = true, features = ["pipe"] }
+rustversion = "1.0.22"
