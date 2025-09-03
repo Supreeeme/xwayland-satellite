@@ -380,6 +380,12 @@ impl XState {
                 }
                 xcb::Event::X(x::Event::MapRequest(e)) => {
                     debug!("requested to map {:?}", e.window());
+                    unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
+                        &x::ConfigureWindow {
+                            window: e.window(),
+                            value_list: &[x::ConfigWindow::StackMode(x::StackMode::Below)]
+                        }
+                    ));
                     unwrap_or_skip_bad_window_cont!(self
                         .connection
                         .send_and_check_request(&x::MapWindow { window: e.window() }));
