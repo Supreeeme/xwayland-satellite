@@ -16,6 +16,10 @@ Need help troubleshooting, or have some other general question? [Ask on GitHub D
 Run `xwayland-satellite`. You can specify an X display to use (i.e. `:12`). Be sure to set the same `DISPLAY` environment variable for any X11 clients.
 Because xwayland-satellite is a Wayland client (in addition to being a Wayland compositor), it will need to launch after your compositor launches, but obviously before any X11 applications.
 
+## Java applications
+Some (most?) Java applications may present themselves as a blank screen by default with satellite. To fix this, simply set the environment variable
+`_JAVA_AWT_WM_NONREPARENTING=1` before launching it to fix this. Unfortunately there is not a way for satellite to automatically do this.
+
 ## Building
 ```
 # dev build
