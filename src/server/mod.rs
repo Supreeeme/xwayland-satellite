@@ -1091,6 +1091,31 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         );
     }
 
+    pub fn move_window(&mut self, window: x::Window) {
+        let Some(data) = self
+            .windows
+            .get(&window)
+            .copied()
+            .and_then(|e| self.world.entity(e).ok())
+        else {
+            warn!("Requested move of unknown window {window:?}");
+            return;
+        };
+
+        let Some(last_click_data) = data.get::<&LastClickSerial>() else {
+            warn!("Requested move of window {window:?} but we don't have a click serial for it");
+            return;
+        };
+
+        let role = data.get::<&SurfaceRole>();
+        let Some(SurfaceRole::Toplevel(Some(data))) = role.as_deref() else {
+            warn!("Requested move of non toplevel {window:?} ({role:?})");
+            return;
+        };
+
+        data.toplevel._move(&last_click_data.0, last_click_data.1);
+    }
+
     pub fn destroy_window(&mut self, window: x::Window) {
         if let Some(id) = self.windows.remove(&window) {
             self.world.remove::<(x::Window, WindowData)>(id).unwrap();

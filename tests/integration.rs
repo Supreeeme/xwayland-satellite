@@ -14,11 +14,11 @@ use std::time::{Duration, Instant};
 use wayland_protocols::xdg::{
     decoration::zv1::server::zxdg_toplevel_decoration_v1, shell::server::xdg_toplevel,
 };
-use wayland_server::protocol::wl_output;
+use wayland_server::protocol::{wl_output, wl_pointer};
 use wayland_server::Resource;
 use xcb::{x, Xid};
 use xwayland_satellite as xwls;
-use xwayland_satellite::xstate::{WmSizeHintsFlags, WmState};
+use xwayland_satellite::xstate::{MoveResizeDirection, WmSizeHintsFlags, WmState};
 
 #[derive(Default)]
 struct TestDataInner {
@@ -329,6 +329,7 @@ xcb::atoms_struct! {
         incr => b"INCR",
         xsettings => b"_XSETTINGS_S0",
         xsettings_setting => b"_XSETTINGS_SETTINGS",
+        moveresize => b"_NET_WM_MOVERESIZE",
     }
 }
 
@@ -2023,4 +2024,32 @@ fn rotated_output() {
         }
         other => panic!("unexpected event {other:?}"),
     }
+}
+
+const BTN_LEFT: u32 = 0x110;
+
+#[test]
+fn client_init_move() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let win_toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, win_toplevel);
+    f.testwl.move_pointer_to(surface, 10., 10.);
+    let ptr = f.testwl.pointer();
+    ptr.motion(10, 10.0, 10.0);
+    ptr.frame();
+    ptr.button(10, 20, BTN_LEFT, wl_pointer::ButtonState::Pressed);
+    ptr.frame();
+    f.testwl.dispatch();
+
+    connection.send_client_message(&x::ClientMessageEvent::new(
+        win_toplevel,
+        connection.atoms.moveresize,
+        x::ClientMessageData::Data32([0, 0, MoveResizeDirection::Move.into(), 1, 0]),
+    ));
+
+    f.wait_and_dispatch();
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert!(data.moving);
 }

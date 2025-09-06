@@ -509,6 +509,28 @@ impl XState {
                     x if x == self.atoms.active_win => {
                         server_state.activate_window(e.window());
                     }
+                    x if x == self.atoms.moveresize => {
+                        let x::ClientMessageData::Data32(data) = e.data() else {
+                            unreachable!();
+                        };
+
+                        let (_x_root, _y_root) = (data[0], data[1]);
+                        let Ok(direction) = MoveResizeDirection::try_from(data[2]) else {
+                            warn!("unknown direction for _NET_WM_MOVERESIZE: {}", data[2]);
+                            continue;
+                        };
+                        let button = data[3];
+                        // XXX: This can technically be driven by keyboard events and other mouse buttons as well,
+                        // but I haven't found an application that does this yet. We'll cross that bridge when we get to it.
+                        if button != 1 {
+                            warn!("Attempted move/resize of {:?} with non left click button ({button})", e.window());
+                            continue;
+                        }
+
+                        if matches!(direction, MoveResizeDirection::Move) {
+                            server_state.move_window(e.window());
+                        }
+                    }
                     t => warn!("unrecognized message: {t:?}"),
                 },
                 xcb::Event::X(x::Event::MappingNotify(_)) => {}
@@ -933,6 +955,7 @@ xcb::atoms_struct! {
         xsettings => b"_XSETTINGS_S0" only_if_exists = false,
         xsettings_settings => b"_XSETTINGS_SETTINGS" only_if_exists = false,
         primary => b"PRIMARY" only_if_exists = false,
+        moveresize => b"_NET_WM_MOVERESIZE" only_if_exists = false,
     }
 }
 
@@ -1076,22 +1099,11 @@ mod motif {
         }
     }
 
-    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    #[derive(Debug, PartialEq, Eq, Clone, Copy, num_enum::TryFromPrimitive)]
+    #[repr(u32)]
     pub enum Decorations {
         Client = 0,
         Server = 1,
-    }
-
-    impl TryFrom<u32> for Decorations {
-        type Error = ();
-
-        fn try_from(value: u32) -> Result<Self, ()> {
-            match value {
-                0 => Ok(Self::Client),
-                1 => Ok(Self::Server),
-                _ => Err(()),
-            }
-        }
     }
 
     impl From<Decorations> for zxdg_toplevel_decoration_v1::Mode {
@@ -1104,42 +1116,37 @@ mod motif {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, num_enum::TryFromPrimitive)]
+#[repr(u32)]
 pub enum SetState {
     Remove,
     Add,
     Toggle,
 }
 
-impl TryFrom<u32> for SetState {
-    type Error = ();
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::Remove),
-            1 => Ok(Self::Add),
-            2 => Ok(Self::Toggle),
-            _ => Err(()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive)]
+#[repr(u32)]
 pub enum WmState {
     Withdrawn = 0,
     Normal = 1,
     Iconic = 3,
 }
 
-impl TryFrom<u32> for WmState {
-    type Error = ();
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::Withdrawn),
-            1 => Ok(Self::Normal),
-            3 => Ok(Self::Iconic),
-            _ => Err(()),
-        }
-    }
+#[derive(Debug, Copy, Clone, num_enum::TryFromPrimitive, num_enum::IntoPrimitive)]
+#[repr(u32)]
+pub enum MoveResizeDirection {
+    SizeTopLeft,
+    SizeTop,
+    SizeTopRight,
+    SizeRight,
+    SizeBottomRight,
+    SizeBottom,
+    SizeBottomLeft,
+    SizeLeft,
+    Move,
+    SizeKeyboard,
+    MoveKeyboard,
+    Cancel,
 }
 
 pub struct RealConnection {

@@ -110,6 +110,7 @@ pub struct SurfaceData {
     pub last_enter_serial: Option<u32>,
     pub fractional: Option<WpFractionalScaleV1>,
     pub viewport: Option<Viewport>,
+    pub moving: bool,
 }
 
 impl SurfaceData {
@@ -1541,6 +1542,10 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                 };
                 toplevel.parent = parent;
             }
+            xdg_toplevel::Request::Move { seat: _, serial: _ } => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                data.moving = true;
+            }
             other => todo!("unhandled request {other:?}"),
         }
     }
@@ -1862,6 +1867,7 @@ impl Dispatch<WlCompositor, ()> for State {
                         last_enter_serial: None,
                         fractional: None,
                         viewport: None,
+                        moving: false,
                     },
                 );
                 state.last_surface_id = Some(SurfaceId(id));

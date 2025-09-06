@@ -435,6 +435,8 @@ impl Event for client::wl_seat::Event {
 }
 
 struct PendingEnter(client::wl_pointer::Event);
+struct CurrentSurface(Entity);
+pub struct LastClickSerial(pub client::wl_seat::WlSeat, pub u32);
 
 impl Event for client::wl_pointer::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
@@ -459,7 +461,8 @@ impl Event for client::wl_pointer::Event {
                 let mut cmd = CommandBuffer::new();
                 let pending_enter = state.world.remove_one::<PendingEnter>(target).ok();
                 let server = state.world.get::<&WlPointer>(target).unwrap();
-                let mut query = surface.data().copied().and_then(|e| {
+                let surface_entity = surface.data().copied();
+                let mut query = surface_entity.and_then(|e| {
                     state
                         .world
                         .query_one::<(&WlSurface, &SurfaceRole, &SurfaceScaleFactor, &x::Window)>(e)
@@ -481,6 +484,7 @@ impl Event for client::wl_pointer::Event {
                     if !surface_is_popup {
                         state.last_hovered = Some(*window);
                     }
+                    cmd.insert(target, (CurrentSurface(surface_entity.unwrap()),));
                 };
 
                 if !surface_is_popup {
@@ -512,11 +516,11 @@ impl Event for client::wl_pointer::Event {
             }
             client::wl_pointer::Event::Leave { serial, surface } => {
                 let _ = state.world.remove_one::<PendingEnter>(target);
+                let _ = state.world.remove_one::<CurrentSurface>(target);
                 if !surface.is_alive() {
                     return;
                 }
                 debug!("leaving surface ({serial})");
-                let _ = state.world.remove_one::<PendingEnter>(target);
                 if let Some(surface) = surface
                     .data()
                     .copied()
@@ -584,17 +588,39 @@ impl Event for client::wl_pointer::Event {
                     }
                 }
             }
+            client::wl_pointer::Event::Button {
+                serial,
+                time,
+                button,
+                state: button_state,
+            } => {
+                let mut cmd = CommandBuffer::new();
+                let (server, seat, CurrentSurface(surface)) = state
+                    .world
+                    .query_one_mut::<(&WlPointer, &client::wl_seat::WlSeat, &CurrentSurface)>(
+                        target,
+                    )
+                    .unwrap();
+
+                // from linux/input-event-codes.h
+                mod button_codes {
+                    pub const LEFT: u32 = 0x110;
+                }
+
+                if button_state == WEnum::Value(client::wl_pointer::ButtonState::Pressed)
+                    && button == button_codes::LEFT
+                {
+                    cmd.insert(*surface, (LastClickSerial(seat.clone(), serial),));
+                }
+
+                server.button(serial, time, button, convert_wenum(button_state));
+                cmd.run_on(&mut state.world);
+            }
             _ => {
                 let server = state.world.get::<&WlPointer>(target).unwrap();
                 simple_event_shunt! {
                     server, self => [
                         Frame,
-                        Button {
-                            serial,
-                            time,
-                            button,
-                            |state| convert_wenum(state)
-                        },
                         Axis {
                             time,
                             |axis| convert_wenum(axis),

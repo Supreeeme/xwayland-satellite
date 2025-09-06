@@ -350,11 +350,6 @@ impl<S: X11Selection> Dispatch<WlPointer, Entity> for InnerServerState<S> {
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        let c_pointer = state
-            .world
-            .get::<&client::wl_pointer::WlPointer>(*entity)
-            .unwrap();
-
         match request {
             Request::<WlPointer>::SetCursor {
                 serial,
@@ -362,6 +357,11 @@ impl<S: X11Selection> Dispatch<WlPointer, Entity> for InnerServerState<S> {
                 hotspot_y,
                 surface,
             } => {
+                let c_pointer = state
+                    .world
+                    .get::<&client::wl_pointer::WlPointer>(*entity)
+                    .unwrap();
+
                 let c_surface = surface.and_then(|s| {
                     let e = s.data().copied()?;
                     Some(
@@ -374,9 +374,11 @@ impl<S: X11Selection> Dispatch<WlPointer, Entity> for InnerServerState<S> {
                 c_pointer.set_cursor(serial, c_surface.as_deref(), hotspot_x, hotspot_y);
             }
             Request::<WlPointer>::Release => {
-                c_pointer.release();
-                drop(c_pointer);
-                let _ = state.world.despawn(*entity);
+                let (client, _) = state
+                    .world
+                    .remove::<(client::wl_pointer::WlPointer, WlPointer)>(*entity)
+                    .unwrap();
+                client.release();
             }
             _ => warn!("unhandled cursor request: {request:?}"),
         }
@@ -395,12 +397,11 @@ impl<S: X11Selection> Dispatch<WlKeyboard, Entity> for InnerServerState<S> {
     ) {
         match request {
             Request::<WlKeyboard>::Release => {
-                state
+                let (client, _) = state
                     .world
-                    .get::<&client::wl_keyboard::WlKeyboard>(*entity)
-                    .unwrap()
-                    .release();
-                state.world.despawn(*entity).unwrap();
+                    .remove::<(client::wl_keyboard::WlKeyboard, WlKeyboard)>(*entity)
+                    .unwrap();
+                client.release();
             }
             _ => unreachable!(),
         }
@@ -443,16 +444,15 @@ impl<S: X11Selection> Dispatch<WlSeat, Entity> for InnerServerState<S> {
     ) {
         match request {
             Request::<WlSeat>::GetPointer { id } => {
-                let new_entity = state.world.reserve_entity();
                 let client = {
                     state
                         .world
                         .get::<&client::wl_seat::WlSeat>(*entity)
                         .unwrap()
-                        .get_pointer(&state.qh, new_entity)
+                        .get_pointer(&state.qh, *entity)
                 };
-                let server = data_init.init(id, new_entity);
-                state.world.spawn_at(new_entity, (client, server));
+                let server = data_init.init(id, *entity);
+                state.world.insert(*entity, (client, server)).unwrap();
             }
             Request::<WlSeat>::GetKeyboard { id } => {
                 let client = {
