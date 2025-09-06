@@ -6,7 +6,7 @@ pub(crate) mod selection;
 mod tests;
 
 use self::event::*;
-use crate::xstate::{Decorations, WindowDims, WmHints, WmName, WmNormalHints};
+use crate::xstate::{Decorations, MoveResizeDirection, WindowDims, WmHints, WmName, WmNormalHints};
 use crate::{X11Selection, XConnection};
 use clientside::MyWorld;
 use hecs::{Entity, World};
@@ -49,7 +49,7 @@ use wayland_protocols::{
             xdg_popup::XdgPopup,
             xdg_positioner::{Anchor, Gravity, XdgPositioner},
             xdg_surface::XdgSurface,
-            xdg_toplevel::XdgToplevel,
+            xdg_toplevel::{self, XdgToplevel},
             xdg_wm_base::XdgWmBase,
         },
         xdg_output::zv1::server::zxdg_output_manager_v1::ZxdgOutputManagerV1,
@@ -1114,6 +1114,47 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         };
 
         data.toplevel._move(&last_click_data.0, last_click_data.1);
+    }
+
+    pub fn resize_window(&mut self, window: x::Window, direction: MoveResizeDirection) {
+        let Some(data) = self
+            .windows
+            .get(&window)
+            .copied()
+            .and_then(|e| self.world.entity(e).ok())
+        else {
+            warn!("Requested resize of unknown window {window:?}");
+            return;
+        };
+
+        let Some(last_click_data) = data.get::<&LastClickSerial>() else {
+            warn!("Requested resize of window {window:?} but we don't have a click serial for it");
+            return;
+        };
+
+        let role = data.get::<&SurfaceRole>();
+        let Some(SurfaceRole::Toplevel(Some(data))) = role.as_deref() else {
+            warn!("Requested resize of non toplevel {window:?} ({role:?})");
+            return;
+        };
+
+        let edge = match direction {
+            MoveResizeDirection::SizeTopLeft => xdg_toplevel::ResizeEdge::TopLeft,
+            MoveResizeDirection::SizeTop => xdg_toplevel::ResizeEdge::Top,
+            MoveResizeDirection::SizeTopRight => xdg_toplevel::ResizeEdge::TopRight,
+            MoveResizeDirection::SizeRight => xdg_toplevel::ResizeEdge::Right,
+            MoveResizeDirection::SizeBottomRight => xdg_toplevel::ResizeEdge::BottomRight,
+            MoveResizeDirection::SizeBottom => xdg_toplevel::ResizeEdge::Bottom,
+            MoveResizeDirection::SizeBottomLeft => xdg_toplevel::ResizeEdge::BottomLeft,
+            MoveResizeDirection::SizeLeft => xdg_toplevel::ResizeEdge::Left,
+            MoveResizeDirection::MoveKeyboard
+            | MoveResizeDirection::SizeKeyboard
+            | MoveResizeDirection::Move
+            | MoveResizeDirection::Cancel => unreachable!(),
+        };
+
+        data.toplevel
+            .resize(&last_click_data.0, last_click_data.1, edge);
     }
 
     pub fn destroy_window(&mut self, window: x::Window) {
