@@ -1373,34 +1373,37 @@ impl Event for zwp_tablet_tool_v2::Event {
             } => {
                 let mut cmd = CommandBuffer::new();
                 {
+                    let connection = &mut state.connection;
+                    let world = &mut state.inner.world;
+
                     let Some(mut query) = surface.data().copied().and_then(|key| {
-                        state
-                            .world
-                            .query_one::<(&WlSurface, &SurfaceScaleFactor)>(key)
+                        world
+                            .query_one::<(&WlSurface, &SurfaceScaleFactor, &x::Window)>(key)
                             .ok()
                     }) else {
                         warn!("tablet tool proximity_in failed: stale surface");
                         return;
                     };
-                    let (surface, scale) = query.get().unwrap();
+                    let (surface, scale, window) = query.get().unwrap();
                     cmd.insert(target, (*scale,));
 
                     let Some(s_tablet) =
                         tablet
                             .data()
                             .and_then(|key: &LateInitObjectKey<TabletClient>| {
-                                state.world.get::<&TabletServer>(key.get()).ok()
+                                world.get::<&TabletServer>(key.get()).ok()
                             })
                     else {
                         warn!("tablet tool proximity_in failed: stale tablet");
                         return;
                     };
 
-                    state
-                        .world
+                    world
                         .get::<&TabletToolServer>(target)
                         .unwrap()
                         .proximity_in(serial, &s_tablet, surface);
+
+                    connection.raise_to_top(*window);
                 }
                 cmd.run_on(&mut state.world);
             }
