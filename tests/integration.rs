@@ -1520,12 +1520,7 @@ fn incr_copy_from_x11() {
         let request = connection.await_selection_request();
         assert_eq!(request.target(), connection.atoms.mime1);
 
-        connection
-            .send_and_check_request(&x::ChangeWindowAttributes {
-                window: request.requestor(),
-                value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
-            })
-            .unwrap();
+        connection.get_property_change_events(request.requestor());
         connection.set_property(
             request.requestor(),
             connection.atoms.incr,
@@ -1534,10 +1529,7 @@ fn incr_copy_from_x11() {
         );
         connection.send_selection_notify(&request);
         // skip NewValue
-        let notify = match connection.poll_for_event().unwrap() {
-            Some(xcb::Event::X(x::Event::PropertyNotify(p))) => p,
-            other => panic!("Didn't get property notify event, instead got {other:?}"),
-        };
+        let notify = connection.await_property_notify();
         assert_eq!(notify.atom(), request.property());
         assert_eq!(notify.state(), x::Property::NewValue);
         request.property()
@@ -1555,11 +1547,7 @@ fn incr_copy_from_x11() {
         }
         assert_ne!(destination_property, x::Atom::none());
 
-        let notify = match connection.await_event() {
-            xcb::Event::X(x::Event::PropertyNotify(p)) => p,
-            other => panic!("Didn't get property notify event, instead got {other:?}"),
-        };
-
+        let notify = connection.await_property_notify();
         match it.next() {
             Some((idx, chunk)) => {
                 assert_eq!(notify.atom(), destination_property, "chunk {idx}");
@@ -1572,10 +1560,7 @@ fn incr_copy_from_x11() {
                 );
                 testwl.dispatch();
                 // skip NewValue
-                let notify = match connection.poll_for_event().unwrap() {
-                    Some(xcb::Event::X(x::Event::PropertyNotify(p))) => p,
-                    other => panic!("Didn't get property notify event, instead got {other:?}"),
-                };
+                let notify = connection.await_property_notify();
                 assert_eq!(notify.atom(), destination_property, "chunk {idx}");
                 assert_eq!(notify.state(), x::Property::NewValue, "chunk {idx}");
                 false

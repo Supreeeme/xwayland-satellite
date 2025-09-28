@@ -250,10 +250,8 @@ trait SelectionDataImpl {
         atoms: &super::Atoms,
         request: &x::SelectionRequestEvent,
         max_req_bytes: usize,
-        success: &dyn Fn(),
-        refuse: &dyn Fn(),
         server_state: &mut RealServerState,
-    );
+    ) -> bool;
     fn atom(&self) -> x::Atom;
 }
 
@@ -418,10 +416,8 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
         atoms: &super::Atoms,
         request: &x::SelectionRequestEvent,
         max_req_bytes: usize,
-        success: &dyn Fn(),
-        refuse: &dyn Fn(),
         server_state: &mut RealServerState,
-    ) {
+    ) -> bool {
         let Some(CurrentSelection::Wayland(WaylandSelection {
             mimes,
             inner,
@@ -429,88 +425,84 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
         })) = &mut self.current_selection
         else {
             warn!("Got selection request, but we don't seem to be the selection owner");
-            refuse();
-            return;
+            return false;
         };
 
-        match request.target() {
-            x if x == atoms.targets => {
-                let atoms: Box<[x::Atom]> = mimes.iter().map(|t| t.atom).collect();
+        let req_target = request.target();
+        if req_target == atoms.targets {
+            let atoms: Box<[x::Atom]> = mimes.iter().map(|t| t.atom).collect();
 
-                connection
-                    .send_and_check_request(&x::ChangeProperty {
-                        mode: x::PropMode::Replace,
-                        window: request.requestor(),
-                        property: request.property(),
-                        r#type: x::ATOM_ATOM,
-                        data: &atoms,
-                    })
-                    .unwrap();
+            connection
+                .send_and_check_request(&x::ChangeProperty {
+                    mode: x::PropMode::Replace,
+                    window: request.requestor(),
+                    property: request.property(),
+                    r#type: x::ATOM_ATOM,
+                    data: &atoms,
+                })
+                .unwrap();
 
-                success();
-            }
-            other => {
-                let Some(target) = mimes.iter().find(|t| t.atom == other) else {
-                    if log::log_enabled!(log::Level::Debug) {
-                        let name = get_atom_name(connection, other);
-                        debug!("refusing selection request because given atom could not be found ({name})");
-                    }
-                    refuse();
-                    return;
-                };
-
-                let mime_name = target
-                    .source
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_else(|| target.name.clone());
-                let data = inner.receive(mime_name, server_state);
-                if data.len() > max_req_bytes {
-                    if let Err(e) = connection.send_and_check_request(&x::ChangeWindowAttributes {
-                        window: request.requestor(),
-                        value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
-                    }) {
-                        warn!("Failed to set up property change notifications: {e:?}");
-                        refuse();
-                        return;
-                    }
-                    if let Err(e) = connection.send_and_check_request(&x::ChangeProperty {
-                        mode: x::PropMode::Replace,
-                        window: request.requestor(),
-                        property: request.property(),
-                        r#type: atoms.incr,
-                        data: &[data.len() as u32],
-                    }) {
-                        warn!("Failed to set incr property for large transfer: {e:?}");
-                        refuse();
-                        return;
-                    }
+            true
+        } else {
+            let Some(target) = mimes.iter().find(|t| t.atom == req_target) else {
+                if log::log_enabled!(log::Level::Debug) {
+                    let name = get_atom_name(connection, req_target);
                     debug!(
-                        "beginning incr for {}",
-                        get_atom_name(connection, target.atom)
+                        "refusing selection request because given atom could not be found ({name})"
                     );
-                    *incr_data = Some(WaylandIncrInfo {
-                        range: 0..data.len(),
-                        data,
-                        target_window: request.requestor(),
-                        property: request.property(),
-                        target_type: target.atom,
-                        max_req_bytes,
-                    });
-                    success()
-                } else {
-                    match connection.send_and_check_request(&x::ChangeProperty {
-                        mode: x::PropMode::Replace,
-                        window: request.requestor(),
-                        property: request.property(),
-                        r#type: target.atom,
-                        data: &data,
-                    }) {
-                        Ok(_) => success(),
-                        Err(e) => {
-                            warn!("Failed setting selection property: {e:?}");
-                            refuse();
-                        }
+                }
+                return false;
+            };
+
+            let mime_name = target
+                .source
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| target.name.clone());
+            let data = inner.receive(mime_name, server_state);
+            if data.len() > max_req_bytes {
+                if let Err(e) = connection.send_and_check_request(&x::ChangeWindowAttributes {
+                    window: request.requestor(),
+                    value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
+                }) {
+                    warn!("Failed to set up property change notifications: {e:?}");
+                    return false;
+                }
+                if let Err(e) = connection.send_and_check_request(&x::ChangeProperty {
+                    mode: x::PropMode::Replace,
+                    window: request.requestor(),
+                    property: request.property(),
+                    r#type: atoms.incr,
+                    data: &[data.len() as u32],
+                }) {
+                    warn!("Failed to set incr property for large transfer: {e:?}");
+                    return false;
+                }
+                debug!(
+                    "beginning incr for {}",
+                    get_atom_name(connection, target.atom)
+                );
+                *incr_data = Some(WaylandIncrInfo {
+                    range: 0..data.len(),
+                    data,
+                    target_window: request.requestor(),
+                    property: request.property(),
+                    target_type: target.atom,
+                    max_req_bytes,
+                });
+                true
+            } else {
+                match connection.send_and_check_request(&x::ChangeProperty {
+                    mode: x::PropMode::Replace,
+                    window: request.requestor(),
+                    property: request.property(),
+                    r#type: target.atom,
+                    data: &data,
+                }) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        warn!("Failed setting selection property: {e:?}");
+                        false
                     }
                 }
             }
@@ -665,7 +657,7 @@ impl XState {
         self.selection_state
             .primary
             .set_owner(&self.connection, self.wm_window);
-        debug!("Primaryset from Wayland");
+        debug!("Primary set from Wayland");
     }
 
     pub(super) fn handle_selection_event(
@@ -771,15 +763,17 @@ impl XState {
                     return true;
                 }
 
-                data.handle_selection_request(
+                if data.handle_selection_request(
                     &self.connection,
                     &self.atoms,
                     e,
                     self.max_req_bytes,
-                    &success,
-                    &refuse,
                     server_state,
-                );
+                ) {
+                    success()
+                } else {
+                    refuse()
+                }
             }
 
             xcb::Event::XFixes(xcb::xfixes::Event::SelectionNotify(e)) => match e.selection() {
