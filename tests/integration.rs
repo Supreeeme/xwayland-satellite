@@ -82,6 +82,10 @@ impl xwls::RunData for TestData {
         assert!(server.is_some());
         server.take()
     }
+
+    fn max_req_len_bytes(&self) -> Option<usize> {
+        Some(500)
+    }
 }
 
 struct Fixture {
@@ -547,6 +551,23 @@ impl Connection {
                 request.target(),
                 request.property(),
             ),
+        })
+        .unwrap();
+    }
+
+    #[track_caller]
+    fn await_property_notify(&mut self) -> x::PropertyNotifyEvent {
+        match self.await_event() {
+            xcb::Event::X(x::Event::PropertyNotify(r)) => r,
+            other => panic!("Didn't get property notify event, instead got {other:?}"),
+        }
+    }
+
+    #[track_caller]
+    fn get_property_change_events(&self, window: x::Window) {
+        self.send_and_check_request(&x::ChangeWindowAttributes {
+            window,
+            value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
         })
         .unwrap();
     }
@@ -1163,17 +1184,14 @@ fn copy_from_wayland() {
 
 #[test]
 fn incr_copy_from_wayland() {
-    // After a little binary searching, the test passes on less than 16,777,184 bytes, fails due to
-    // a failed assert on matching `dest1_atom` starting at 16,777,185 bytes, and starts crashing
-    // instead at 16,777,189 bytes.
-    const BYTES: usize = 16_777_189;
+    const BYTES: usize = 3000;
     let mut f = Fixture::new();
     let mut connection = Connection::new(&f.display);
 
     let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
     connection.get_selection_owner_change_events(true, window);
     f.map_as_toplevel(&mut connection, window);
-    let offer = vec![testwl::PasteData {
+    let mut offer = vec![testwl::PasteData {
         mime_type: "text/plain".into(),
         data: std::iter::successors(Some(0u8), |n| Some(n.wrapping_add(1)))
             .take(BYTES)
@@ -1219,49 +1237,70 @@ fn incr_copy_from_wayland() {
     let targets: &[x::Atom] = reply.value();
     assert_eq!(targets.len(), 1);
 
-    for testwl::PasteData { mime_type, data } in offer {
-        let atom = connection
-            .get_reply(&x::InternAtom {
-                only_if_exists: true,
-                name: mime_type.as_bytes(),
-            })
-            .atom();
-        assert_ne!(atom, x::ATOM_NONE);
-        assert!(targets.contains(&atom));
+    let offer_data = offer.pop().unwrap();
+    let (mime_type, data) = (offer_data.mime_type, offer_data.data);
+    let atom = connection
+        .get_reply(&x::InternAtom {
+            only_if_exists: true,
+            name: mime_type.as_bytes(),
+        })
+        .atom();
+    assert_ne!(atom, x::ATOM_NONE);
+    assert!(targets.contains(&atom));
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        connection
-            .send_and_check_request(&x::ConvertSelection {
-                requestor: window,
-                selection: connection.atoms.clipboard,
-                target: atom,
-                property: dest1_atom,
-                time: x::CURRENT_TIME,
-            })
-            .unwrap();
+    connection
+        .send_and_check_request(&x::ConvertSelection {
+            requestor: window,
+            selection: connection.atoms.clipboard,
+            target: atom,
+            property: dest1_atom,
+            time: x::CURRENT_TIME,
+        })
+        .unwrap();
 
-        f.wait_and_dispatch();
-        let request = connection.await_selection_notify();
-        assert_eq!(request.requestor(), window);
-        assert_eq!(request.selection(), connection.atoms.clipboard);
-        assert_eq!(request.target(), atom);
-        // The particular assert which fails in the narrow byte range as mentioned above.
-        assert_eq!(request.property(), dest1_atom);
+    f.wait_and_dispatch();
+    let request = connection.await_selection_notify();
+    assert_eq!(request.requestor(), window);
+    assert_eq!(request.selection(), connection.atoms.clipboard);
+    assert_eq!(request.target(), atom);
+    assert_eq!(request.property(), dest1_atom);
 
-        let val: Vec<u8> = connection
-            .get_reply(&x::GetProperty {
-                delete: true,
-                window,
-                property: dest1_atom,
-                r#type: x::ATOM_ANY,
-                long_offset: 0,
-                long_length: (BYTES / 4 + BYTES % 4) as u32,
-            })
-            .value()
-            .to_vec();
+    connection.get_property_change_events(window);
+    let reply = connection.get_reply(&x::GetProperty {
+        delete: true,
+        window,
+        property: dest1_atom,
+        r#type: x::ATOM_ANY,
+        long_offset: 0,
+        long_length: (BYTES / 4 + BYTES % 4) as u32,
+    });
+    assert_eq!(reply.r#type(), connection.atoms.incr);
+    assert_eq!(reply.value::<u32>().len(), 1);
+    assert!(reply.value::<u32>()[0] <= data.len() as u32);
 
-        assert_eq!(val.len(), data.len());
-        assert_eq!(val, data);
+    let delete_property = connection.await_property_notify();
+    assert_eq!(delete_property.state(), x::Property::Delete);
+    assert_eq!(delete_property.atom(), dest1_atom);
+
+    for (idx, chunk) in data.chunks(500).chain([]).enumerate() {
+        let new_property = connection.await_property_notify();
+        assert_eq!(new_property.state(), x::Property::NewValue, "chunk {idx}");
+        assert_eq!(new_property.atom(), dest1_atom, "chunk {idx}");
+
+        let incr_reply = connection.get_reply(&x::GetProperty {
+            delete: true,
+            window,
+            property: dest1_atom,
+            r#type: x::ATOM_ANY,
+            long_offset: 0,
+            long_length: (BYTES / 4 + BYTES % 4) as u32,
+        });
+        assert_eq!(incr_reply.r#type(), atom, "chunk {idx}");
+        assert_eq!(incr_reply.value::<u8>(), chunk, "chunk {idx}");
+
+        let delete_property = connection.await_property_notify();
+        assert_eq!(delete_property.state(), x::Property::Delete, "chunk {idx}");
+        assert_eq!(delete_property.atom(), dest1_atom, "chunk {idx}");
     }
 }
 
