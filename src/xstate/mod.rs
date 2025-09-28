@@ -119,6 +119,7 @@ pub struct XState {
     wm_window: x::Window,
     selection_state: SelectionState,
     settings: Settings,
+    max_req_bytes: usize,
 }
 
 impl XState {
@@ -226,6 +227,9 @@ impl XState {
         let selection_state = SelectionState::new(&connection, root, &atoms);
         let window_atoms = WindowTypes::intern_all(&connection).unwrap();
         let settings = Settings::new(&connection, &atoms, root);
+        // maximum-request-length is returned in units of 4 bytes.
+        // Additionally, requests use 32 bytes of metadata which cannot store arbitrary data
+        let max_req_bytes = (connection.get_maximum_request_length() * 4 - 32) as usize;
 
         let mut r = Self {
             connection,
@@ -235,10 +239,19 @@ impl XState {
             window_atoms,
             selection_state,
             settings,
+            max_req_bytes,
         };
         r.create_ewmh_window();
         r.set_xsettings_owner();
         r
+    }
+
+    pub(super) fn set_max_req_bytes(&mut self, max_req_bytes: usize) {
+        // `max_req_bytes` is initialized to the largest possible value before transfer problems
+        // would begin to occur. This function is called once during initialization only in
+        // integration tests, so this overly simple check is fine.
+        assert!(self.max_req_bytes >= max_req_bytes);
+        self.max_req_bytes = max_req_bytes;
     }
 
     pub fn server_state_setup(
@@ -883,9 +896,12 @@ impl XState {
         event: x::PropertyNotifyEvent,
         server_state: &mut super::RealServerState,
     ) {
-        if event.state() != x::Property::NewValue {
+        if self.handle_selection_property_change(&event) {
+            return;
+        }
+        if event.state() == x::Property::Delete {
             debug!(
-                "ignoring non newvalue for property {:?}",
+                "ignoring delete for property {:?}",
                 get_atom_name(&self.connection, event.atom())
             );
             return;
@@ -929,9 +945,7 @@ impl XState {
                 }
             }
             _ => {
-                if !self.handle_selection_property_change(&event)
-                    && log::log_enabled!(log::Level::Debug)
-                {
+                if log::log_enabled!(log::Level::Debug) {
                     debug!(
                         "changed property {:?} for {:?}",
                         get_atom_name(&self.connection, event.atom()),
