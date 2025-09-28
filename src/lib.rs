@@ -45,6 +45,9 @@ pub trait RunData {
         None
     }
     fn xwayland_ready(&self, _display: String, _pid: u32) {}
+    fn max_req_len_bytes(&self) -> Option<usize> {
+        None
+    }
 }
 
 pub const fn timespec_from_millis(millis: u64) -> Timespec {
@@ -186,6 +189,10 @@ pub fn main(mut data: impl RunData) -> Option<()> {
     }
 
     let mut xstate = XState::new(xsock_wl.as_fd());
+    if let Some(bytes) = data.max_req_len_bytes() {
+        xstate.set_max_req_bytes(bytes);
+    }
+
     let mut reader = BufReader::new(&ready_rx);
     {
         let mut display = String::new();
