@@ -669,48 +669,38 @@ impl Server {
         };
 
         let mut ret = Vec::new();
-        let mut try_transfer =
-            |pending_ret: &mut PendingRet, mime: String, mut pending: PendingData| {
-                self.display.flush_clients().unwrap();
-                let transfer_complete = send_data_for_mime(&mime, self);
-                if transfer_complete {
-                    pending.rx.read_to_end(&mut pending.data).unwrap();
-                    ret.push(PasteData {
-                        mime_type: mime,
-                        data: pending.data,
-                    });
-                } else {
-                    loop {
-                        match pending.rx.read(&mut pending.data) {
-                            Ok(0) => break,
-                            Ok(_) => {}
-                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                            Err(e) => panic!("Failed reading data for mime {mime}: {e:?}"),
-                        }
-                    }
-                    pending_ret.push((mime, Some(pending)));
-                    self.dispatch();
-                }
-            };
-
         while let Some((mime, pending)) = pending_ret.pop() {
-            match pending {
-                Some(pending) => try_transfer(&mut pending_ret, mime, pending),
-                None => {
-                    let (rx, tx) = rustix::pipe::pipe().unwrap();
-                    send_selection(mime.clone(), tx.as_fd());
-                    drop(tx);
+            let mut pending = pending.unwrap_or_else(|| {
+                let (rx, tx) = rustix::pipe::pipe().unwrap();
+                send_selection(mime.clone(), tx.as_fd());
+                drop(tx);
 
-                    let rx = std::fs::File::from(rx);
-                    try_transfer(
-                        &mut pending_ret,
-                        mime,
-                        PendingData {
-                            rx,
-                            data: Vec::new(),
-                        },
-                    );
+                let rx = std::fs::File::from(rx);
+                PendingData {
+                    rx,
+                    data: Vec::new(),
                 }
+            });
+
+            self.display.flush_clients().unwrap();
+            let transfer_complete = send_data_for_mime(&mime, self);
+            if transfer_complete {
+                pending.rx.read_to_end(&mut pending.data).unwrap();
+                ret.push(PasteData {
+                    mime_type: mime,
+                    data: pending.data,
+                });
+            } else {
+                loop {
+                    match pending.rx.read(&mut pending.data) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(e) => panic!("Failed reading data for mime {mime}: {e:?}"),
+                    }
+                }
+                pending_ret.push((mime, Some(pending)));
+                self.dispatch();
             }
         }
 
