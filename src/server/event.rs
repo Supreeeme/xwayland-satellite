@@ -392,12 +392,23 @@ pub(super) fn update_surface_viewport(
     }
     debug!("{} viewport: {width}x{height}", surface.id());
     if let Some(hints) = size_hints {
-        let Some(SurfaceRole::Toplevel(Some(data))) = &role else {
-            warn!(
-                "Trying to update size hints on {}, but toplevel role data is missing",
-                surface.id()
-            );
-            return;
+        let data = match &role {
+            Some(SurfaceRole::Toplevel(Some(data))) => data,
+            Some(SurfaceRole::Toplevel(None)) => {
+                warn!(
+                    "Trying to update size hints on {}, but toplevel role data is missing",
+                    surface.id()
+                );
+                return;
+            }
+            Some(SurfaceRole::Popup(_)) => {
+                // Popups don't have min/max size hints.
+                return;
+            }
+            None => {
+                warn!("No role set on {}.", surface.id());
+                return;
+            }
         };
 
         if let Some(min) = hints.min_size {
