@@ -119,7 +119,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
         unsafe { Box::from_raw(data as *mut _) }
     }
 
-    let connection = match poll(&mut ready_fds, -1) {
+    let connection = match poll(&mut ready_fds, None) {
         Ok(_) => {
             if !ready_fds[1].revents().is_empty() {
                 let status = xwayland_exit_code(&mut finish_rx);
@@ -156,7 +156,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
     ];
 
     loop {
-        match poll(&mut fds, -1) {
+        match poll(&mut fds, None) {
             Ok(_) => {
                 if !fds[3].revents().is_empty() {
                     let status = xwayland_exit_code(&mut quit_rx);
@@ -219,7 +219,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
             xstate.update_global_scale(scale);
         }
 
-        match poll(&mut fds, -1) {
+        match poll(&mut fds, None) {
             Ok(_) => {
                 if !fds[3].revents().is_empty() {
                     let status = xwayland_exit_code(&mut quit_rx);
