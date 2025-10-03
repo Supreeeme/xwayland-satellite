@@ -164,7 +164,7 @@ impl Selection {
 
 pub struct WaylandIncrInfo {
     data: Vec<u8>,
-    range: std::ops::Range<usize>,
+    start: usize,
     property: x::Atom,
     target_window: x::Window,
     target_type: x::Atom,
@@ -180,23 +180,24 @@ pub struct WaylandSelection<T: SelectionType> {
 impl<T: SelectionType> WaylandSelection<T> {
     fn check_for_incr(&mut self, connection: &xcb::Connection) -> Option<bool> {
         let incr_data = self.incr_data.as_mut()?;
-        let range_start = incr_data.range.start;
-        let range_len = std::cmp::min(incr_data.max_req_bytes, incr_data.range.end - range_start);
+        let incr_end = std::cmp::min(
+            incr_data.max_req_bytes + incr_data.start,
+            incr_data.data.len(),
+        );
 
         if let Err(e) = connection.send_and_check_request(&x::ChangeProperty {
             mode: x::PropMode::Append,
             window: incr_data.target_window,
             property: incr_data.property,
             r#type: incr_data.target_type,
-            data: &incr_data.data[range_start..][..range_len],
+            data: &incr_data.data[incr_data.start..incr_end],
         }) {
             warn!("failed to write selection data: {e:?}");
             self.incr_data = None;
             return Some(true);
         }
 
-        incr_data.range.start += range_len;
-        if range_len == 0 {
+        if incr_data.start == incr_end {
             debug!(
                 "completed incr for mime {}",
                 get_atom_name(connection, incr_data.target_type)
@@ -207,6 +208,7 @@ impl<T: SelectionType> WaylandSelection<T> {
                 "received some incr data for {}",
                 get_atom_name(connection, incr_data.target_type)
             );
+            incr_data.start = incr_end;
         }
         Some(true)
     }
@@ -483,8 +485,8 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
                     get_atom_name(connection, target.atom)
                 );
                 *incr_data = Some(WaylandIncrInfo {
-                    range: 0..data.len(),
                     data,
+                    start: 0,
                     target_window: request.requestor(),
                     property: request.property(),
                     target_type: target.atom,
