@@ -81,6 +81,10 @@ impl xwls::RunData for TestData {
         assert!(server.is_some());
         server.take()
     }
+
+    fn max_req_len_bytes(&self) -> Option<usize> {
+        Some(500)
+    }
 }
 
 struct Fixture {
@@ -98,12 +102,22 @@ impl Drop for Fixture {
         // Sending anything to the quit receiver to stop the main loop. Then we guarantee a main
         // thread does not use file descriptors which outlive the Fixture's BorrowedFd
         let return_ptr = Box::into_raw(Box::new(0_usize)) as usize;
-        self.quit_tx.write_all(&return_ptr.to_ne_bytes()).unwrap();
+        // If the receiver end of the pipe closed, the main thread dropped it, which means that
+        // thread already terminated
+        if self
+            .quit_tx
+            .write_all(&return_ptr.to_ne_bytes())
+            .is_err_and(|e| e.kind() != std::io::ErrorKind::BrokenPipe)
+        {
+            panic!("could not message the main thread to terminate");
+        }
         if thread.join().is_err() {
             log::error!("main thread panicked");
         }
-        rustix::process::kill_process(self.pid, Signal::Term).unwrap();
-        rustix::process::waitpid(Some(self.pid), WaitOptions::NOHANG).unwrap();
+        if rustix::process::test_kill_process(self.pid).is_ok() {
+            rustix::process::kill_process(self.pid, Signal::Term).unwrap();
+            rustix::process::waitpid(Some(self.pid), WaitOptions::NOHANG).unwrap();
+        }
     }
 }
 
@@ -532,6 +546,23 @@ impl Connection {
                 request.target(),
                 request.property(),
             ),
+        })
+        .unwrap();
+    }
+
+    #[track_caller]
+    fn await_property_notify(&mut self) -> x::PropertyNotifyEvent {
+        match self.await_event() {
+            xcb::Event::X(x::Event::PropertyNotify(r)) => r,
+            other => panic!("Didn't get property notify event, instead got {other:?}"),
+        }
+    }
+
+    #[track_caller]
+    fn get_property_change_events(&self, window: x::Window) {
+        self.send_and_check_request(&x::ChangeWindowAttributes {
+            window,
+            value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
         })
         .unwrap();
     }
@@ -1146,6 +1177,128 @@ fn copy_from_wayland() {
     }
 }
 
+#[test]
+fn incr_copy_from_wayland() {
+    const BYTES: usize = 3000;
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    connection.get_selection_owner_change_events(true, window);
+    f.map_as_toplevel(&mut connection, window);
+    let mut offer = vec![testwl::PasteData {
+        mime_type: "text/plain".into(),
+        data: std::iter::successors(Some(0u8), |n| Some(n.wrapping_add(1)))
+            .take(BYTES)
+            .collect(),
+    }];
+
+    f.testwl.create_data_offer(offer.clone());
+    connection.await_selection_owner_change();
+    connection.verify_clipboard_owner(connection.wm_window);
+    connection.get_selection_owner_change_events(false, window);
+
+    let dest1_atom = connection
+        .get_reply(&x::InternAtom {
+            name: b"dest1",
+            only_if_exists: false,
+        })
+        .atom();
+
+    connection
+        .send_and_check_request(&x::ConvertSelection {
+            requestor: window,
+            selection: connection.atoms.clipboard,
+            target: connection.atoms.targets,
+            property: dest1_atom,
+            time: x::CURRENT_TIME,
+        })
+        .unwrap();
+
+    let request = connection.await_selection_notify();
+    assert_eq!(request.requestor(), window);
+    assert_eq!(request.selection(), connection.atoms.clipboard);
+    assert_eq!(request.target(), connection.atoms.targets);
+    assert_eq!(request.property(), dest1_atom);
+
+    let reply = connection.get_reply(&x::GetProperty {
+        delete: true,
+        window,
+        property: dest1_atom,
+        r#type: x::ATOM_ATOM,
+        long_offset: 0,
+        long_length: 10,
+    });
+    let targets: &[x::Atom] = reply.value();
+    assert_eq!(targets.len(), 1);
+
+    let offer_data = offer.pop().unwrap();
+    let (mime_type, data) = (offer_data.mime_type, offer_data.data);
+    let atom = connection
+        .get_reply(&x::InternAtom {
+            only_if_exists: true,
+            name: mime_type.as_bytes(),
+        })
+        .atom();
+    assert_ne!(atom, x::ATOM_NONE);
+    assert!(targets.contains(&atom));
+
+    connection
+        .send_and_check_request(&x::ConvertSelection {
+            requestor: window,
+            selection: connection.atoms.clipboard,
+            target: atom,
+            property: dest1_atom,
+            time: x::CURRENT_TIME,
+        })
+        .unwrap();
+
+    f.wait_and_dispatch();
+    let request = connection.await_selection_notify();
+    assert_eq!(request.requestor(), window);
+    assert_eq!(request.selection(), connection.atoms.clipboard);
+    assert_eq!(request.target(), atom);
+    assert_eq!(request.property(), dest1_atom);
+
+    connection.get_property_change_events(window);
+    let reply = connection.get_reply(&x::GetProperty {
+        delete: true,
+        window,
+        property: dest1_atom,
+        r#type: x::ATOM_ANY,
+        long_offset: 0,
+        long_length: (BYTES / 4 + BYTES % 4) as u32,
+    });
+    assert_eq!(reply.r#type(), connection.atoms.incr);
+    assert_eq!(reply.value::<u32>().len(), 1);
+    assert!(reply.value::<u32>()[0] <= data.len() as u32);
+
+    let delete_property = connection.await_property_notify();
+    assert_eq!(delete_property.state(), x::Property::Delete);
+    assert_eq!(delete_property.atom(), dest1_atom);
+
+    for (idx, chunk) in data.chunks(500).chain([]).enumerate() {
+        let new_property = connection.await_property_notify();
+        assert_eq!(new_property.state(), x::Property::NewValue, "chunk {idx}");
+        assert_eq!(new_property.atom(), dest1_atom, "chunk {idx}");
+
+        let incr_reply = connection.get_reply(&x::GetProperty {
+            delete: true,
+            window,
+            property: dest1_atom,
+            r#type: x::ATOM_ANY,
+            long_offset: 0,
+            long_length: (BYTES / 4 + BYTES % 4) as u32,
+        });
+        assert_eq!(incr_reply.r#type(), atom, "chunk {idx}");
+        assert_eq!(incr_reply.value::<u8>(), chunk, "chunk {idx}");
+
+        let delete_property = connection.await_property_notify();
+        assert_eq!(delete_property.state(), x::Property::Delete, "chunk {idx}");
+        assert_eq!(delete_property.atom(), dest1_atom, "chunk {idx}");
+    }
+}
+
 // TODO: this test doesn't actually match real behavior for some reason...
 #[test]
 fn different_output_position() {
@@ -1362,12 +1515,7 @@ fn incr_copy_from_x11() {
         let request = connection.await_selection_request();
         assert_eq!(request.target(), connection.atoms.mime1);
 
-        connection
-            .send_and_check_request(&x::ChangeWindowAttributes {
-                window: request.requestor(),
-                value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
-            })
-            .unwrap();
+        connection.get_property_change_events(request.requestor());
         connection.set_property(
             request.requestor(),
             connection.atoms.incr,
@@ -1376,10 +1524,7 @@ fn incr_copy_from_x11() {
         );
         connection.send_selection_notify(&request);
         // skip NewValue
-        let notify = match connection.poll_for_event().unwrap() {
-            Some(xcb::Event::X(x::Event::PropertyNotify(p))) => p,
-            other => panic!("Didn't get property notify event, instead got {other:?}"),
-        };
+        let notify = connection.await_property_notify();
         assert_eq!(notify.atom(), request.property());
         assert_eq!(notify.state(), x::Property::NewValue);
         request.property()
@@ -1397,11 +1542,7 @@ fn incr_copy_from_x11() {
         }
         assert_ne!(destination_property, x::Atom::none());
 
-        let notify = match connection.await_event() {
-            xcb::Event::X(x::Event::PropertyNotify(p)) => p,
-            other => panic!("Didn't get property notify event, instead got {other:?}"),
-        };
-
+        let notify = connection.await_property_notify();
         match it.next() {
             Some((idx, chunk)) => {
                 assert_eq!(notify.atom(), destination_property, "chunk {idx}");
@@ -1414,10 +1555,7 @@ fn incr_copy_from_x11() {
                 );
                 testwl.dispatch();
                 // skip NewValue
-                let notify = match connection.poll_for_event().unwrap() {
-                    Some(xcb::Event::X(x::Event::PropertyNotify(p))) => p,
-                    other => panic!("Didn't get property notify event, instead got {other:?}"),
-                };
+                let notify = connection.await_property_notify();
                 assert_eq!(notify.atom(), destination_property, "chunk {idx}");
                 assert_eq!(notify.state(), x::Property::NewValue, "chunk {idx}");
                 false
