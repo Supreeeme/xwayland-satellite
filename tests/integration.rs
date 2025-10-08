@@ -1,4 +1,4 @@
-use rustix::event::{poll, PollFd, PollFlags, Timespec};
+use rustix::event::{poll, PollFd, PollFlags};
 use rustix::process::{Pid, Signal, WaitOptions};
 use std::collections::HashMap;
 use std::io::Write;
@@ -19,6 +19,7 @@ use wayland_server::Resource;
 use xcb::{x, Xid};
 use xwayland_satellite as xwls;
 use xwayland_satellite::xstate::{MoveResizeDirection, WmSizeHintsFlags, WmState};
+use xwls::timespec_from_millis;
 
 #[derive(Default)]
 struct TestDataInner {
@@ -131,11 +132,8 @@ impl Fixture {
         // wait for connection
         let fd = unsafe { BorrowedFd::borrow_raw(testwl.poll_fd().as_raw_fd()) };
         let pollfd = PollFd::from_borrowed_fd(fd, PollFlags::IN);
-        let timeout = Some(&Timespec {
-            tv_sec: 1,
-            tv_nsec: 0,
-        });
-        assert!(poll(&mut [pollfd.clone()], timeout).unwrap() > 0);
+        let timeout = timespec_from_millis(1000);
+        assert!(poll(&mut [pollfd.clone()], Some(&timeout)).unwrap() > 0);
         testwl.dispatch();
 
         let try_bool_timeout = |b: &AtomicBool| {
@@ -163,11 +161,8 @@ impl Fixture {
 
         let mut ready = our_data.display.lock().unwrap().is_some();
         while !ready && start.elapsed() < Duration::from_millis(2000) {
-            let timeout = Some(&Timespec {
-                tv_sec: 0,
-                tv_nsec: 100_000_000,
-            });
-            let n = poll(&mut f, timeout).unwrap();
+            let timeout = timespec_from_millis(100);
+            let n = poll(&mut f, Some(&timeout)).unwrap();
             if n > 0 {
                 testwl.dispatch();
             }
@@ -195,18 +190,15 @@ impl Fixture {
     fn wait_and_dispatch(&mut self) {
         let mut pollfd = [self.pollfd.clone()];
         self.testwl.dispatch();
-        let timeout = Some(&Timespec {
-            tv_sec: 0,
-            tv_nsec: 50_000_000,
-        });
+        let timeout = timespec_from_millis(50);
         assert!(
-            poll(&mut pollfd, timeout).unwrap() > 0,
+            poll(&mut pollfd, Some(&timeout)).unwrap() > 0,
             "Did not receive any events"
         );
         self.pollfd.clear_revents();
         self.testwl.dispatch();
 
-        while poll(&mut pollfd, timeout).unwrap() > 0 {
+        while poll(&mut pollfd, Some(&timeout)).unwrap() > 0 {
             self.testwl.dispatch();
             self.pollfd.clear_revents();
         }
@@ -479,12 +471,9 @@ impl Connection {
         if let Some(event) = self.poll_for_event().expect("Failed to poll for event") {
             return event;
         }
-        let timeout = Some(&Timespec {
-            tv_sec: 0,
-            tv_nsec: 100_000_000,
-        });
+        let timeout = timespec_from_millis(100);
         assert!(
-            poll(&mut [self.pollfd.clone()], timeout).expect("poll failed") > 0,
+            poll(&mut [self.pollfd.clone()], Some(&timeout)).expect("poll failed") > 0,
             "Did not get any X11 events"
         );
         self.pollfd.clear_revents();

@@ -4,7 +4,7 @@ pub mod xstate;
 use crate::server::{NoConnection, PendingSurfaceState, ServerState};
 use crate::xstate::{RealConnection, XState};
 use log::{error, info};
-use rustix::event::{poll, PollFd, PollFlags};
+use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use server::selection::{Clipboard, Primary};
 use smithay_client_toolkit::data_device_manager::WritePipe;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -45,6 +45,14 @@ pub trait RunData {
         None
     }
     fn xwayland_ready(&self, _display: String, _pid: u32) {}
+}
+
+pub const fn timespec_from_millis(millis: u64) -> Timespec {
+    let d = std::time::Duration::from_millis(millis);
+    Timespec {
+        tv_sec: d.as_secs() as i64,
+        tv_nsec: d.subsec_nanos() as i64,
+    }
 }
 
 pub fn main(mut data: impl RunData) -> Option<()> {

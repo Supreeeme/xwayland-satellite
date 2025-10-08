@@ -3,9 +3,6 @@ members = ["macros", "testwl", "wl_drm"]
 
 [workspace.dependencies]
 wayland-client = "0.31.11"
-# We don't directly use wayland-cursor, but we need to set its version so
-# smithay-client-toolkit does not depend on an older version with rustix < 1
-wayland-cursor = "0.31.11"
 wayland-protocols = "0.32.9"
 wayland-scanner = "0.31.7"
 wayland-server = "0.31.10"
@@ -33,14 +30,15 @@ crate-type = ["lib"]
 bitflags = "2.5.0"
 rustix = { workspace = true, features = ["event"] }
 wayland-client.workspace = true
-wayland-cursor.workspace = true
 wayland-protocols = { workspace = true, features = ["client", "server", "staging", "unstable"] }
 wayland-server.workspace = true
 xcb = { version = "1.6.0", features = ["composite", "randr", "res"] }
 wl_drm = { path = "wl_drm" }
 log = "0.4.21"
 pretty_env_logger = "0.5.0"
-xcb-util-cursor = "0.3.4"
+# xcb-util-cursor 0.4 uses Rust 2024, which would bump MSRV from 1.83 to 1.85, however it also has
+# no meaningful code changes, so we stick to the older version
+xcb-util-cursor = "0.3.5"
 smithay-client-toolkit = { version = "0.20.0", default-features = false }
 
 sd-notify = { version = "0.4.2", optional = true }
