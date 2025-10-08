@@ -146,7 +146,8 @@ impl Selection {
     }
 
     fn check_for_incr(&self, event: &x::PropertyNotifyEvent) -> bool {
-        if event.window() != self.window || event.state() != x::Property::NewValue {
+        debug_assert_eq!(event.state(), x::Property::NewValue);
+        if event.window() != self.window {
             return false;
         }
 
@@ -178,8 +179,18 @@ pub struct WaylandSelection<T: SelectionType> {
 }
 
 impl<T: SelectionType> WaylandSelection<T> {
-    fn check_for_incr(&mut self, connection: &xcb::Connection) -> Option<bool> {
-        let incr_data = self.incr_data.as_mut()?;
+    fn check_for_incr(
+        &mut self,
+        event: &x::PropertyNotifyEvent,
+        connection: &xcb::Connection,
+    ) -> bool {
+        let Some(incr_data) = self.incr_data.as_mut() else {
+            return false;
+        };
+        if incr_data.property != event.atom() {
+            return false;
+        }
+
         let incr_end = std::cmp::min(
             incr_data.max_req_bytes + incr_data.start,
             incr_data.data.len(),
@@ -194,7 +205,7 @@ impl<T: SelectionType> WaylandSelection<T> {
         }) {
             warn!("failed to write selection data: {e:?}");
             self.incr_data = None;
-            return Some(true);
+            return true;
         }
 
         if incr_data.start == incr_end {
@@ -210,7 +221,7 @@ impl<T: SelectionType> WaylandSelection<T> {
             );
             incr_data.start = incr_end;
         }
-        Some(true)
+        true
     }
 }
 
@@ -817,6 +828,11 @@ impl XState {
         true
     }
 
+    /// Check if a PropertyNotifyEvent refers to a supported selection property, then make progress
+    /// on an incremental data transfer if that property is in that process.
+    /// Returns `true` if an attempt at progressing the data transfer was made, whether or not it
+    /// succeeded, and `false` otherwise (e.g. the event does not target a selection property or
+    /// that property is not in the process of an incremental data transfer)
     pub(super) fn handle_selection_property_change(
         &mut self,
         event: &x::PropertyNotifyEvent,
@@ -825,24 +841,23 @@ impl XState {
             connection: &xcb::Connection,
             event: &x::PropertyNotifyEvent,
             data: &mut SelectionData<T>,
-        ) -> Option<bool> {
+        ) -> bool {
             match event.state() {
                 x::Property::NewValue => {
                     if let Some(selection) = &data.x11_selection() {
-                        return Some(selection.check_for_incr(event));
+                        return selection.check_for_incr(event);
                     }
                 }
                 x::Property::Delete => {
                     if let Some(selection) = data.wayland_selection_mut() {
-                        return selection.check_for_incr(connection);
+                        return selection.check_for_incr(event, connection);
                     }
                 }
             }
-            None
+            false
         }
         inner(&self.connection, event, &mut self.selection_state.primary)
-            .or_else(|| inner(&self.connection, event, &mut self.selection_state.clipboard))
-            .unwrap_or(false)
+            || inner(&self.connection, event, &mut self.selection_state.clipboard)
     }
 }
 
