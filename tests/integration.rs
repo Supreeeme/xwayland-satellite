@@ -332,6 +332,7 @@ xcb::atoms_struct! {
         skip_taskbar => b"_NET_WM_STATE_SKIP_TASKBAR",
         transient_for => b"WM_TRANSIENT_FOR",
         clipboard => b"CLIPBOARD",
+        primary => b"PRIMARY",
         targets => b"TARGETS",
         multiple => b"MULTIPLE",
         wm_state => b"WM_STATE",
@@ -508,16 +509,14 @@ impl Connection {
     }
 
     #[track_caller]
-    fn set_selection_owner(&self, window: x::Window) {
+    fn set_selection_owner(&self, window: x::Window, selection: x::Atom) {
         self.send_and_check_request(&x::SetSelectionOwner {
             owner: window,
-            selection: self.atoms.clipboard,
+            selection,
             time: x::CURRENT_TIME,
         })
         .unwrap();
-        let owner = self.get_reply(&x::GetSelectionOwner {
-            selection: self.atoms.clipboard,
-        });
+        let owner = self.get_reply(&x::GetSelectionOwner { selection });
 
         assert_eq!(window, owner.owner(), "Unexpected selection owner");
     }
@@ -993,7 +992,7 @@ fn copy_from_x11() {
 
     let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
     f.map_as_toplevel(&mut connection, window);
-    connection.set_selection_owner(window);
+    connection.set_selection_owner(window, connection.atoms.clipboard);
 
     let request = connection.await_selection_request();
     assert_eq!(request.target(), connection.atoms.targets);
@@ -1347,7 +1346,7 @@ fn bad_clipboard_data() {
     let mut connection = Connection::new(&f.display);
     let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
     f.map_as_toplevel(&mut connection, window);
-    connection.set_selection_owner(window);
+    connection.set_selection_owner(window, connection.atoms.clipboard);
 
     let request = connection.await_selection_request();
     assert_eq!(request.target(), connection.atoms.targets);
@@ -1503,14 +1502,31 @@ fn incr_copy_from_x11() {
     let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
     f.map_as_toplevel(&mut connection, window);
 
-    connection.set_selection_owner(window);
+    connection.set_selection_owner(window, connection.atoms.clipboard);
     let request = connection.await_selection_request();
     assert_eq!(request.target(), connection.atoms.targets);
+    assert_eq!(request.selection(), connection.atoms.clipboard);
     connection.set_property(
         request.requestor(),
         x::ATOM_ATOM,
         request.property(),
         &[connection.atoms.targets, connection.atoms.mime1],
+    );
+    connection.send_selection_notify(&request);
+    f.wait_and_dispatch();
+
+    // Also give the window the primary selection.
+    // Due to a bug introduced in primary selection support, `XState::selection_state` having both
+    // a primary and clipboard X selection prevented clipboard INCR checks from occuring.
+    connection.set_selection_owner(window, connection.atoms.primary);
+    let request = connection.await_selection_request();
+    assert_eq!(request.target(), connection.atoms.targets);
+    assert_eq!(request.selection(), connection.atoms.primary);
+    connection.set_property(
+        request.requestor(),
+        x::ATOM_ATOM,
+        request.property(),
+        &[connection.atoms.targets, connection.atoms.mime2],
     );
     connection.send_selection_notify(&request);
     f.wait_and_dispatch();
@@ -1611,7 +1627,7 @@ fn wayland_then_x11_clipboard_owner() {
     connection.verify_clipboard_owner(connection.wm_window);
     connection.get_selection_owner_change_events(false, window);
 
-    connection.set_selection_owner(window);
+    connection.set_selection_owner(window, connection.atoms.clipboard);
     f.testwl.dispatch();
     connection.verify_clipboard_owner(window);
 
