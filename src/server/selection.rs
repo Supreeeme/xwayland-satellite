@@ -240,9 +240,10 @@ impl SelectionType for Clipboard {
 
     fn receive_offer(offer: &Self::Offer, mime_type: String) -> std::io::Result<ReadPipe> {
         offer.receive(mime_type).map_err(|e| {
+            use smithay_client_toolkit::data_device_manager::data_offer::DataOfferError;
             match e {
-                smithay_client_toolkit::data_device_manager::data_offer::DataOfferError::InvalidReceive => std::io::Error::from(std::io::ErrorKind::Other),
-                smithay_client_toolkit::data_device_manager::data_offer::DataOfferError::Io(e) => e
+                DataOfferError::InvalidReceive => std::io::Error::from(std::io::ErrorKind::Other),
+                DataOfferError::Io(e) => e,
             }
         })
     }
