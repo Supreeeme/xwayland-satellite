@@ -7,7 +7,7 @@ mod tests;
 
 use self::event::*;
 use crate::xstate::{Decorations, MoveResizeDirection, WindowDims, WmHints, WmName, WmNormalHints};
-use crate::{X11Selection, XConnection};
+use crate::{timespec_from_millis, X11Selection, XConnection};
 use clientside::MyWorld;
 use hecs::{Entity, World};
 use log::{debug, warn};
@@ -569,7 +569,8 @@ impl<C: XConnection> ServerState<C> {
         if let Some(r) = self.queue.prepare_read() {
             let fd = r.connection_fd();
             let pollfd = PollFd::new(&fd, PollFlags::IN);
-            if poll(&mut [pollfd], 0).unwrap() > 0 {
+            let timeout = timespec_from_millis(0);
+            if poll(&mut [pollfd], Some(&timeout)).unwrap() > 0 {
                 let _ = r.read();
             }
         }

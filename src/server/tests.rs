@@ -1,7 +1,7 @@
 use super::{selection::Clipboard, InnerServerState, NoConnection, ServerState, WindowDims};
 use crate::server::selection::{Primary, SelectionType};
 use crate::xstate::{SetState, WinSize, WmName};
-use crate::XConnection;
+use crate::{timespec_from_millis, XConnection};
 use rustix::event::{poll, PollFd, PollFlags};
 use std::collections::HashMap;
 use std::io::Write;
@@ -361,7 +361,8 @@ impl EarlyTestFixture {
         // Handle initial globals roundtrip setup requirement
         let thread = std::thread::spawn(move || {
             let mut pollfd = [PollFd::from_borrowed_fd(testwl.poll_fd(), PollFlags::IN)];
-            if poll(&mut pollfd, 1000).unwrap() == 0 {
+            let timeout = timespec_from_millis(1000);
+            if poll(&mut pollfd, Some(&timeout)).unwrap() == 0 {
                 panic!("Did not get events for testwl!");
             }
             testwl.dispatch();
@@ -1392,11 +1393,12 @@ fn copy_from_wayland<T: SelectionTest>() {
             s.spawn(|| {
                 let pollfd = unsafe { BorrowedFd::borrow_raw(f.testwl.poll_fd().as_raw_fd()) };
                 let mut pollfd = [PollFd::from_borrowed_fd(pollfd, PollFlags::IN)];
-                if poll(&mut pollfd, 100).unwrap() == 0 {
+                let timeout = timespec_from_millis(100);
+                if poll(&mut pollfd, Some(&timeout)).unwrap() == 0 {
                     panic!("Did not get events for testwl!");
                 }
                 f.testwl.dispatch();
-                while poll(&mut pollfd, 100).unwrap() > 0 {
+                while poll(&mut pollfd, Some(&timeout)).unwrap() > 0 {
                     f.testwl.dispatch();
                 }
             });
@@ -1452,11 +1454,12 @@ fn selection_x11_then_wayland<T: SelectionTest>() {
             s.spawn(|| {
                 let pollfd = unsafe { BorrowedFd::borrow_raw(f.testwl.poll_fd().as_raw_fd()) };
                 let mut pollfd = [PollFd::from_borrowed_fd(pollfd, PollFlags::IN)];
-                if poll(&mut pollfd, 100).unwrap() == 0 {
+                let timeout = timespec_from_millis(100);
+                if poll(&mut pollfd, Some(&timeout)).unwrap() == 0 {
                     panic!("Did not get events for testwl!");
                 }
                 f.testwl.dispatch();
-                while poll(&mut pollfd, 100).unwrap() > 0 {
+                while poll(&mut pollfd, Some(&timeout)).unwrap() > 0 {
                     f.testwl.dispatch();
                 }
             });
