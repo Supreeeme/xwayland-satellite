@@ -1100,9 +1100,9 @@ dependencies = [
 
 [[package]]
 name = "xcb-util-cursor"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f361f49c89d5aa2e9e44bd5c38ac6865b9338d48b58a980015881df5c4484eff"
+checksum = "bf6417c51a1f5eda49156061175021bd3ccf0a759bc7c402bbea6a6a1ae14239"
 dependencies = [
  "xcb",
  "xcb-util-cursor-sys",
@@ -1110,9 +1110,9 @@ dependencies = [
 
 [[package]]
 name = "xcb-util-cursor-sys"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7df0ea411b072fa53e1f4f5a6543649712cb9640c0de7686cca8edaf6971b117"
+checksum = "4c78acb131647687ee62f9e64c988457f23ecb8f3a078a37a312f989b320cb47"
 dependencies = [
  "bindgen",
  "pkg-config",
@@ -1148,7 +1148,6 @@ dependencies = [
  "testwl",
  "vergen-gitcl",
  "wayland-client",
- "wayland-cursor",
  "wayland-protocols",
  "wayland-server",
  "wl_drm",

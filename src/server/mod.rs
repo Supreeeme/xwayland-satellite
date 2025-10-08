@@ -7,11 +7,11 @@ mod tests;
 
 use self::event::*;
 use crate::xstate::{Decorations, MoveResizeDirection, WindowDims, WmHints, WmName, WmNormalHints};
-use crate::{X11Selection, XConnection};
+use crate::{timespec_from_millis, X11Selection, XConnection};
 use clientside::MyWorld;
 use hecs::{Entity, World};
 use log::{debug, warn};
-use rustix::event::{poll, PollFd, PollFlags, Timespec};
+use rustix::event::{poll, PollFd, PollFlags};
 use smithay_client_toolkit::activation::ActivationState;
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
@@ -569,11 +569,8 @@ impl<C: XConnection> ServerState<C> {
         if let Some(r) = self.queue.prepare_read() {
             let fd = r.connection_fd();
             let pollfd = PollFd::new(&fd, PollFlags::IN);
-            let timeout = Some(&Timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            });
-            if poll(&mut [pollfd], timeout).unwrap() > 0 {
+            let timeout = timespec_from_millis(0);
+            if poll(&mut [pollfd], Some(&timeout)).unwrap() > 0 {
                 let _ = r.read();
             }
         }
