@@ -233,6 +233,7 @@ enum CurrentSelection<T: SelectionType> {
 struct SelectionData<T: SelectionType> {
     last_selection_timestamp: u32,
     atom: x::Atom,
+    targets_atom: x::Atom,
     current_selection: Option<CurrentSelection<T>>,
 }
 
@@ -269,10 +270,11 @@ trait SelectionDataImpl {
 }
 
 impl<T: SelectionType> SelectionData<T> {
-    fn new(atom: x::Atom) -> Self {
+    fn new(atom: x::Atom, targets_atom: x::Atom) -> Self {
         Self {
             last_selection_timestamp: x::CURRENT_TIME,
             atom,
+            targets_atom,
             current_selection: None,
         }
     }
@@ -336,7 +338,7 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
             requestor: wm_window,
             selection: self.atom,
             target: atoms.targets,
-            property: atoms.selection_reply,
+            property: self.targets_atom,
             time: timestamp,
         }) {
             Ok(_) => {
@@ -571,8 +573,8 @@ impl SelectionState {
             .expect("Couldn't create window for selections");
         Self {
             target_window,
-            clipboard: SelectionData::new(atoms.clipboard),
-            primary: SelectionData::new(atoms.primary),
+            clipboard: SelectionData::new(atoms.clipboard, atoms.clipboard_targets),
+            primary: SelectionData::new(atoms.primary, atoms.primary_targets),
         }
     }
 }

@@ -998,15 +998,16 @@ xcb::atoms_struct! {
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
         utf8_string => b"UTF8_STRING" only_if_exists = false,
         clipboard => b"CLIPBOARD" only_if_exists = false,
+        clipboard_targets => b"_clipboard_targets" only_if_exists = false,
         targets => b"TARGETS" only_if_exists = false,
         save_targets => b"SAVE_TARGETS" only_if_exists = false,
         multiple => b"MULTIPLE" only_if_exists = false,
         timestamp => b"TIMESTAMP" only_if_exists = false,
-        selection_reply => b"_selection_reply" only_if_exists = false,
         incr => b"INCR" only_if_exists = false,
         xsettings => b"_XSETTINGS_S0" only_if_exists = false,
         xsettings_settings => b"_XSETTINGS_SETTINGS" only_if_exists = false,
         primary => b"PRIMARY" only_if_exists = false,
+        primary_targets => b"_primary_targets" only_if_exists = false,
         moveresize => b"_NET_WM_MOVERESIZE" only_if_exists = false,
     }
 }
