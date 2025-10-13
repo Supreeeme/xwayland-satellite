@@ -992,17 +992,21 @@ fn copy_from_x11() {
 
     let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
     f.map_as_toplevel(&mut connection, window);
+
+    connection.set_selection_owner(window, connection.atoms.primary);
     connection.set_selection_owner(window, connection.atoms.clipboard);
 
-    let request = connection.await_selection_request();
-    assert_eq!(request.target(), connection.atoms.targets);
-    connection.set_property(
-        request.requestor(),
-        x::ATOM_ATOM,
-        request.property(),
-        &[connection.atoms.mime1, connection.atoms.mime2],
-    );
-    connection.send_selection_notify(&request);
+    for _ in [connection.atoms.primary, connection.atoms.clipboard] {
+        let request = connection.await_selection_request();
+        assert_eq!(request.target(), connection.atoms.targets);
+        connection.set_property(
+            request.requestor(),
+            x::ATOM_ATOM,
+            request.property(),
+            &[connection.atoms.mime1, connection.atoms.mime2],
+        );
+        connection.send_selection_notify(&request);
+    }
     f.wait_and_dispatch();
 
     struct MimeData {
@@ -1026,21 +1030,37 @@ fn copy_from_x11() {
         },
     ];
 
-    let advertised_mimes = f.testwl.data_source_mimes();
+    // When requesting both primary and clipboard simultaneously, the first to be requested erases
+    // its TARGETS (which is the correct behavior of a GetProperty request), but the second still
+    // tried to use this data and would come up empty.
+    let primary_mimes = f.testwl.primary_source_mimes();
+    let clipboard_mimes = f.testwl.data_source_mimes();
     assert_eq!(
-        advertised_mimes.len(),
+        primary_mimes.len(),
         mimes_truth.len(),
-        "Wrong number of advertised mimes: {advertised_mimes:?}"
+        "Wrong number of advertised primary mimes: {primary_mimes:?}"
+    );
+    assert_eq!(
+        clipboard_mimes.len(),
+        mimes_truth.len(),
+        "Wrong number of advertised clipboard mimes: {clipboard_mimes:?}"
     );
     for MimeData { data, .. } in &mimes_truth {
         assert!(
-            advertised_mimes.contains(&data.mime_type),
+            primary_mimes.contains(&data.mime_type),
+            "Missing mime type {}",
+            data.mime_type
+        );
+        assert!(
+            clipboard_mimes.contains(&data.mime_type),
             "Missing mime type {}",
             data.mime_type
         );
     }
 
-    let data = f.testwl.clipboard_paste_data(|mime, _| {
+    // Type annotations hint the compiler to use HRTBs (needed since this closure is reused).
+    // See: https://users.rust-lang.org/t/implementation-of-fnonce-is-not-general-enough/68294/3
+    let mut send_data_for_mime = |mime: &str, _: &mut testwl::Server| {
         let request = connection.await_selection_request();
         let data = mimes_truth
             .iter()
@@ -1054,29 +1074,35 @@ fn copy_from_x11() {
         );
         connection.send_selection_notify(&request);
         true
-    });
-    let mut found_mimes = Vec::new();
-    for testwl::PasteData { mime_type, data } in data {
-        match &mime_type {
-            x if x == "text/plain" => {
-                assert_eq!(&data, b"hello world");
-            }
-            x if x == "blah/blah" => {
-                assert_eq!(&data, &[1, 2, 3, 4]);
-            }
-            other => panic!("unexpected mime type: {other} ({data:?})"),
-        }
-        found_mimes.push(mime_type);
-    }
+    };
 
-    assert!(
-        found_mimes.contains(&"text/plain".to_string()),
-        "Didn't get mime data for text/plain"
-    );
-    assert!(
-        found_mimes.contains(&"blah/blah".to_string()),
-        "Didn't get mime data for blah/blah"
-    );
+    let clipboard_data = f.testwl.clipboard_paste_data(&mut send_data_for_mime);
+    let primary_data = f.testwl.primary_paste_data(&mut send_data_for_mime);
+
+    for data in [primary_data, clipboard_data] {
+        let mut found_mimes = Vec::new();
+        for testwl::PasteData { mime_type, data } in data {
+            match &mime_type {
+                x if x == "text/plain" => {
+                    assert_eq!(&data, b"hello world");
+                }
+                x if x == "blah/blah" => {
+                    assert_eq!(&data, &[1, 2, 3, 4]);
+                }
+                other => panic!("unexpected mime type: {other} ({data:?})"),
+            }
+            found_mimes.push(mime_type);
+        }
+
+        assert!(
+            found_mimes.contains(&"text/plain".to_string()),
+            "Didn't get mime data for text/plain"
+        );
+        assert!(
+            found_mimes.contains(&"blah/blah".to_string()),
+            "Didn't get mime data for blah/blah"
+        );
+    }
 }
 
 #[test]
