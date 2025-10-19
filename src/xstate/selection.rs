@@ -238,7 +238,7 @@ struct SelectionData<T: SelectionType> {
 
 // This is a trait so that we can use &dyn
 trait SelectionDataImpl {
-    fn set_owner(&self, connection: &xcb::Connection, wm_window: x::Window);
+    fn set_owner(&self, connection: &xcb::Connection, wm_window: x::Window) -> bool;
     fn handle_new_owner(
         &mut self,
         connection: &xcb::Connection,
@@ -288,27 +288,41 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
     fn atom(&self) -> x::Atom {
         self.atom
     }
-    fn set_owner(&self, connection: &xcb::Connection, wm_window: x::Window) {
-        connection
-            .send_and_check_request(&x::SetSelectionOwner {
-                owner: wm_window,
-                selection: self.atom,
-                time: self.last_selection_timestamp,
-            })
-            .unwrap();
-
-        let reply = connection
-            .wait_for_reply(connection.send_request(&x::GetSelectionOwner {
-                selection: self.atom,
-            }))
-            .unwrap();
-
-        if reply.owner() != wm_window {
+    fn set_owner(&self, connection: &xcb::Connection, wm_window: x::Window) -> bool {
+        if let Err(e) = connection.send_and_check_request(&x::SetSelectionOwner {
+            owner: wm_window,
+            selection: self.atom,
+            time: self.last_selection_timestamp,
+        }) {
             warn!(
-                "Could not get {} selection (owned by {:?})",
-                get_atom_name(connection, self.atom),
-                reply.owner()
+                "Could not become owner of {}: {e:?}",
+                get_atom_name(connection, self.atom)
             );
+            return false;
+        };
+
+        match connection.wait_for_reply(connection.send_request(&x::GetSelectionOwner {
+            selection: self.atom,
+        })) {
+            Ok(reply) => {
+                if reply.owner() != wm_window {
+                    warn!(
+                        "Could not become owner of {} (owned by {:?})",
+                        get_atom_name(connection, self.atom),
+                        reply.owner()
+                    );
+                    false
+                } else {
+                    true
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Could not validate ownership of {}: {e:?}",
+                    get_atom_name(connection, self.atom)
+                );
+                false
+            }
         }
     }
 
@@ -320,21 +334,26 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
         owner: x::Window,
         timestamp: u32,
     ) {
-        debug!(
-            "new {} owner: {owner:?}",
-            get_atom_name(connection, self.atom)
-        );
-        self.last_selection_timestamp = timestamp;
         // Grab targets
-        connection
-            .send_and_check_request(&x::ConvertSelection {
-                requestor: wm_window,
-                selection: self.atom,
-                target: atoms.targets,
-                property: atoms.selection_reply,
-                time: timestamp,
-            })
-            .unwrap();
+        match connection.send_and_check_request(&x::ConvertSelection {
+            requestor: wm_window,
+            selection: self.atom,
+            target: atoms.targets,
+            property: atoms.selection_reply,
+            time: timestamp,
+        }) {
+            Ok(_) => {
+                debug!(
+                    "new {} owner: {owner:?}",
+                    get_atom_name(connection, self.atom)
+                );
+                self.last_selection_timestamp = timestamp;
+            }
+            Err(e) => warn!(
+                "could not set new {} owner: {e:?}",
+                get_atom_name(connection, self.atom)
+            ),
+        }
     }
 
     fn handle_target_list(
@@ -346,16 +365,20 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
         dest_property: x::Atom,
         server_state: &mut RealServerState,
     ) {
-        let reply = connection
-            .wait_for_reply(connection.send_request(&x::GetProperty {
-                delete: true,
-                window: wm_window,
-                property: dest_property,
-                r#type: x::ATOM_ATOM,
-                long_offset: 0,
-                long_length: 20,
-            }))
-            .unwrap();
+        let reply = match connection.wait_for_reply(connection.send_request(&x::GetProperty {
+            delete: true,
+            window: wm_window,
+            property: dest_property,
+            r#type: x::ATOM_ATOM,
+            long_offset: 0,
+            long_length: 20,
+        })) {
+            Ok(reply) => reply,
+            Err(e) => {
+                warn!("Could not obtain target list: {e:?}");
+                return;
+            }
+        };
 
         let targets: &[x::Atom] = reply.value();
         if targets.is_empty() {
@@ -445,17 +468,19 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
         if req_target == atoms.targets {
             let atoms: Box<[x::Atom]> = mimes.iter().map(|t| t.atom).collect();
 
-            connection
-                .send_and_check_request(&x::ChangeProperty {
-                    mode: x::PropMode::Replace,
-                    window: request.requestor(),
-                    property: request.property(),
-                    r#type: x::ATOM_ATOM,
-                    data: &atoms,
-                })
-                .unwrap();
-
-            true
+            match connection.send_and_check_request(&x::ChangeProperty {
+                mode: x::PropMode::Replace,
+                window: request.requestor(),
+                property: request.property(),
+                r#type: x::ATOM_ATOM,
+                data: &atoms,
+            }) {
+                Ok(_) => true,
+                Err(e) => {
+                    warn!("Failed to set targets for selection request: {e:?}");
+                    false
+                }
+            }
         } else {
             let Some(target) = mimes.iter().find(|t| t.atom == req_target) else {
                 if log::log_enabled!(log::Level::Debug) {
@@ -603,16 +628,20 @@ impl XState {
             });
         }
 
-        self.selection_state.clipboard.current_selection =
-            Some(CurrentSelection::Wayland(WaylandSelection {
-                mimes,
-                inner: selection,
-                incr_data: None,
-            }));
-        self.selection_state
+        if self
+            .selection_state
             .clipboard
-            .set_owner(&self.connection, self.wm_window);
-        debug!("Clipboard set from Wayland");
+            .set_owner(&self.connection, self.wm_window)
+        {
+            self.selection_state.clipboard.current_selection =
+                Some(CurrentSelection::Wayland(WaylandSelection {
+                    mimes,
+                    inner: selection,
+                    incr_data: None,
+                }));
+
+            debug!("Clipboard set from Wayland");
+        }
     }
 
     pub(crate) fn set_primary_selection(&mut self, selection: ForeignSelection<Primary>) {
@@ -661,16 +690,19 @@ impl XState {
             });
         }
 
-        self.selection_state.primary.current_selection =
-            Some(CurrentSelection::Wayland(WaylandSelection {
-                mimes,
-                inner: selection,
-                incr_data: None,
-            }));
-        self.selection_state
+        if self
+            .selection_state
             .primary
-            .set_owner(&self.connection, self.wm_window);
-        debug!("Primary set from Wayland");
+            .set_owner(&self.connection, self.wm_window)
+        {
+            self.selection_state.primary.current_selection =
+                Some(CurrentSelection::Wayland(WaylandSelection {
+                    mimes,
+                    inner: selection,
+                    incr_data: None,
+                }));
+            debug!("Primary set from Wayland");
+        }
     }
 
     pub(super) fn handle_selection_event(
