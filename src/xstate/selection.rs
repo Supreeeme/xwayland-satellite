@@ -267,6 +267,7 @@ trait SelectionDataImpl {
         server_state: &mut RealServerState,
     ) -> bool;
     fn atom(&self) -> x::Atom;
+    fn selection_clear(&mut self);
 }
 
 impl<T: SelectionType> SelectionData<T> {
@@ -323,6 +324,10 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
                 false
             }
         }
+    }
+
+    fn selection_clear(&mut self) {
+        self.current_selection = None;
     }
 
     fn handle_new_owner(
@@ -722,13 +727,7 @@ impl XState {
         match event {
             xcb::Event::X(x::Event::SelectionClear(e)) => {
                 let data = get_selection_data!(e.selection());
-                data.handle_new_owner(
-                    &self.connection,
-                    self.wm_window,
-                    &self.atoms,
-                    e.owner(),
-                    e.time(),
-                );
+                data.selection_clear();
             }
             xcb::Event::X(x::Event::SelectionNotify(e)) => {
                 if e.property() == x::ATOM_NONE {
