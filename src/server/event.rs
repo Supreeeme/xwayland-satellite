@@ -460,6 +460,40 @@ impl Event for client::wl_pointer::Event {
         // Niri). Other compositors do not run into this problem because they appear to not send
         // wl_pointer.enter until the user actually moves the mouse in the popup.
 
+        let handle_pending_enter = |target: Entity, state: &mut ServerState<C>, event_str: &str| loop {
+            let Ok(pe) = state.world.get::<&PendingEnter>(target) else {
+                return true;
+            };
+            let PendingEnter(client::wl_pointer::Event::Enter {
+                serial,
+                surface,
+                surface_x,
+                surface_y,
+            }) = pe.deref()
+            else {
+                unreachable!();
+            };
+            if surface
+                .data()
+                .copied()
+                .is_some_and(|key| state.world.contains(key))
+            {
+                trace!("resending enter ({serial}) before {}", event_str);
+                let enter_event = client::wl_pointer::Event::Enter {
+                    serial: *serial,
+                    surface: surface.clone(),
+                    surface_x: *surface_x,
+                    surface_y: *surface_y,
+                };
+
+                drop(pe);
+                Self::handle(enter_event, target, state);
+            } else {
+                warn!("could not move pointer to surface: stale surface");
+                return false;
+            }
+        };
+
         match self {
             Self::Enter {
                 serial,
@@ -551,53 +585,20 @@ impl Event for client::wl_pointer::Event {
                 surface_x,
                 surface_y,
             } => {
-                let pending_enter = state.world.get::<&PendingEnter>(target).ok();
-                match pending_enter.as_deref() {
-                    Some(p) => {
-                        let PendingEnter(client::wl_pointer::Event::Enter {
-                            serial,
-                            surface,
-                            surface_x,
-                            surface_y,
-                        }) = p
-                        else {
-                            unreachable!();
-                        };
-                        if surface
-                            .data()
-                            .copied()
-                            .is_some_and(|key| state.world.contains(key))
-                        {
-                            trace!("resending enter ({serial}) before motion");
-                            let enter_event = client::wl_pointer::Event::Enter {
-                                serial: *serial,
-                                surface: surface.clone(),
-                                surface_x: *surface_x,
-                                surface_y: *surface_y,
-                            };
-
-                            drop(pending_enter);
-                            Self::handle(enter_event, target, state);
-                            Self::handle(self, target, state);
-                        } else {
-                            warn!("could not move pointer to surface ({serial}): stale surface");
-                        }
-                    }
-                    None => {
-                        drop(pending_enter);
-                        let (server, scale) = state
-                            .world
-                            .query_one_mut::<(&WlPointer, &SurfaceScaleFactor)>(target)
-                            .unwrap();
-                        trace!(
-                            target: "pointer_position",
-                            "pointer motion {} {}",
-                            surface_x * scale.0,
-                            surface_y * scale.0
-                        );
-                        server.motion(time, surface_x * scale.0, surface_y * scale.0);
-                    }
+                if !handle_pending_enter(target, state, "motion") {
+                    return;
                 }
+                let (server, scale) = state
+                    .world
+                    .query_one_mut::<(&WlPointer, &SurfaceScaleFactor)>(target)
+                    .unwrap();
+                trace!(
+                    target: "pointer_position",
+                    "pointer motion {} {}",
+                    surface_x * scale.0,
+                    surface_y * scale.0
+                );
+                server.motion(time, surface_x * scale.0, surface_y * scale.0);
             }
             client::wl_pointer::Event::Button {
                 serial,
@@ -605,6 +606,9 @@ impl Event for client::wl_pointer::Event {
                 button,
                 state: button_state,
             } => {
+                if !handle_pending_enter(target, state, "click") {
+                    return;
+                }
                 let mut cmd = CommandBuffer::new();
                 let (server, seat, CurrentSurface(surface)) = state
                     .world
