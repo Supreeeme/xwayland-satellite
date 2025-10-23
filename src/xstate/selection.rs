@@ -4,6 +4,7 @@ use crate::{RealServerState, X11Selection};
 use log::{debug, error, warn};
 use smithay_client_toolkit::data_device_manager::WritePipe;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::rc::Rc;
 use xcb::x;
@@ -21,13 +22,14 @@ struct PendingSelectionData {
     property: x::Atom,
     pipe: WritePipe,
     incr: bool,
+    active: bool,
 }
 
 pub struct Selection {
     mimes: Vec<SelectionTargetId>,
     connection: Rc<xcb::Connection>,
     window: x::Window,
-    pending: RefCell<Vec<PendingSelectionData>>,
+    pending: RefCell<VecDeque<PendingSelectionData>>,
     selection: x::Atom,
     selection_time: u32,
     incr: x::Atom,
@@ -43,28 +45,22 @@ impl X11Selection for Selection {
 
     fn write_to(&self, mime: &str, pipe: WritePipe) {
         if let Some(target) = self.mimes.iter().find(|target| target.name == mime) {
-            // A concatenation of the target and the selection type are used to create a distinct
-            // property to write to (see XState::intern_target_property_atoms).
-            if let Err(e) = self
-                .connection
-                .send_and_check_request(&x::ConvertSelection {
-                    requestor: self.window,
-                    selection: self.selection,
-                    target: target.target,
-                    property: target.property,
-                    time: self.selection_time,
-                })
-            {
-                error!("Failed to request selection data (mime type: {mime}, error: {e})");
-                return;
-            }
-
-            self.pending.borrow_mut().push(PendingSelectionData {
+            // XWayland does not handle a selection having multiple outstanding INCR transfers well,
+            // even if they have different targets and properties. Xwayland can fail to send
+            // `PropertyNotify` events which indefinitely hang Wayland transfer receivers.
+            // To remedy this, every target requested by Wayland is put into a FIFO queue and the
+            // `ConvertSelection` starting the next request is not sent until `next_conversion`
+            // closes the `WritePipe`, marking termination of that request.
+            self.pending.borrow_mut().push_back(PendingSelectionData {
                 target: target.target,
                 property: target.property,
                 pipe,
                 incr: false,
-            })
+                active: false,
+            });
+            if self.pending.borrow().len() == 1 {
+                self.next_conversion();
+            }
         } else {
             warn!("Could not find mime type {mime}");
         }
@@ -72,26 +68,59 @@ impl X11Selection for Selection {
 }
 
 impl Selection {
+    /// Finish handling the current pending selection (if any) and queue the next one (if any).
+    ///
+    /// Regardless of whether the selection conversion succeeds or fails, this function must be
+    /// called in order to drop the `WritePipe` to signal to the Wayland program no more data is
+    /// coming and to start processing the next `PendingSelectionData`.
+    ///
+    /// # Panics:
+    /// This function will panic if the `pending` `RefCell` is actively being borrowed.
+    fn next_conversion(&self) {
+        let mut pending = self.pending.borrow_mut();
+        if pending.front().is_some_and(|p| p.active) {
+            pending.pop_front();
+        }
+
+        while let Some(psd) = pending.front_mut() {
+            if let Err(e) = self
+                .connection
+                .send_and_check_request(&x::ConvertSelection {
+                    requestor: self.window,
+                    selection: self.selection,
+                    target: psd.target,
+                    property: psd.property,
+                    time: self.selection_time,
+                })
+            {
+                error!(
+                    "Failed to request selection data (target: {}, error: {e})",
+                    get_atom_name(&self.connection, psd.target),
+                );
+                pending.pop_front();
+            } else {
+                psd.active = true;
+                break;
+            }
+        }
+    }
+
     fn handle_notify(&self, target: x::Atom) {
         let mut pending = self.pending.borrow_mut();
-        let Some(idx) = pending.iter().position(|t| t.target == target) else {
+        let Some(psd) = pending.front_mut().filter(|t| t.target == target) else {
             warn!(
-                "Got selection notify for unknown target {}",
+                "Got selection notify for unexpected target {}",
                 get_atom_name(&self.connection, target),
             );
+            drop(pending);
+            self.next_conversion();
             return;
         };
 
-        let PendingSelectionData {
-            mut pipe,
-            incr,
-            target,
-            property,
-        } = pending.swap_remove(idx);
         let request = self.connection.send_request(&x::GetProperty {
             delete: true,
             window: self.window,
-            property,
+            property: psd.property,
             r#type: x::ATOM_ANY,
             long_offset: 0,
             long_length: u32::MAX,
@@ -101,8 +130,10 @@ impl Selection {
             Err(e) => {
                 warn!(
                     "Couldn't get mime type for {}: {e:?}",
-                    get_atom_name(&self.connection, target)
+                    get_atom_name(&self.connection, psd.target)
                 );
+                drop(pending);
+                self.next_conversion();
                 return;
             }
         };
@@ -110,20 +141,15 @@ impl Selection {
         debug!(
             "got type {} for mime type {}",
             get_atom_name(&self.connection, reply.r#type()),
-            get_atom_name(&self.connection, target),
+            get_atom_name(&self.connection, psd.target),
         );
 
         if reply.r#type() == self.incr {
             debug!(
                 "beginning incr for {}",
-                get_atom_name(&self.connection, property)
+                get_atom_name(&self.connection, psd.property)
             );
-            pending.push(PendingSelectionData {
-                target,
-                property,
-                pipe,
-                incr: true,
-            });
+            psd.incr = true;
             return;
         }
 
@@ -132,32 +158,32 @@ impl Selection {
             32 => unsafe { reply.value::<u32>().align_to().1 },
             other => {
                 warn!("Unexpected format {other} in selection reply");
+                drop(pending);
+                self.next_conversion();
                 return;
             }
         };
 
-        if !incr || !data.is_empty() {
-            if let Err(e) = pipe.write_all(data) {
+        if !psd.incr || !data.is_empty() {
+            if let Err(e) = psd.pipe.write_all(data) {
                 warn!("Failed to write selection data: {e:?}");
-            } else if incr {
+            } else if psd.incr {
                 debug!(
                     "received some incr data for {}",
-                    get_atom_name(&self.connection, target)
+                    get_atom_name(&self.connection, psd.target)
                 );
-                pending.push(PendingSelectionData {
-                    target,
-                    property,
-                    pipe,
-                    incr: true,
-                })
+                return;
             }
-        } else if incr {
+        } else if psd.incr {
             // data is empty
             debug!(
                 "completed incr for mime {}",
                 get_atom_name(&self.connection, target)
             );
         }
+
+        drop(pending);
+        self.next_conversion();
     }
 
     fn check_for_incr(&self, event: &x::PropertyNotifyEvent) -> bool {
@@ -166,7 +192,7 @@ impl Selection {
             return false;
         }
 
-        let target = self.pending.borrow().iter().find_map(|pending| {
+        let target = self.pending.borrow().front().and_then(|pending| {
             (pending.property == event.atom() && pending.incr).then_some(pending.target)
         });
         if let Some(target) = target {
@@ -613,6 +639,8 @@ impl SelectionState {
 
 impl XState {
     fn intern_target_property_atoms(&self, mime: &[u8], suffix: &[u8]) -> (x::Atom, x::Atom) {
+        // A concatenation of the target and the selection type are used to create a distinct
+        // property to write to
         let target = self
             .connection
             .wait_for_reply(self.connection.send_request(&x::InternAtom {
@@ -758,6 +786,14 @@ impl XState {
             }
             xcb::Event::X(x::Event::SelectionNotify(e)) => {
                 if e.property() == x::ATOM_NONE {
+                    // Since the requested conversion could not be made, the request is invalid and
+                    // should be removed, dropping the WritePipe to signal no data will be sent
+                    if e.requestor() == self.selection_state.target_window {
+                        let data = get_selection_data!(e.selection());
+                        if let Some(selection) = data.x11_selection() {
+                            selection.next_conversion();
+                        }
+                    }
                     warn!(
                         "selection notify fail? {}",
                         get_atom_name(&self.connection, e.selection())
