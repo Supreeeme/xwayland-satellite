@@ -2,10 +2,12 @@ use super::{get_atom_name, XState};
 use crate::server::selection::{Clipboard, ForeignSelection, Primary, SelectionType};
 use crate::{RealServerState, X11Selection};
 use log::{debug, error, warn};
+use rustix::event::{fd_set_insert, select};
+use rustix::fd::AsRawFd;
 use smithay_client_toolkit::data_device_manager::WritePipe;
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::io::Write;
+use std::io::{Error, ErrorKind, Result, Write};
 use std::rc::Rc;
 use xcb::x;
 
@@ -164,8 +166,32 @@ impl Selection {
             }
         };
 
+        // Since the WritePipe given to us can have the O_NONBLOCK flag, we must respect that and
+        // use `select` to monitor when the pipe is available to do more I/O.
+        fn write_all(pipe: &mut WritePipe, mut buf: &[u8]) -> Result<()> {
+            while !buf.is_empty() {
+                match pipe.write(buf) {
+                    Ok(0) => return Err(Error::from(ErrorKind::WriteZero)),
+                    Ok(n) => buf = &buf[n..],
+                    Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                        let mut writefds = [Default::default()];
+                        fd_set_insert(&mut writefds, pipe.as_raw_fd());
+                        // SAFETY: nfds is correctly set to the numerically largest raw file
+                        // desciprtor being selected on plus 1, and all one fd is open for the
+                        // duration of the call.
+                        unsafe {
+                            select(pipe.as_raw_fd() + 1, None, Some(&mut writefds), None, None)?;
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(())
+        }
+
         if !psd.incr || !data.is_empty() {
-            if let Err(e) = psd.pipe.write_all(data) {
+            if let Err(e) = write_all(&mut psd.pipe, data) {
                 warn!("Failed to write selection data: {e:?}");
             } else if psd.incr {
                 debug!(
