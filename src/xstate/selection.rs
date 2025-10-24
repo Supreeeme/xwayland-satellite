@@ -778,7 +778,7 @@ impl XState {
             xcb::Event::X(x::Event::SelectionRequest(e)) => {
                 let data = get_selection_data!(e.selection());
                 let send_notify = |property| {
-                    self.connection
+                    let result = self.connection
                         .send_and_check_request(&x::SendEvent {
                             propagate: false,
                             destination: x::SendEventDest::Window(e.requestor()),
@@ -790,8 +790,10 @@ impl XState {
                                 e.target(),
                                 property,
                             ),
-                        })
-                        .unwrap();
+                        });
+                    if let Err(e) = result {
+                        warn!("Failed to send selection request notify: {e:?}");
+                    };
                 };
                 let refuse = || send_notify(x::ATOM_NONE);
                 let success = || send_notify(e.property());
