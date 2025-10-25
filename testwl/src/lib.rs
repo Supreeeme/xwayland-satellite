@@ -1740,6 +1740,7 @@ impl Dispatch<XdgPositioner, ()> for State {
             xdg_positioner::Request::Destroy => {
                 data.remove();
             }
+            xdg_positioner::Request::SetConstraintAdjustment { .. } => {}
             other => todo!("unhandled positioner request {other:?}"),
         }
     }
