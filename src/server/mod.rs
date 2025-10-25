@@ -1207,7 +1207,8 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    fn create_role_window(&mut self, window: x::Window, entity: Entity) {
+    /// Returns true if the created window is a toplevel.
+    fn create_role_window(&mut self, window: x::Window, entity: Entity) -> bool {
         let xdg_surface;
         let mut popup_for = None;
         let mut fullscreen = false;
@@ -1235,12 +1236,12 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             }
         }
 
-        let role = if let Some(parent) = popup_for {
+        let (role, is_toplevel) = if let Some(parent) = popup_for {
             let data = self.create_popup(entity, xdg_surface, parent);
-            SurfaceRole::Popup(Some(data))
+            (SurfaceRole::Popup(Some(data)), false)
         } else {
             let data = self.create_toplevel(entity, xdg_surface, fullscreen);
-            SurfaceRole::Toplevel(Some(data))
+            (SurfaceRole::Toplevel(Some(data)), true)
         };
 
         let (surface_role, client) = self
@@ -1259,6 +1260,8 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         client.commit();
         self.world.insert(entity, (role,)).unwrap();
+
+        is_toplevel
     }
 
     fn create_toplevel(
@@ -1269,7 +1272,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     ) -> ToplevelData {
         let window = self.world.get::<&WindowData>(entity).unwrap();
         debug!(
-            "creating toplevel for {:?}",
+            "creating toplevel for {:?} fullscreen: {fullscreen:?}",
             *self.world.get::<&x::Window>(entity).unwrap()
         );
 
