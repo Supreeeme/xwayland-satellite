@@ -96,7 +96,6 @@ pub fn main(mut data: impl RunData) -> Option<()> {
         .args([
             "-rootless",
             "-force-xrandr-emulation",
-            "-shm",
             "-wm",
             &xsock_xwl.as_raw_fd().to_string(),
             "-displayfd",
