@@ -720,6 +720,8 @@ impl XState {
                 }
                 x if [
                     self.window_atoms.menu,
+                    self.window_atoms.popup_menu,
+                    self.window_atoms.dropdown_menu,
                     self.window_atoms.tooltip,
                     self.window_atoms.drag_n_drop,
                 ]
@@ -1017,6 +1019,8 @@ xcb::atoms_struct! {
         drag_n_drop => b"_NET_WM_WINDOW_TYPE_DND" only_if_exists = false,
         splash => b"_NET_WM_WINDOW_TYPE_SPLASH" only_if_exists = false,
         menu => b"_NET_WM_WINDOW_TYPE_MENU" only_if_exists = false,
+        popup_menu => b"_NET_WM_WINDOW_TYPE_POPUP_MENU" only_if_exists = false,
+        dropdown_menu => b"_NET_WM_WINDOW_TYPE_DROPDOWN_MENU" only_if_exists = false,
         utility => b"_NET_WM_WINDOW_TYPE_UTILITY" only_if_exists = false,
         tooltip => b"_NET_WM_WINDOW_TYPE_TOOLTIP" only_if_exists = false,
     }
