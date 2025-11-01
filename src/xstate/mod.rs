@@ -590,7 +590,10 @@ impl XState {
                     }
                 }
             }
-            t => warn!("unrecognized message: {t:?}"),
+            t => warn!(
+                "unrecognized message: {:?}",
+                get_atom_name(&self.connection, t)
+            ),
         }
     }
 
@@ -1415,6 +1418,9 @@ impl XConnection for RealConnection {
 fn get_atom_name(connection: &xcb::Connection, atom: x::Atom) -> String {
     match connection.wait_for_reply(connection.send_request(&x::GetAtomName { atom })) {
         Ok(reply) => reply.name().to_string(),
-        Err(err) => format!("<error getting atom name: {err:?}> {atom:?}"),
+        Err(err) => {
+            warn!("<error getting atom name: {err:?}> {atom:?}");
+            format!("ATOM_{}", atom.resource_id())
+        }
     }
 }
