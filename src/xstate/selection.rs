@@ -304,17 +304,14 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
         match connection.wait_for_reply(connection.send_request(&x::GetSelectionOwner {
             selection: self.atom,
         })) {
+            Ok(reply) if reply.owner() == wm_window => true,
             Ok(reply) => {
-                if reply.owner() != wm_window {
-                    warn!(
-                        "Could not become owner of {} (owned by {:?})",
-                        get_atom_name(connection, self.atom),
-                        reply.owner()
-                    );
-                    false
-                } else {
-                    true
-                }
+                warn!(
+                    "Could not become owner of {} (owned by {:?})",
+                    get_atom_name(connection, self.atom),
+                    reply.owner()
+                );
+                false
             }
             Err(e) => {
                 warn!(
@@ -386,18 +383,17 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
             match connection.wait_for_reply(connection.send_request(&x::GetSelectionOwner {
                 selection: self.atom,
             })) {
-                Ok(reply) => {
-                    if reply.owner() == wm_window {
-                        warn!("We are unexpectedly the selection owner? Clipboard may be broken!");
-                    } else {
-                        self.handle_new_owner(
-                            connection,
-                            wm_window,
-                            atoms,
-                            reply.owner(),
-                            self.last_selection_timestamp,
-                        );
-                    }
+                Ok(reply) if reply.owner() != wm_window => {
+                    self.handle_new_owner(
+                        connection,
+                        wm_window,
+                        atoms,
+                        reply.owner(),
+                        self.last_selection_timestamp,
+                    );
+                }
+                Ok(_) => {
+                    warn!("We are unexpectedly the selection owner? Clipboard may be broken!");
                 }
                 Err(e) => {
                     error!("Couldn't grab selection owner: {e:?}. Clipboard is stale!");
@@ -778,20 +774,18 @@ impl XState {
             xcb::Event::X(x::Event::SelectionRequest(e)) => {
                 let data = get_selection_data!(e.selection());
                 let send_notify = |property| {
-                    let result = self.connection
-                        .send_and_check_request(&x::SendEvent {
-                            propagate: false,
-                            destination: x::SendEventDest::Window(e.requestor()),
-                            event_mask: x::EventMask::empty(),
-                            event: &x::SelectionNotifyEvent::new(
-                                e.time(),
-                                e.requestor(),
-                                e.selection(),
-                                e.target(),
-                                property,
-                            ),
-                        });
-                    if let Err(e) = result {
+                    if let Err(e) = self.connection.send_and_check_request(&x::SendEvent {
+                        propagate: false,
+                        destination: x::SendEventDest::Window(e.requestor()),
+                        event_mask: x::EventMask::empty(),
+                        event: &x::SelectionNotifyEvent::new(
+                            e.time(),
+                            e.requestor(),
+                            e.selection(),
+                            e.target(),
+                            property,
+                        ),
+                    }) {
                         warn!("Failed to send selection request notify: {e:?}");
                     };
                 };
