@@ -126,7 +126,7 @@ impl Fixture {
     fn new_preset(pre_connect: impl FnOnce(&mut testwl::Server)) -> Self {
         static INIT: Once = Once::new();
         INIT.call_once(|| {
-            pretty_env_logger::env_logger::builder()
+            pretty_env_logger::formatted_timed_builder()
                 .is_test(true)
                 .filter_level(log::LevelFilter::Debug)
                 .parse_default_env()
