@@ -340,6 +340,8 @@ xcb::atoms_struct! {
         win_type => b"_NET_WM_WINDOW_TYPE",
         win_type_normal => b"_NET_WM_WINDOW_TYPE_NORMAL",
         win_type_menu => b"_NET_WM_WINDOW_TYPE_MENU",
+        win_type_popup_menu => b"_NET_WM_WINDOW_TYPE_POPUP_MENU",
+        win_type_dropdown_menu => b"_NET_WM_WINDOW_TYPE_DROPDOWN_MENU",
         win_type_tooltip => b"_NET_WM_WINDOW_TYPE_TOOLTIP",
         win_type_dnd => b"_NET_WM_WINDOW_TYPE_DND",
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
@@ -1959,6 +1961,24 @@ fn popup_heuristics() {
         &[connection.atoms.win_type_dnd],
     );
     f.map_as_popup(&mut connection, discord_dnd);
+
+    let git_gui_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
+    connection.set_property(
+        git_gui_popup,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_popup_menu],
+    );
+    f.map_as_popup(&mut connection, git_gui_popup);
+
+    let git_gui_dropdown = connection.new_window(connection.root, 10, 10, 50, 50, true);
+    connection.set_property(
+        git_gui_popup,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_dropdown_menu],
+    );
+    f.map_as_popup(&mut connection, git_gui_dropdown);
 }
 
 #[test]
