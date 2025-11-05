@@ -460,39 +460,45 @@ impl Event for client::wl_pointer::Event {
         // Niri). Other compositors do not run into this problem because they appear to not send
         // wl_pointer.enter until the user actually moves the mouse in the popup.
 
-        let handle_pending_enter = |target: Entity, state: &mut ServerState<C>, event_str: &str| loop {
-            let Ok(pe) = state.world.get::<&PendingEnter>(target) else {
-                return true;
-            };
-            let PendingEnter(client::wl_pointer::Event::Enter {
-                serial,
-                surface,
-                surface_x,
-                surface_y,
-            }) = pe.deref()
-            else {
-                unreachable!();
-            };
-            if surface
-                .data()
-                .copied()
-                .is_some_and(|key| state.world.contains(key))
-            {
-                trace!("resending enter ({serial}) before {}", event_str);
-                let enter_event = client::wl_pointer::Event::Enter {
-                    serial: *serial,
-                    surface: surface.clone(),
-                    surface_x: *surface_x,
-                    surface_y: *surface_y,
+        fn handle_pending_enter<C: XConnection>(
+            target: Entity,
+            state: &mut ServerState<C>,
+            event_str: &str,
+        ) -> bool {
+            loop {
+                let Ok(pe) = state.world.get::<&PendingEnter>(target) else {
+                    return true;
                 };
+                let PendingEnter(client::wl_pointer::Event::Enter {
+                    serial,
+                    surface,
+                    surface_x,
+                    surface_y,
+                }) = pe.deref()
+                else {
+                    unreachable!();
+                };
+                if surface
+                    .data()
+                    .copied()
+                    .is_some_and(|key| state.world.contains(key))
+                {
+                    trace!("resending enter ({serial}) before {}", event_str);
+                    let enter_event = client::wl_pointer::Event::Enter {
+                        serial: *serial,
+                        surface: surface.clone(),
+                        surface_x: *surface_x,
+                        surface_y: *surface_y,
+                    };
 
-                drop(pe);
-                Self::handle(enter_event, target, state);
-            } else {
-                warn!("could not move pointer to surface: stale surface");
-                return false;
+                    drop(pe);
+                    Event::handle(enter_event, target, state);
+                } else {
+                    warn!("could not move pointer to surface: stale surface");
+                    return false;
+                }
             }
-        };
+        }
 
         match self {
             Self::Enter {
