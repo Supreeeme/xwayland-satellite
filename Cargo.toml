@@ -48,6 +48,9 @@ sd-notify = { version = "0.4.2", optional = true }
 macros = { version = "0.1.0", path = "macros" }
 hecs = { version = "0.10.5", features = ["macros"] }
 num_enum = "0.7.4"
+tiny-skia = "0.11.4"
+ab_glyph = "0.2.32"
+fontdue = "0.9.3"
 
 [features]
 default = []

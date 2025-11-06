@@ -8,7 +8,7 @@ use std::io::Write;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
-use testwl::SendDataForMimeFn;
+use testwl::{SendDataForMimeFn, SurfaceRole};
 use wayland_client::{
     backend::{protocol::Message, Backend, ObjectData, ObjectId, WaylandError},
     protocol::{
@@ -27,6 +27,7 @@ use wayland_client::{
     },
     Connection, Proxy, WEnum,
 };
+use wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1;
 use wayland_protocols::{
     wp::{
         linux_dmabuf::zv1::client::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
@@ -2598,6 +2599,83 @@ fn scaled_pointer_lock_position_hint() {
         lock_data.cursor_hint,
         Some(testwl::Vec2f { x: 50.0, y: 50.0 })
     );
+}
+
+#[test]
+fn client_side_decorations() {
+    let (mut f, compositor) = TestFixture::new_with_compositor();
+    let window = unsafe { Window::new(1) };
+    let (_, id) = f.create_toplevel(&compositor, window);
+    f.testwl
+        .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ClientSide);
+    f.run();
+
+    let subsurface_id = f.testwl.last_created_surface_id().unwrap();
+    assert_ne!(subsurface_id, id);
+    let data = f.testwl.get_surface_data(subsurface_id).unwrap();
+    let Some(SurfaceRole::Subsurface(subsurface)) = &data.role else {
+        panic!("surface was not a subsurface: {:?}", data.role);
+    };
+
+    assert_eq!(subsurface.position, testwl::Vec2 { x: 0, y: -25 });
+    assert_eq!(subsurface.parent, id);
+    let subsurface = subsurface.subsurface.clone();
+
+    f.testwl
+        .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ServerSide);
+    f.run();
+
+    assert!(f.testwl.get_surface_data(subsurface_id).is_none());
+    assert!(!subsurface.is_alive());
+}
+
+#[test]
+fn client_side_decorations_no_global() {
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.disable_decorations_global();
+    });
+    let compositor = f.compositor();
+    let window = unsafe { Window::new(1) };
+    let (buffer, surface) = compositor.create_surface();
+
+    let data = WindowData {
+        mapped: true,
+        dims: WindowDims {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 50,
+        },
+        fullscreen: false,
+    };
+
+    f.new_window(window, false, data);
+    f.map_window(&compositor, window, &surface.obj, &buffer);
+    f.run();
+
+    let surfaces = f.testwl.created_surfaces();
+    assert_eq!(surfaces.len(), 2);
+    let mut toplevel = None;
+    let mut subsurface_parent = None;
+    for id in surfaces {
+        let data = f.testwl.get_surface_data(*id).unwrap();
+        match data
+            .role
+            .as_ref()
+            .expect("A surface was created without a role")
+        {
+            SurfaceRole::Toplevel(_) => {
+                toplevel = Some(*id);
+            }
+            SurfaceRole::Subsurface(sub) => {
+                assert_eq!(sub.position, testwl::Vec2 { x: 0, y: -25 });
+                subsurface_parent = Some(sub.parent);
+            }
+            other => panic!("got surface with unexpected role: {other:?}"),
+        }
+    }
+
+    assert_eq!(toplevel.unwrap(), subsurface_parent.unwrap());
 }
 
 /// See Pointer::handle_event for an explanation.

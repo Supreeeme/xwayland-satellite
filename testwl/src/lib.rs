@@ -59,6 +59,9 @@ use wayland_protocols::{
         },
     },
 };
+use wayland_server::backend::GlobalId;
+use wayland_server::protocol::wl_subcompositor::WlSubcompositor;
+use wayland_server::protocol::wl_subsurface::WlSubsurface;
 use wayland_server::{
     backend::{
         protocol::{Interface, ProtocolError},
@@ -119,6 +122,7 @@ impl SurfaceData {
         match self.role.as_ref().expect("Surface missing role") {
             SurfaceRole::Toplevel(ref t) => &t.xdg,
             SurfaceRole::Popup(ref p) => &p.xdg,
+            SurfaceRole::Subsurface(_) => panic!("subsurface doesn't have an XdgSurface"),
             SurfaceRole::Cursor => panic!("cursor surface doesn't have an XdgSurface"),
         }
     }
@@ -142,6 +146,7 @@ pub enum SurfaceRole {
     Toplevel(Toplevel),
     Popup(Popup),
     Cursor,
+    Subsurface(Subsurface),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -167,6 +172,13 @@ pub struct Popup {
     pub parent: XdgSurface,
     pub popup: XdgPopup,
     pub positioner_state: PositionerState,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Subsurface {
+    pub subsurface: WlSubsurface,
+    pub position: Vec2,
+    pub parent: SurfaceId,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
@@ -251,6 +263,7 @@ struct State {
     buffers: HashSet<WlBuffer>,
     begin: Instant,
     last_surface_id: Option<SurfaceId>,
+    created_surfaces: Vec<SurfaceId>,
     last_output: Option<WlOutput>,
     callbacks: Vec<WlCallback>,
     seat: Option<WlSeat>,
@@ -275,6 +288,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             surfaces: Default::default(),
+            created_surfaces: Default::default(),
             outputs: Default::default(),
             buffers: Default::default(),
             positioners: Default::default(),
@@ -415,6 +429,7 @@ pub struct Server {
     dh: DisplayHandle,
     state: State,
     client: Option<Client>,
+    decorations_global: GlobalId,
 }
 
 pub trait SendDataForMimeFn: FnMut(&str, &mut Server) -> bool {}
@@ -448,6 +463,7 @@ impl Server {
             };
         }
         dh.create_global::<State, WlCompositor, _>(6, ());
+        dh.create_global::<State, WlSubcompositor, _>(1, ());
         dh.create_global::<State, WlShm, _>(1, ());
         dh.create_global::<State, XdgWmBase, _>(6, ());
         dh.create_global::<State, WlSeat, _>(5, ());
@@ -455,7 +471,7 @@ impl Server {
         dh.create_global::<State, ZwpPrimarySelectionDeviceManagerV1, _>(1, ());
         dh.create_global::<State, ZwpTabletManagerV2, _>(1, ());
         dh.create_global::<State, XdgActivationV1, _>(1, ());
-        dh.create_global::<State, ZxdgDecorationManagerV1, _>(1, ());
+        let decorations_global = dh.create_global::<State, ZxdgDecorationManagerV1, _>(1, ());
         dh.create_global::<State, WpViewporter, _>(1, ());
         dh.create_global::<State, ZwpPointerConstraintsV1, _>(1, ());
         global_noop!(ZwpLinuxDmabufV1);
@@ -515,6 +531,7 @@ impl Server {
             dh,
             state: State::default(),
             client: None,
+            decorations_global,
         }
     }
 
@@ -542,11 +559,16 @@ impl Server {
     }
 
     pub fn get_surface_data(&self, surface_id: SurfaceId) -> Option<&SurfaceData> {
+        println!("{:?}", self.state.surfaces);
         self.state.surfaces.get(&surface_id)
     }
 
     pub fn last_created_surface_id(&self) -> Option<SurfaceId> {
         self.state.last_surface_id
+    }
+
+    pub fn created_surfaces(&self) -> &[SurfaceId] {
+        &self.state.created_surfaces
     }
 
     #[track_caller]
@@ -893,6 +915,27 @@ impl Server {
     pub fn tablet(&mut self) -> &ZwpTabletV2 {
         self.state.tablet.as_ref().expect("No tablet created")
     }
+
+    pub fn force_decoration_mode(
+        &mut self,
+        surface: SurfaceId,
+        mode: zxdg_toplevel_decoration_v1::Mode,
+    ) {
+        let toplevel = self.state.get_toplevel(surface);
+        toplevel
+            .decoration
+            .as_mut()
+            .expect("Missing toplevel decoration")
+            .0
+            .configure(mode);
+        self.display.flush_clients().unwrap();
+    }
+
+    pub fn disable_decorations_global(&self) {
+        self.display
+            .handle()
+            .remove_global::<State>(self.decorations_global.clone());
+    }
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -930,6 +973,7 @@ impl Write for TransferFd {
 
 simple_global_dispatch!(WlShm);
 simple_global_dispatch!(WlCompositor);
+simple_global_dispatch!(WlSubcompositor);
 simple_global_dispatch!(XdgWmBase);
 simple_global_dispatch!(ZxdgOutputManagerV1);
 simple_global_dispatch!(ZwpTabletManagerV2);
@@ -1629,7 +1673,7 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                     || match data.role.as_ref().unwrap() {
                         SurfaceRole::Toplevel(t) => t.toplevel.is_alive(),
                         SurfaceRole::Popup(p) => p.popup.is_alive(),
-                        SurfaceRole::Cursor => false,
+                        _ => unreachable!()
                     };
                 if role_alive {
                     client.kill(
@@ -1875,8 +1919,40 @@ impl Dispatch<WlCompositor, ()> for State {
                     },
                 );
                 state.last_surface_id = Some(SurfaceId(id));
+                state.created_surfaces.push(SurfaceId(id));
             }
             _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<WlSubcompositor, ()> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &WlSubcompositor,
+        request: <WlSubcompositor as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        use proto::wl_subcompositor::Request::*;
+        match request {
+            GetSubsurface {
+                id,
+                surface,
+                parent,
+            } => {
+                let surface_id = SurfaceId::from(&surface);
+                let data = state.surfaces.get_mut(&surface_id).unwrap();
+                data.role = Some(SurfaceRole::Subsurface(Subsurface {
+                    parent: SurfaceId::from(&parent),
+                    subsurface: data_init.init(id, surface_id),
+                    position: Vec2::default(),
+                }));
+            }
+            Destroy => {}
+            other => todo!("unhandled subcompositor request {other:?}"),
         }
     }
 }
@@ -1936,6 +2012,32 @@ impl Dispatch<WlSurface, ()> for State {
             SetInputRegion { .. } => {}
             SetBufferScale { .. } => {}
             other => todo!("unhandled request {other:?}"),
+        }
+    }
+}
+
+impl Dispatch<WlSubsurface, SurfaceId> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &WlSubsurface,
+        request: <WlSubsurface as Resource>::Request,
+        surface_id: &SurfaceId,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        use proto::wl_subsurface::Request::*;
+        match request {
+            SetPosition { x, y } => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                let Some(SurfaceRole::Subsurface(subsurface)) = &mut data.role else {
+                    unreachable!();
+                };
+
+                subsurface.position = Vec2 { x, y };
+            }
+            SetDesync | Destroy => {}
+            other => todo!("unhandled wl_subsurface request: {other:?}"),
         }
     }
 }
@@ -2137,6 +2239,8 @@ impl Dispatch<ZxdgToplevelDecorationV1, SurfaceId> for State {
                         .as_mut()
                         .map(|(_, decoration)| decoration)
                         .unwrap() = Some(mode);
+
+                    resource.configure(mode);
                 } else {
                     resource.post_error(
                         zxdg_toplevel_decoration_v1::Error::Orphaned,

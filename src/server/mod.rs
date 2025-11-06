@@ -1,4 +1,5 @@
 mod clientside;
+mod decoration;
 mod dispatch;
 mod event;
 pub(crate) mod selection;
@@ -9,7 +10,8 @@ use self::event::*;
 use crate::xstate::{Decorations, MoveResizeDirection, WindowDims, WmHints, WmName, WmNormalHints};
 use crate::{timespec_from_millis, X11Selection, XConnection};
 use clientside::MyWorld;
-use hecs::{Entity, World};
+use decoration::{DecorationsData, DecorationsDataSatellite};
+use hecs::Entity;
 use log::{debug, warn};
 use rustix::event::{poll, PollFd, PollFlags};
 use smithay_client_toolkit::activation::ActivationState;
@@ -17,14 +19,13 @@ use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
+use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
 use wayland_client::{
     globals::{registry_queue_init, Global},
     protocol as client, Connection, EventQueue, Proxy, QueueHandle,
 };
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1;
-use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::{
-    self, ZxdgToplevelDecorationV1,
-};
+use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::{self};
 use wayland_protocols::xdg::shell::client::xdg_positioner::ConstraintAdjustment;
 use wayland_protocols::{
     wp::{
@@ -194,7 +195,7 @@ impl SurfaceRole {
     fn destroy(&mut self) {
         match self {
             SurfaceRole::Toplevel(Some(ref mut t)) => {
-                if let Some(decoration) = t.decoration.take() {
+                if let Some(decoration) = t.decoration.wl.take() {
                     decoration.destroy();
                 }
                 t.toplevel.destroy();
@@ -222,7 +223,7 @@ struct ToplevelData {
     toplevel: XdgToplevel,
     xdg: XdgSurfaceData,
     fullscreen: bool,
-    decoration: Option<ZxdgToplevelDecorationV1>,
+    decoration: decoration::DecorationsData,
 }
 
 #[derive(Debug)]
@@ -447,6 +448,9 @@ pub struct InnerServerState<S: X11Selection> {
     last_hovered: Option<x::Window>,
 
     xdg_wm_base: XdgWmBase,
+    compositor: client::wl_compositor::WlCompositor,
+    subcompositor: WlSubcompositor,
+    shm: client::wl_shm::WlShm,
     viewporter: WpViewporter,
     fractional_scale: Option<WpFractionalScaleManagerV1>,
     decoration_manager: Option<ZxdgDecorationManagerV1>,
@@ -482,6 +486,18 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             warn!("xdg_wm_base version 2 detected. Popup repositioning will not work, and some popups may not work correctly.");
         }
 
+        let compositor = global_list
+            .bind::<client::wl_compositor::WlCompositor, _, _>(&qh, 4..=6, ())
+            .expect("Could not bind wl_compositor");
+
+        let subcompositor = global_list
+            .bind::<WlSubcompositor, _, _>(&qh, 1..=1, ())
+            .expect("Could not bind wl_subcompositor");
+
+        let shm = global_list
+            .bind::<client::wl_shm::WlShm, _, _>(&qh, 1..=1, ())
+            .expect("Could not bind wl_shm");
+
         let viewporter = global_list
             .bind::<WpViewporter, _, _>(&qh, 1..=1, ())
             .expect("Could not bind wp_viewporter");
@@ -511,6 +527,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             .contents()
             .with_list(|globals| handle_globals::<S>(&dh, globals));
 
+        let world = MyWorld::new(global_list);
         let client = dh.insert_client(client, std::sync::Arc::new(())).unwrap();
 
         let inner = InnerServerState {
@@ -525,6 +542,9 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             last_focused_toplevel: None,
             last_hovered: None,
             xdg_wm_base,
+            compositor,
+            subcompositor,
+            shm,
             viewporter,
             fractional_scale,
             selection_states,
@@ -544,7 +564,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             updated_outputs: Vec::new(),
             new_scale: None,
             decoration_manager,
-            world: MyWorld::new(global_list),
+            world,
         };
         Self {
             inner,
@@ -778,9 +798,12 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return;
         };
 
-        if let Some(role) = data.get::<&SurfaceRole>() {
-            if let SurfaceRole::Toplevel(Some(data)) = &*role {
+        if let Some(mut role) = data.get::<&mut SurfaceRole>() {
+            if let SurfaceRole::Toplevel(Some(data)) = &mut *role {
                 data.toplevel.set_title(title.name().to_string());
+                if let Some(d) = &mut data.decoration.satellite {
+                    d.set_title(&self.world, title.name());
+                }
             }
         }
     }
@@ -850,10 +873,6 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     }
 
     pub fn set_win_decorations(&mut self, window: x::Window, decorations: Decorations) {
-        if self.decoration_manager.is_none() {
-            return;
-        };
-
         let Some(data) = self
             .windows
             .get(&window)
@@ -870,10 +889,9 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             debug!("setting {window:?} decorations {decorations:?}");
             if let Some(role) = data.get::<&SurfaceRole>() {
                 if let SurfaceRole::Toplevel(Some(data)) = &*role {
-                    data.decoration
-                        .as_ref()
-                        .unwrap()
-                        .set_mode(decorations.into());
+                    if let Some(decoration) = &data.decoration.wl {
+                        decoration.set_mode(decorations.into());
+                    }
                 }
             }
             win.attrs.decorations = Some(decorations);
@@ -1312,8 +1330,9 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             toplevel.set_fullscreen(None);
         }
 
-        let decoration = self.decoration_manager.as_ref().map(|decoration_manager| {
-            let decoration = decoration_manager.get_toplevel_decoration(&toplevel, &self.qh, ());
+        let wl_decoration = self.decoration_manager.as_ref().map(|decoration_manager| {
+            let decoration =
+                decoration_manager.get_toplevel_decoration(&toplevel, &self.qh, entity);
             decoration.set_mode(
                 window
                     .attrs
@@ -1323,10 +1342,29 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             decoration
         });
 
+        // X11 side wants server side decorations, but compositor won't provide them
+        // so we provide our own
+
         let surface = self
             .world
             .get::<&client::wl_surface::WlSurface>(entity)
             .unwrap();
+        let needs_satellite_decorations = wl_decoration.is_none()
+            && window
+                .attrs
+                .decorations
+                .is_none_or(|d| d == Decorations::Server);
+        let (sat_decoration, buf) = needs_satellite_decorations
+            .then(|| {
+                DecorationsDataSatellite::try_new(
+                    self,
+                    &surface,
+                    window.attrs.title.as_ref().map(WmName::name),
+                )
+            })
+            .flatten()
+            .unzip();
+
         if let (Some(activation_state), Some(token)) = (
             self.activation_state.as_ref(),
             window.activation_token.clone(),
@@ -1356,6 +1394,13 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             }
         }
 
+        drop(window);
+        drop(group);
+        drop(surface);
+        if let Some(mut b) = buf.flatten() {
+            b.run_on(&mut self.world);
+        }
+
         ToplevelData {
             xdg: XdgSurfaceData {
                 surface: xdg,
@@ -1364,7 +1409,10 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             },
             toplevel,
             fullscreen: false,
-            decoration,
+            decoration: DecorationsData {
+                wl: wl_decoration,
+                satellite: sat_decoration,
+            },
         }
     }
 

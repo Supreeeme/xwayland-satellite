@@ -1,3 +1,5 @@
+use super::decoration::DecorationMarker;
+
 use super::ObjectEvent;
 use hecs::{Entity, World};
 use smithay_client_toolkit::{
@@ -19,7 +21,8 @@ use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
     wl_keyboard::WlKeyboard, wl_output::WlOutput, wl_pointer::WlPointer, wl_region::WlRegion,
     wl_registry::WlRegistry, wl_seat::WlSeat, wl_shm::WlShm, wl_shm_pool::WlShmPool,
-    wl_surface::WlSurface, wl_touch::WlTouch,
+    wl_subcompositor::WlSubcompositor, wl_subsurface::WlSubsurface, wl_surface::WlSurface,
+    wl_touch::WlTouch,
 };
 use wayland_client::{
     delegate_noop, event_created_child,
@@ -164,6 +167,7 @@ impl MyWorld {
 pub type Event<T> = <T as Proxy>::Event;
 
 delegate_noop!(MyWorld: WlCompositor);
+delegate_noop!(MyWorld: WlSubcompositor);
 delegate_noop!(MyWorld: WlRegion);
 delegate_noop!(MyWorld: ignore WlShm);
 delegate_noop!(MyWorld: ignore ZwpLinuxDmabufV1);
@@ -179,8 +183,8 @@ delegate_noop!(MyWorld: ZwpTabletManagerV2);
 delegate_noop!(MyWorld: XdgActivationV1);
 delegate_noop!(MyWorld: ZxdgDecorationManagerV1);
 delegate_noop!(MyWorld: WpFractionalScaleManagerV1);
-delegate_noop!(MyWorld: ignore ZxdgToplevelDecorationV1);
 delegate_noop!(MyWorld: ZwpPrimarySelectionDeviceManagerV1);
+delegate_noop!(MyWorld: WlSubsurface);
 
 impl Dispatch<WlRegistry, GlobalListContents> for MyWorld {
     fn event(
@@ -236,6 +240,18 @@ impl Dispatch<WlCallback, server::wl_callback::WlCallback> for MyWorld {
     }
 }
 
+impl Dispatch<WlSurface, DecorationMarker> for MyWorld {
+    fn event(
+        _: &mut Self,
+        _: &WlSurface,
+        _: <WlSurface as Proxy>::Event,
+        _: &DecorationMarker,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
 macro_rules! push_events {
     ($type:ident) => {
         impl Dispatch<$type, Entity> for MyWorld {
@@ -270,6 +286,7 @@ push_events!(WlTouch);
 push_events!(ZwpConfinedPointerV1);
 push_events!(ZwpLockedPointerV1);
 push_events!(WpFractionalScaleV1);
+push_events!(ZxdgToplevelDecorationV1);
 
 pub(crate) struct LateInitObjectKey<P: Proxy> {
     key: OnceLock<Entity>,

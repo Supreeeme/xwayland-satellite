@@ -1766,7 +1766,7 @@ fn xdg_decorations() {
     let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
     let surface = f.map_as_toplevel(&mut connection, window);
     let data = f.testwl.get_surface_data(surface).unwrap();
-    // The default decoration mode in x11 is SDD
+    // The default decoration mode in x11 is SSD
     assert_eq!(
         data.toplevel()
             .decoration
@@ -1782,8 +1782,7 @@ fn xdg_decorations() {
         connection.atoms.motif_wm_hints,
         &[2u32, 0, 0, 0, 0],
     );
-    std::thread::sleep(std::time::Duration::from_millis(1));
-    f.testwl.dispatch();
+    f.wait_and_dispatch();
     let data = f.testwl.get_surface_data(surface).unwrap();
     assert_eq!(
         data.toplevel()
@@ -1800,8 +1799,7 @@ fn xdg_decorations() {
         connection.atoms.motif_wm_hints,
         &[2u32, 0, 1, 0, 0],
     );
-    std::thread::sleep(std::time::Duration::from_millis(1));
-    f.testwl.dispatch();
+    f.wait_and_dispatch();
     let data = f.testwl.get_surface_data(surface).unwrap();
     assert_eq!(
         data.toplevel()

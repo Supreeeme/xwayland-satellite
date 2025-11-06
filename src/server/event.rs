@@ -1,7 +1,8 @@
 use super::clientside::LateInitObjectKey;
+use super::decoration::DecorationMarker;
 use super::*;
-use hecs::CommandBuffer;
-use log::{debug, trace, warn};
+use hecs::{CommandBuffer, World};
+use log::{debug, error, trace, warn};
 use macros::simple_event_shunt;
 use std::os::fd::AsFd;
 use wayland_client::{protocol as client, Proxy};
@@ -35,6 +36,7 @@ use wayland_protocols::{
         viewporter::client::wp_viewport::WpViewport,
     },
     xdg::{
+        decoration::zv1::client::zxdg_toplevel_decoration_v1,
         shell::client::{xdg_popup, xdg_surface, xdg_toplevel},
         xdg_output::zv1::{
             client::zxdg_output_v1, server::zxdg_output_v1::ZxdgOutputV1 as XdgOutputServer,
@@ -64,6 +66,7 @@ pub(crate) enum SurfaceEvents {
     Toplevel(xdg_toplevel::Event),
     Popup(xdg_popup::Event),
     FractionalScale(wp_fractional_scale_v1::Event),
+    DecorationEvent(zxdg_toplevel_decoration_v1::Event),
 }
 macro_rules! impl_from {
     ($type:ty, $variant:ident) => {
@@ -79,6 +82,7 @@ impl_from!(xdg_surface::Event, XdgSurface);
 impl_from!(xdg_toplevel::Event, Toplevel);
 impl_from!(xdg_popup::Event, Popup);
 impl_from!(wp_fractional_scale_v1::Event, FractionalScale);
+impl_from!(zxdg_toplevel_decoration_v1::Event, DecorationEvent);
 
 impl Event for SurfaceEvents {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
@@ -114,6 +118,63 @@ impl Event for SurfaceEvents {
                 }
                 _ => unreachable!(),
             },
+            SurfaceEvents::DecorationEvent(event) => {
+                use zxdg_toplevel_decoration_v1::{Event, Mode};
+                let Event::Configure { mode } = event else {
+                    error!("unhandled toplevel decoration event: {event:?}");
+                    return;
+                };
+
+                let entity = state.world.entity(target).unwrap();
+                let Some(window_data) = entity.get::<&WindowData>() else {
+                    return;
+                };
+                let Ok(mode) = mode.into_result() else {
+                    warn!("unknown decoration mode: {mode:?}");
+                    return;
+                };
+
+                let needs_server_side_decorations = window_data
+                    .attrs
+                    .decorations
+                    .is_none_or(|d| d == Decorations::Server);
+
+                if mode == Mode::ServerSide || !needs_server_side_decorations {
+                    let mut role = entity.get::<&mut SurfaceRole>().unwrap();
+                    if let SurfaceRole::Toplevel(Some(toplevel)) = &mut *role {
+                        toplevel.decoration.satellite.take();
+                    }
+                    return;
+                }
+
+                let Some((sat_decoration, buf)) = entity
+                    .get::<&client::wl_surface::WlSurface>()
+                    .and_then(|surface| {
+                        DecorationsDataSatellite::try_new(
+                            state,
+                            &surface,
+                            window_data.attrs.title.as_ref().map(WmName::name),
+                        )
+                    })
+                else {
+                    warn!("Needed to create decorations for window, but couldn't create them!");
+                    return;
+                };
+
+                let mut role = entity.get::<&mut SurfaceRole>().unwrap();
+                // This should always be the case, but, you never know.
+                if let SurfaceRole::Toplevel(Some(toplevel)) = &mut *role {
+                    toplevel.decoration.satellite = Some(sat_decoration);
+                } else {
+                    warn!("Created a decoration for a surface that isn't a toplevel?");
+                }
+
+                drop(window_data);
+                drop(role);
+                if let Some(mut buf) = buf {
+                    buf.run_on(&mut state.world);
+                }
+            }
         }
     }
 }
@@ -223,8 +284,13 @@ impl SurfaceEvents {
         drop(xdg);
 
         if let Some(pending) = pending {
-            let mut query = data.query::<(&SurfaceScaleFactor, &x::Window, &mut WindowData)>();
-            let (scale_factor, window, window_data) = query.get().unwrap();
+            let mut query = data.query::<(
+                &SurfaceScaleFactor,
+                &x::Window,
+                &mut WindowData,
+                &mut SurfaceRole,
+            )>();
+            let (scale_factor, window, window_data, role) = query.get().unwrap();
 
             let window = *window;
             let x = (pending.x.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.x;
@@ -234,7 +300,7 @@ impl SurfaceEvents {
             } else {
                 window_data.attrs.dims.width
             };
-            let height = if pending.height > 0 {
+            let mut height = if pending.height > 0 {
                 (pending.height as f64 * scale_factor.0) as u16
             } else {
                 window_data.attrs.dims.height
@@ -243,6 +309,20 @@ impl SurfaceEvents {
                 "configuring {} ({window:?}): {x}x{y}, {width}x{height}",
                 data.get::<&WlSurface>().unwrap().id(),
             );
+
+            if let SurfaceRole::Toplevel(Some(toplevel)) = &mut *role {
+                if let Some(d) = &mut toplevel.decoration.satellite {
+                    let surface_width = (width as f64 / scale_factor.0) as i32;
+                    d.draw_decorations(&state.world, surface_width, scale_factor.0 as f32);
+                    height = height
+                        .saturating_sub(
+                            (DecorationsDataSatellite::TITLEBAR_HEIGHT as f64 * scale_factor.0)
+                                as u16,
+                        )
+                        .max(DecorationsDataSatellite::TITLEBAR_HEIGHT as u16);
+                }
+            }
+
             connection.set_window_dims(
                 window,
                 PendingSurfaceState {
@@ -446,7 +526,16 @@ impl Event for client::wl_seat::Event {
 }
 
 struct PendingEnter(client::wl_pointer::Event);
-struct CurrentSurface(Entity);
+enum CurrentSurface {
+    Xwayland(Entity),
+    Decoration(Entity),
+}
+
+impl CurrentSurface {
+    fn is_decoration(&self) -> bool {
+        matches!(self, Self::Decoration(..))
+    }
+}
 pub struct LastClickSerial(pub client::wl_seat::WlSeat, pub u32);
 
 impl Event for client::wl_pointer::Event {
@@ -511,7 +600,6 @@ impl Event for client::wl_pointer::Event {
                 let state = &mut state.inner;
                 let mut cmd = CommandBuffer::new();
                 let pending_enter = state.world.remove_one::<PendingEnter>(target).ok();
-                let server = state.world.get::<&WlPointer>(target).unwrap();
                 let surface_entity = surface.data().copied();
                 let mut query = surface_entity.and_then(|e| {
                     state
@@ -521,10 +609,20 @@ impl Event for client::wl_pointer::Event {
                 });
                 let Some((surface, role, scale, window)) = query.as_mut().and_then(|q| q.get())
                 else {
-                    warn!("could not enter surface: stale surface");
+                    if let Some(&DecorationMarker { parent }) = surface.data() {
+                        drop(query);
+                        state
+                            .world
+                            .insert_one(target, CurrentSurface::Decoration(parent))
+                            .unwrap();
+                    } else {
+                        warn!("could not enter surface: stale surface");
+                    }
+
                     return;
                 };
 
+                let server = state.world.get::<&WlPointer>(target).unwrap();
                 cmd.insert(target, (*scale,));
 
                 let surface_is_popup = matches!(role, SurfaceRole::Popup(_));
@@ -535,7 +633,7 @@ impl Event for client::wl_pointer::Event {
                     if !surface_is_popup {
                         state.last_hovered = Some(*window);
                     }
-                    cmd.insert(target, (CurrentSurface(surface_entity.unwrap()),));
+                    cmd.insert_one(target, CurrentSurface::Xwayland(surface_entity.unwrap()));
                 };
 
                 if !surface_is_popup {
@@ -565,13 +663,18 @@ impl Event for client::wl_pointer::Event {
                 drop(server);
                 cmd.run_on(&mut state.world);
             }
-            client::wl_pointer::Event::Leave { serial, surface } => {
+            Self::Leave { serial, surface } => {
                 let _ = state.world.remove_one::<PendingEnter>(target);
-                let _ = state.world.remove_one::<CurrentSurface>(target);
                 if !surface.is_alive() {
                     return;
                 }
                 debug!("leaving surface ({serial})");
+                if let Ok(CurrentSurface::Decoration(parent)) =
+                    state.world.remove_one::<CurrentSurface>(target)
+                {
+                    decoration::handle_pointer_leave(state, parent);
+                    return;
+                }
                 if let Some(surface) = surface
                     .data()
                     .copied()
@@ -586,13 +689,20 @@ impl Event for client::wl_pointer::Event {
                     warn!("could not leave surface: stale surface");
                 }
             }
-            client::wl_pointer::Event::Motion {
+            Self::Motion {
                 time,
                 surface_x,
                 surface_y,
             } => {
                 if !handle_pending_enter(target, state, "motion") {
                     return;
+                }
+                {
+                    let surface = state.world.get::<&CurrentSurface>(target).unwrap();
+                    if let CurrentSurface::Decoration(parent) = &*surface {
+                        decoration::handle_pointer_motion(state, *parent, surface_x, surface_y);
+                        return;
+                    }
                 }
                 let (server, scale) = state
                     .world
@@ -606,7 +716,7 @@ impl Event for client::wl_pointer::Event {
                 );
                 server.motion(time, surface_x * scale.0, surface_y * scale.0);
             }
-            client::wl_pointer::Event::Button {
+            Self::Button {
                 serial,
                 time,
                 button,
@@ -616,12 +726,13 @@ impl Event for client::wl_pointer::Event {
                     return;
                 }
                 let mut cmd = CommandBuffer::new();
-                let (server, seat, CurrentSurface(surface)) = state
+
+                let mut query = state
                     .world
-                    .query_one_mut::<(&WlPointer, &client::wl_seat::WlSeat, &CurrentSurface)>(
-                        target,
-                    )
+                    .query_one::<(&WlPointer, &client::wl_seat::WlSeat, &CurrentSurface)>(target)
                     .unwrap();
+
+                let (server, seat, current_surface) = query.get().unwrap();
 
                 // from linux/input-event-codes.h
                 mod button_codes {
@@ -631,14 +742,33 @@ impl Event for client::wl_pointer::Event {
                 if button_state == WEnum::Value(client::wl_pointer::ButtonState::Pressed)
                     && button == button_codes::LEFT
                 {
-                    cmd.insert(*surface, (LastClickSerial(seat.clone(), serial),));
+                    match current_surface {
+                        CurrentSurface::Xwayland(entity) => {
+                            cmd.insert(*entity, (LastClickSerial(seat.clone(), serial),));
+                        }
+                        CurrentSurface::Decoration(parent) => {
+                            let seat = seat.clone();
+                            let parent = *parent;
+                            drop(query);
+                            decoration::handle_pointer_click(state, parent, &seat, serial);
+                            return;
+                        }
+                    }
                 }
 
                 server.button(serial, time, button, convert_wenum(button_state));
+                drop(query);
                 cmd.run_on(&mut state.world);
             }
             _ => {
-                let server = state.world.get::<&WlPointer>(target).unwrap();
+                let (server, current_surface) = state
+                    .world
+                    .query_one_mut::<(&WlPointer, Option<&CurrentSurface>)>(target)
+                    .unwrap();
+
+                if current_surface.is_some_and(CurrentSurface::is_decoration) {
+                    return;
+                }
                 simple_event_shunt! {
                     server, self => [
                         Frame,
