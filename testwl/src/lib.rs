@@ -1673,7 +1673,7 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                     || match data.role.as_ref().unwrap() {
                         SurfaceRole::Toplevel(t) => t.toplevel.is_alive(),
                         SurfaceRole::Popup(p) => p.popup.is_alive(),
-                        _ => unreachable!()
+                        _ => unreachable!(),
                     };
                 if role_alive {
                     client.kill(
