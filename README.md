@@ -29,6 +29,9 @@ cargo build --release
 
 # run - will also build if not already built
 cargo run # --release
+
+# test - multi-threaded tests can be inconsistent; run tests one at a time
+cargo test -- --test-threads 1
 ```
 
 ## Systemd support
