@@ -2,8 +2,7 @@ use super::{get_atom_name, XState};
 use crate::server::selection::{Clipboard, ForeignSelection, Primary, SelectionType};
 use crate::{RealServerState, X11Selection};
 use log::{debug, error, warn};
-use rustix::event::{fd_set_insert, select};
-use rustix::fd::AsRawFd;
+use rustix::event::{poll, PollFd, PollFlags};
 use smithay_client_toolkit::data_device_manager::WritePipe;
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -175,14 +174,8 @@ impl Selection {
                     Ok(n) => buf = &buf[n..],
                     Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
                     Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                        let mut writefds = [Default::default()];
-                        fd_set_insert(&mut writefds, pipe.as_raw_fd());
-                        // SAFETY: nfds is correctly set to the numerically largest raw file
-                        // desciprtor being selected on plus 1, and all one fd is open for the
-                        // duration of the call.
-                        unsafe {
-                            select(pipe.as_raw_fd() + 1, None, Some(&mut writefds), None, None)?;
-                        }
+                        let mut pollfds = [PollFd::new(pipe, PollFlags::OUT)];
+                        poll(&mut pollfds, None)?;
                     }
                     Err(e) => return Err(e),
                 }
