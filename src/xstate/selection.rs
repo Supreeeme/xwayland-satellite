@@ -46,9 +46,9 @@ impl X11Selection for Selection {
 
     fn write_to(&self, mime: &str, pipe: WritePipe) {
         if let Some(target) = self.mimes.iter().find(|target| target.name == mime) {
-            // XWayland does not handle a selection having multiple outstanding INCR transfers well,
-            // even if they have different targets and properties. Xwayland can fail to send
-            // `PropertyNotify` events which indefinitely hang Wayland transfer receivers.
+            // A lot of X applications do not anticipate the possibility of multiple requests for
+            // its owned selection to need the INCR transfer mechanism and will stop sending the
+            // necessary `PropertyNotify` events, hanging Wayland transfer receivers.
             // To remedy this, every target requested by Wayland is put into a FIFO queue and the
             // `ConvertSelection` starting the next request is not sent until `next_conversion`
             // closes the `WritePipe`, marking termination of that request.
