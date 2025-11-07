@@ -41,6 +41,8 @@ pub struct DecorationsDataSatellite {
     x_data: DecorationsBox,
     title: Option<String>,
     title_rect: Rect,
+    should_draw: bool,
+    remove_buffer: bool,
 }
 
 impl Drop for DecorationsDataSatellite {
@@ -100,6 +102,8 @@ impl DecorationsDataSatellite {
                 scale: 1.0,
                 title: title.map(str::to_string),
                 title_rect: Rect::from_ltrb(0.0, 0.0, 0.0, 0.0).unwrap(),
+                should_draw: true,
+                remove_buffer: false,
             }
             .into(),
             new_pool.map(|p| {
@@ -134,9 +138,21 @@ impl DecorationsDataSatellite {
         self.surface.commit();
     }
 
-    pub fn draw_decorations(&mut self, world: &World, width: i32, parent_scale_factor: f32) {
-        if width <= 0 {
-            return;
+    /// Returns true if decorations were actually drawn
+    #[must_use]
+    pub fn draw_decorations(
+        &mut self,
+        world: &World,
+        width: i32,
+        parent_scale_factor: f32,
+    ) -> bool {
+        if width <= 0 || !self.should_draw {
+            if self.remove_buffer {
+                self.surface.attach(None, 0, 0);
+                self.surface.commit();
+                self.remove_buffer = false;
+            }
+            return false;
         }
 
         self.scale = parent_scale_factor;
@@ -196,6 +212,7 @@ impl DecorationsDataSatellite {
         self.pixmap = bar;
         self.viewport.set_destination(width, Self::TITLEBAR_HEIGHT);
         self.update_buffer(world);
+        true
     }
 
     fn redraw_x_pixmap(&mut self, world: &World) {
@@ -261,6 +278,13 @@ impl DecorationsDataSatellite {
         self.surface
             .damage_buffer(0, 0, damaged_width as i32, last_title_rect.height() as i32);
         self.update_buffer(world);
+    }
+
+    pub fn handle_fullscreen(&mut self, fullscreen: bool) {
+        if self.should_draw == fullscreen {
+            self.should_draw = !fullscreen;
+            self.remove_buffer = fullscreen;
+        }
     }
 
     fn handle_motion(&mut self, world: &World, x: f64, y: f64) {

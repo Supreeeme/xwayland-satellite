@@ -2608,23 +2608,61 @@ fn client_side_decorations() {
     let (_, id) = f.create_toplevel(&compositor, window);
     f.testwl
         .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ClientSide);
+    f.testwl.configure_toplevel(id, 100, 100, vec![]);
     f.run();
 
+    let data = f.connection().window(window);
+    assert_eq!(
+        data.dims,
+        WindowDims {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 75
+        }
+    );
     let subsurface_id = f.testwl.last_created_surface_id().unwrap();
     assert_ne!(subsurface_id, id);
     let data = f.testwl.get_surface_data(subsurface_id).unwrap();
+    assert!(data.buffer.is_some());
     let Some(SurfaceRole::Subsurface(subsurface)) = &data.role else {
         panic!("surface was not a subsurface: {:?}", data.role);
     };
-
     assert_eq!(subsurface.position, testwl::Vec2 { x: 0, y: -25 });
     assert_eq!(subsurface.parent, id);
     let subsurface = subsurface.subsurface.clone();
 
     f.testwl
+        .configure_toplevel(id, 100, 100, vec![xdg_toplevel::State::Fullscreen]);
+    f.run();
+    let data = f.connection().window(window);
+    assert_eq!(
+        data.dims,
+        WindowDims {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100
+        }
+    );
+    let data = f.testwl.get_surface_data(subsurface_id).unwrap();
+    assert!(data.buffer.is_none());
+
+    f.testwl
         .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ServerSide);
+    f.testwl.configure_toplevel(id, 100, 100, vec![]);
     f.run();
 
+    let data = f.connection().window(window);
+    assert_eq!(
+        data.dims,
+        WindowDims {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100
+        }
+    );
     assert!(f.testwl.get_surface_data(subsurface_id).is_none());
     assert!(!subsurface.is_alive());
 }

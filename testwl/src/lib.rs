@@ -1865,6 +1865,7 @@ impl Dispatch<WlShmPool, ()> for State {
                 let buf = data_init.init(id, ());
                 state.buffers.insert(buf);
             }
+            Resize { .. } => {}
             Destroy => {}
             other => todo!("unhandled request {other:?}"),
         }

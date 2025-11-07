@@ -313,13 +313,14 @@ impl SurfaceEvents {
             if let SurfaceRole::Toplevel(Some(toplevel)) = &mut *role {
                 if let Some(d) = &mut toplevel.decoration.satellite {
                     let surface_width = (width as f64 / scale_factor.0) as i32;
-                    d.draw_decorations(&state.world, surface_width, scale_factor.0 as f32);
-                    height = height
-                        .saturating_sub(
-                            (DecorationsDataSatellite::TITLEBAR_HEIGHT as f64 * scale_factor.0)
-                                as u16,
-                        )
-                        .max(DecorationsDataSatellite::TITLEBAR_HEIGHT as u16);
+                    if d.draw_decorations(&state.world, surface_width, scale_factor.0 as f32) {
+                        height = height
+                            .saturating_sub(
+                                (DecorationsDataSatellite::TITLEBAR_HEIGHT as f64 * scale_factor.0)
+                                    as u16,
+                            )
+                            .max(DecorationsDataSatellite::TITLEBAR_HEIGHT as u16);
+                    }
                 }
             }
 
@@ -393,6 +394,9 @@ impl SurfaceEvents {
                             *data.get::<&x::Window>().unwrap(),
                             toplevel.fullscreen,
                         );
+                        if let Some(decorations) = toplevel.decoration.satellite.as_mut() {
+                            decorations.handle_fullscreen(toplevel.fullscreen);
+                        }
                     }
                 };
 
