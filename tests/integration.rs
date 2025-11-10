@@ -86,6 +86,10 @@ impl xwls::RunData for TestData {
     fn max_req_len_bytes(&self) -> Option<usize> {
         Some(500)
     }
+    fn ext_add(&self) -> Vec<&str> {
+        let ext: Vec<&str> = Vec::new();
+        ext
+    }
 }
 
 struct Fixture {
