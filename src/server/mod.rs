@@ -941,12 +941,10 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         };
         if dims == win.attrs.dims {
             return;
+        } else {
+            win.attrs.dims = dims;
         }
         debug!("Reconfiguring {:?} {:?}", event.window(), dims);
-        if !win.mapped {
-            win.attrs.dims = dims;
-            return;
-        }
 
         if self.xdg_wm_base.version() < 3 {
             return;
