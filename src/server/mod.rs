@@ -944,10 +944,13 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         };
         if dims == win.attrs.dims {
             return;
-        }
-        debug!("Reconfiguring {:?} {:?}", event.window(), dims);
-        if !win.mapped {
+        } else {
             win.attrs.dims = dims;
+        }
+
+        debug!("Reconfiguring {:?} {:?}", event.window(), dims);
+
+        if !win.mapped {
             return;
         }
 
