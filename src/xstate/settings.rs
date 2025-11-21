@@ -164,18 +164,19 @@ impl Settings {
     fn set_scale(&mut self, scale: f64) {
         self.serial += 1;
 
+        let base = DEFAULT_DPI as f64 * DPI_SCALE_FACTOR as f64;
         let scale = scale.max(1.0);
-        let setting = IntSetting {
-            value: (scale * DEFAULT_DPI as f64 * DPI_SCALE_FACTOR as f64).round() as i32,
+        self.settings.entry(XFT_DPI).insert_entry(IntSetting {
+            value: (scale * base).round() as i32,
             last_change_serial: self.serial,
-        };
-        self.settings.entry(XFT_DPI).insert_entry(setting);
+        });
         // Gdk/WindowScalingFactor + Gdk/UnscaledDPI is identical to setting
         // GDK_SCALE = scale and then GDK_DPI_SCALE = 1 / scale.
+        let ratio = 1.0 + scale.fract() / scale.trunc();
         self.settings
             .entry(GDK_UNSCALED_DPI)
             .insert_entry(IntSetting {
-                value: setting.value / scale as i32,
+                value: (ratio * base).round() as i32,
                 last_change_serial: self.serial,
             });
         self.settings
