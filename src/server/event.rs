@@ -113,7 +113,10 @@ impl Event for SurfaceEvents {
                         }
                     }
                     if entity.has::<WindowData>() {
-                        update_surface_viewport(state.world.query_one(target).unwrap());
+                        update_surface_viewport(
+                            &state.world,
+                            state.world.query_one(target).unwrap(),
+                        );
                     }
                 }
                 _ => unreachable!(),
@@ -228,7 +231,10 @@ impl SurfaceEvents {
                         let output_scale = output_data.get::<&OutputScaleFactor>().unwrap().get();
                         data.get::<&mut SurfaceScaleFactor>().unwrap().0 = output_scale;
                         drop(query);
-                        update_surface_viewport(state.world.query_one(target).unwrap());
+                        update_surface_viewport(
+                            &state.world,
+                            state.world.query_one(target).unwrap(),
+                        );
                     } else {
                         let scale = data.get::<&SurfaceScaleFactor>().unwrap();
                         if update_output_scale(
@@ -310,10 +316,10 @@ impl SurfaceEvents {
                 data.get::<&WlSurface>().unwrap().id(),
             );
 
-            if let SurfaceRole::Toplevel(Some(toplevel)) = &mut *role {
-                if let Some(d) = &mut toplevel.decoration.satellite {
+            if let SurfaceRole::Toplevel(Some(toplevel)) = &*role {
+                if let Some(d) = &toplevel.decoration.satellite {
                     let surface_width = (width as f64 / scale_factor.0) as i32;
-                    if d.draw_decorations(&state.world, surface_width, scale_factor.0 as f32) {
+                    if d.will_draw_decorations(surface_width) {
                         height = height
                             .saturating_sub(
                                 (DecorationsDataSatellite::TITLEBAR_HEIGHT as f64 * scale_factor.0)
@@ -341,7 +347,7 @@ impl SurfaceEvents {
             };
 
             drop(query);
-            update_surface_viewport(state.world.query_one(target).unwrap());
+            update_surface_viewport(&state.world, state.world.query_one(target).unwrap());
         }
 
         let (surface, attach, callback) = state
@@ -457,15 +463,16 @@ impl SurfaceEvents {
 }
 
 pub(super) fn update_surface_viewport(
+    world: &World,
     mut surface_query: hecs::QueryOne<(
         &WindowData,
         &WpViewport,
         &SurfaceScaleFactor,
-        Option<&SurfaceRole>,
+        Option<&mut SurfaceRole>,
         &WlSurface,
     )>,
 ) {
-    let (window_data, viewport, scale_factor, role, surface) = surface_query.get().unwrap();
+    let (window_data, viewport, scale_factor, mut role, surface) = surface_query.get().unwrap();
     let dims = &window_data.attrs.dims;
     let size_hints = &window_data.attrs.size_hints;
 
@@ -474,25 +481,22 @@ pub(super) fn update_surface_viewport(
     if width > 0 && height > 0 {
         viewport.set_destination(width, height);
     }
+
+    let mut toplevel_data = match &mut role {
+        Some(SurfaceRole::Toplevel(Some(data))) => Some(data),
+        _ => None,
+    };
+    if let Some(d) = toplevel_data
+        .as_mut()
+        .and_then(|d| d.decoration.satellite.as_deref_mut())
+    {
+        d.draw_decorations(world, width, scale_factor.0 as f32);
+    }
     debug!("{} viewport: {width}x{height}", surface.id());
+
     if let Some(hints) = size_hints {
-        let data = match &role {
-            Some(SurfaceRole::Toplevel(Some(data))) => data,
-            Some(SurfaceRole::Toplevel(None)) => {
-                warn!(
-                    "Trying to update size hints on {}, but toplevel role data is missing",
-                    surface.id()
-                );
-                return;
-            }
-            Some(SurfaceRole::Popup(_)) => {
-                // Popups don't have min/max size hints.
-                return;
-            }
-            None => {
-                warn!("No role set on {}.", surface.id());
-                return;
-            }
+        let Some(data) = toplevel_data else {
+            return;
         };
 
         if let Some(min) = hints.min_size {

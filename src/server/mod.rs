@@ -656,7 +656,10 @@ impl<C: XConnection> ServerState<C> {
 
                     drop(surface_query);
                     for surface in surfaces {
-                        update_surface_viewport(self.world.query_one(surface).unwrap());
+                        update_surface_viewport(
+                            &self.world,
+                            self.world.query_one(surface).unwrap(),
+                        );
                     }
                 }
             }
@@ -952,7 +955,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return;
         }
 
-        let mut query = data.query::<(&SurfaceRole, &SurfaceScaleFactor)>();
+        let mut query = data.query::<(&mut SurfaceRole, &SurfaceScaleFactor)>();
         let Some((role, scale_factor)) = query.get() else {
             return;
         };
@@ -974,7 +977,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                 win.attrs.dims.height = dims.height;
                 drop(query);
                 drop(win);
-                update_surface_viewport(self.world.query_one(data.entity()).unwrap());
+                update_surface_viewport(&self.world, self.world.query_one(data.entity()).unwrap());
             }
             other => warn!("Non popup ({other:?}) being reconfigured, behavior may be off."),
         }

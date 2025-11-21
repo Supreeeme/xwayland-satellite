@@ -138,21 +138,20 @@ impl DecorationsDataSatellite {
         self.surface.commit();
     }
 
-    /// Returns true if decorations were actually drawn
     #[must_use]
-    pub fn draw_decorations(
-        &mut self,
-        world: &World,
-        width: i32,
-        parent_scale_factor: f32,
-    ) -> bool {
-        if width <= 0 || !self.should_draw {
+    pub fn will_draw_decorations(&self, width: i32) -> bool {
+        width > 0 && self.should_draw
+    }
+
+    pub fn draw_decorations(&mut self, world: &World, width: i32, parent_scale_factor: f32) {
+        if !self.will_draw_decorations(width) {
+            println!("not drawing ({} {})", width, self.should_draw);
             if self.remove_buffer {
                 self.surface.attach(None, 0, 0);
                 self.surface.commit();
                 self.remove_buffer = false;
             }
-            return false;
+            return;
         }
 
         self.scale = parent_scale_factor;
@@ -212,7 +211,6 @@ impl DecorationsDataSatellite {
         self.pixmap = bar;
         self.viewport.set_destination(width, Self::TITLEBAR_HEIGHT);
         self.update_buffer(world);
-        true
     }
 
     fn redraw_x_pixmap(&mut self, world: &World) {

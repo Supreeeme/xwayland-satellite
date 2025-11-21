@@ -1362,7 +1362,6 @@ fn different_output_position() {
     f.testwl.move_pointer_to(surface, 150.0, 12.0);
     f.wait_and_dispatch();
     let reply = connection.get_reply(&x::QueryPointer { window });
-    println!("reply: {reply:?}");
     assert!(reply.same_screen());
     assert_eq!(reply.win_x(), 150);
     assert_eq!(reply.win_y(), 12);

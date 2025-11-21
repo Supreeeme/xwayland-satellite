@@ -260,7 +260,7 @@ struct State {
     surfaces: HashMap<SurfaceId, SurfaceData>,
     outputs: HashMap<WlOutput, Output>,
     positioners: HashMap<PositionerId, PositionerState>,
-    buffers: HashSet<WlBuffer>,
+    buffers: HashMap<WlBuffer, Vec2>,
     begin: Instant,
     last_surface_id: Option<SurfaceId>,
     created_surfaces: Vec<SurfaceId>,
@@ -559,7 +559,6 @@ impl Server {
     }
 
     pub fn get_surface_data(&self, surface_id: SurfaceId) -> Option<&SurfaceData> {
-        println!("{:?}", self.state.surfaces);
         self.state.surfaces.get(&surface_id)
     }
 
@@ -935,6 +934,15 @@ impl Server {
         self.display
             .handle()
             .remove_global::<State>(self.decorations_global.clone());
+    }
+
+    #[track_caller]
+    pub fn get_buffer_dimensions(&self, buffer: &WlBuffer) -> Vec2 {
+        *self
+            .state
+            .buffers
+            .get(buffer)
+            .expect("buffer does not exist!")
     }
 }
 
@@ -1861,9 +1869,17 @@ impl Dispatch<WlShmPool, ()> for State {
     ) {
         use proto::wl_shm_pool::Request::*;
         match request {
-            CreateBuffer { id, .. } => {
+            CreateBuffer {
+                id, width, height, ..
+            } => {
                 let buf = data_init.init(id, ());
-                state.buffers.insert(buf);
+                state.buffers.insert(
+                    buf,
+                    Vec2 {
+                        x: width,
+                        y: height,
+                    },
+                );
             }
             Resize { .. } => {}
             Destroy => {}

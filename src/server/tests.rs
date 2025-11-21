@@ -2716,6 +2716,60 @@ fn client_side_decorations_no_global() {
     assert_eq!(toplevel.unwrap(), subsurface_parent.unwrap());
 }
 
+#[test]
+fn resize_decorations_on_reconfigure() {
+    let (mut f, compositor) = TestFixture::new_with_compositor();
+    let window = unsafe { Window::new(1) };
+    let (_, id) = f.create_toplevel(&compositor, window);
+    f.testwl
+        .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ClientSide);
+    f.testwl.configure_toplevel(id, 100, 100, vec![]);
+    f.run();
+
+    let data = f.connection().window(window);
+    assert_eq!(
+        data.dims,
+        WindowDims {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 75
+        }
+    );
+    let subsurface_id = f.testwl.last_created_surface_id().unwrap();
+    assert_ne!(subsurface_id, id);
+    let data = f.testwl.get_surface_data(subsurface_id).unwrap();
+    let buf_dims = f
+        .testwl
+        .get_buffer_dimensions(data.buffer.as_ref().expect("Missing buffer for subsurface"));
+    assert_eq!(buf_dims, testwl::Vec2 { x: 100, y: 25 });
+    assert!(
+        matches!(data.role, Some(SurfaceRole::Subsurface(_))),
+        "surface was not a subsurface: {:?}",
+        data.role
+    );
+
+    f.satellite.reconfigure_window(x::ConfigureNotifyEvent::new(
+        window,
+        window,
+        x::WINDOW_NONE,
+        0,
+        0,
+        200,
+        200,
+        0,
+        false,
+    ));
+    f.run();
+    f.run();
+
+    let data = f.testwl.get_surface_data(subsurface_id).unwrap();
+    let buf_dims = f
+        .testwl
+        .get_buffer_dimensions(data.buffer.as_ref().expect("Missing buffer for subsurface"));
+    assert_eq!(buf_dims, testwl::Vec2 { x: 200, y: 25 });
+}
+
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}
