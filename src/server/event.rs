@@ -634,7 +634,7 @@ impl Event for client::wl_pointer::Event {
                             .insert_one(target, CurrentSurface::Decoration(parent))
                             .unwrap();
                     } else {
-                        warn!("could not enter surface: stale surface");
+                        warn!("could not enter surface {}: stale surface", surface.id());
                     }
 
                     return;
@@ -686,7 +686,7 @@ impl Event for client::wl_pointer::Event {
                 if !surface.is_alive() {
                     return;
                 }
-                debug!("leaving surface ({serial})");
+                debug!("leaving surface ({})", surface.id());
                 if let Ok(CurrentSurface::Decoration(parent)) =
                     state.world.remove_one::<CurrentSurface>(target)
                 {
@@ -716,7 +716,10 @@ impl Event for client::wl_pointer::Event {
                     return;
                 }
                 {
-                    let surface = state.world.get::<&CurrentSurface>(target).unwrap();
+                    let Ok(surface) = state.world.get::<&CurrentSurface>(target) else {
+                        warn!("could not motion on surface: stale surface");
+                        return;
+                    };
                     if let CurrentSurface::Decoration(parent) = &*surface {
                         decoration::handle_pointer_motion(state, *parent, surface_x, surface_y);
                         return;
@@ -745,10 +748,16 @@ impl Event for client::wl_pointer::Event {
                 }
                 let mut cmd = CommandBuffer::new();
 
-                let mut query = state
-                    .world
-                    .query_one::<(&WlPointer, &client::wl_seat::WlSeat, &CurrentSurface)>(target)
-                    .unwrap();
+                let Ok(mut query) =
+                    state
+                        .world
+                        .query_one::<(&WlPointer, &client::wl_seat::WlSeat, &CurrentSurface)>(
+                            target,
+                        )
+                else {
+                    warn!("could not click on surface: stale surface");
+                    return;
+                };
 
                 let (server, seat, current_surface) = query.get().unwrap();
 
