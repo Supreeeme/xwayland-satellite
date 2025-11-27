@@ -2288,6 +2288,17 @@ fn toplevel_size_limits_scaled() {
     let toplevel = data.toplevel();
     assert_eq!(toplevel.min_size, Some(testwl::Vec2 { x: 20, y: 20 }));
     assert_eq!(toplevel.max_size, Some(testwl::Vec2 { x: 100, y: 100 }));
+
+    // test sizing with decorations
+    f.testwl
+        .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ClientSide);
+    f.testwl.configure_toplevel(id, 100, 100, vec![]);
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let toplevel = data.toplevel();
+    assert_eq!(toplevel.min_size, Some(testwl::Vec2 { x: 20, y: 45 }));
+    assert_eq!(toplevel.max_size, Some(testwl::Vec2 { x: 100, y: 125 }));
 }
 
 #[test]

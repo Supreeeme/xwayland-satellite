@@ -145,7 +145,6 @@ impl DecorationsDataSatellite {
 
     pub fn draw_decorations(&mut self, world: &World, width: i32, parent_scale_factor: f32) {
         if !self.will_draw_decorations(width) {
-            println!("not drawing ({} {})", width, self.should_draw);
             if self.remove_buffer {
                 self.surface.attach(None, 0, 0);
                 self.surface.commit();

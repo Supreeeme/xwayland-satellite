@@ -499,16 +499,26 @@ pub(super) fn update_surface_viewport(
             return;
         };
 
+        let decorations_height = if data.decoration.satellite.is_some() {
+            DecorationsDataSatellite::TITLEBAR_HEIGHT
+        } else {
+            0
+        };
+
         if let Some(min) = hints.min_size {
+            debug!(
+                "updated min height: {}",
+                (min.height as f64 / scale_factor.0) as i32 + decorations_height
+            );
             data.toplevel.set_min_size(
                 (min.width as f64 / scale_factor.0) as i32,
-                (min.height as f64 / scale_factor.0) as i32,
+                (min.height as f64 / scale_factor.0) as i32 + decorations_height,
             );
         }
         if let Some(max) = hints.max_size {
             data.toplevel.set_max_size(
                 (max.width as f64 / scale_factor.0) as i32,
-                (max.height as f64 / scale_factor.0) as i32,
+                (max.height as f64 / scale_factor.0) as i32 + decorations_height,
             );
         }
     }
