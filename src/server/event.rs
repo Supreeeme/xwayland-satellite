@@ -934,27 +934,37 @@ impl Event for client::wl_touch::Event {
             } => {
                 let mut cmd = CommandBuffer::new();
                 {
-                    let mut s_query = surface.data().copied().and_then(|key| {
+                    let s_entity = surface.data().copied();
+                    let mut s_query = s_entity.and_then(|key| {
                         state
                             .world
                             .query_one::<(&WlSurface, &SurfaceScaleFactor)>(key)
                             .ok()
                     });
-                    let Some((s_surface, s_factor)) = s_query.as_mut().and_then(|q| q.get()) else {
-                        return;
-                    };
-
-                    cmd.insert(target, (*s_factor,));
-                    let touch = state.world.get::<&WlTouch>(target).unwrap();
-                    touch.down(serial, time, s_surface, id, x * s_factor.0, y * s_factor.0);
+                    if let Some((s_surface, s_factor)) = s_query.as_mut().and_then(|q| q.get()) {
+                        cmd.insert_one(target, *s_factor);
+                        let touch = state.world.get::<&WlTouch>(target).unwrap();
+                        touch.down(serial, time, s_surface, id, x * s_factor.0, y * s_factor.0);
+                    } else if let Some(&DecorationMarker { parent }) = surface.data() {
+                        drop(s_query);
+                        let seat = {
+                            let seat =
+                                &*state.world.get::<&client::wl_seat::WlSeat>(target).unwrap();
+                            seat.clone()
+                        };
+                        decoration::handle_pointer_motion(state, parent, x, y);
+                        decoration::handle_pointer_click(state, parent, &seat, serial);
+                    }
                 }
                 cmd.run_on(&mut state.world);
             }
             Self::Motion { time, id, x, y } => {
-                let (touch, scale) = state
+                let Ok((touch, scale)) = state
                     .world
                     .query_one_mut::<(&WlTouch, &SurfaceScaleFactor)>(target)
-                    .unwrap();
+                else {
+                    return;
+                };
                 touch.motion(time, id, x * scale.0, y * scale.0);
             }
             _ => {

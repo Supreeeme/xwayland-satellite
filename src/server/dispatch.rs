@@ -425,7 +425,6 @@ impl<S: X11Selection> Dispatch<WlTouch, Entity> for InnerServerState<S> {
                     .get::<&client::wl_touch::WlTouch>(*entity)
                     .unwrap()
                     .release();
-                state.world.despawn(*entity).unwrap();
             }
             _ => unreachable!(),
         }
@@ -466,16 +465,15 @@ impl<S: X11Selection> Dispatch<WlSeat, Entity> for InnerServerState<S> {
                 state.world.insert(*entity, (client, server)).unwrap();
             }
             Request::<WlSeat>::GetTouch { id } => {
-                let new_entity = state.world.reserve_entity();
                 let client = {
                     state
                         .world
                         .get::<&client::wl_seat::WlSeat>(*entity)
                         .unwrap()
-                        .get_touch(&state.qh, new_entity)
+                        .get_touch(&state.qh, *entity)
                 };
-                let server = data_init.init(id, new_entity);
-                state.world.spawn_at(new_entity, (client, server));
+                let server = data_init.init(id, *entity);
+                state.world.insert(*entity, (client, server)).unwrap();
             }
             other => warn!("unhandled seat request: {other:?}"),
         }
