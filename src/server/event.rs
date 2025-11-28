@@ -934,16 +934,20 @@ impl Event for client::wl_touch::Event {
             } => {
                 let mut cmd = CommandBuffer::new();
                 {
+                    let connection = &mut state.connection;
+                    let world = &mut state.inner.world;
                     let s_entity = surface.data().copied();
                     let mut s_query = s_entity.and_then(|key| {
-                        state
-                            .world
-                            .query_one::<(&WlSurface, &SurfaceScaleFactor)>(key)
+                        world
+                            .query_one::<(&WlSurface, &SurfaceScaleFactor, &x::Window)>(key)
                             .ok()
                     });
-                    if let Some((s_surface, s_factor)) = s_query.as_mut().and_then(|q| q.get()) {
+                    if let Some((s_surface, s_factor, window)) =
+                        s_query.as_mut().and_then(|q| q.get())
+                    {
                         cmd.insert_one(target, *s_factor);
-                        let touch = state.world.get::<&WlTouch>(target).unwrap();
+                        connection.raise_to_top(*window);
+                        let touch = world.get::<&WlTouch>(target).unwrap();
                         touch.down(serial, time, s_surface, id, x * s_factor.0, y * s_factor.0);
                     } else if let Some(&DecorationMarker { parent }) = surface.data() {
                         drop(s_query);
