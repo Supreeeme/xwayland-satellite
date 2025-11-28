@@ -514,9 +514,6 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
 
         let decoration_manager = global_list
             .bind::<ZxdgDecorationManagerV1, _, _>(&qh, 1..=1, ())
-            .inspect_err(|e| {
-                warn!("Could not bind xdg decoration ({e:?}). Windows might not have decorations.")
-            })
             .ok();
 
         let selection_states = selection::SelectionStates::new(&global_list, &qh);
