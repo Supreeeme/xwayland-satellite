@@ -87,7 +87,6 @@ impl DecorationsDataSatellite {
                 .subcompositor
                 .get_subsurface(&surface, parent, &state.qh, ())
         };
-        subsurface.set_desync();
         subsurface.set_position(0, -Self::TITLEBAR_HEIGHT);
         let viewport = state.viewporter.get_viewport(&surface, &state.qh, ());
 
