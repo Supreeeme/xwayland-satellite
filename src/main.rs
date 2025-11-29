@@ -11,6 +11,7 @@ fn main() {
 struct RealData {
     display: Option<String>,
     listenfds: Vec<OwnedFd>,
+    ext_add: Vec<String>,
 }
 impl xwayland_satellite::RunData for RealData {
     fn display(&self) -> Option<&str> {
@@ -20,12 +21,17 @@ impl xwayland_satellite::RunData for RealData {
     fn listenfds(&mut self) -> Vec<OwnedFd> {
         std::mem::take(&mut self.listenfds)
     }
+
+    fn ext_add(&self) -> Vec<&str> {
+        self.ext_add.iter().map(AsRef::as_ref).collect()
+    }
 }
 
 fn parse_args() -> RealData {
     let mut data = RealData {
         display: None,
         listenfds: Vec::new(),
+        ext_add: Vec::new(),
     };
 
     let mut args: Vec<_> = std::env::args().collect();
@@ -33,7 +39,7 @@ fn parse_args() -> RealData {
         return data;
     }
 
-    // Argument at index 1 is our display name. The rest can be -listenfd.
+    // Argument at index 1 is our display name. The rest can be -listenfd or +extension.
     let mut i = 2;
     while i < args.len() {
         let arg = &args[i];
@@ -54,6 +60,14 @@ fn parse_args() -> RealData {
             i += 2;
         } else if arg == "--test-listenfd-support" {
             std::process::exit(0);
+        } else if arg == "+extension" {
+            let next = i + 1;
+            if next == args.len() {
+                panic!("Required argument to +extension not specified");
+            }
+            let ext: String = args[next].clone();
+            data.ext_add.push(ext);
+            i += 2;
         } else {
             panic!("Unrecognized argument: {arg}");
         }

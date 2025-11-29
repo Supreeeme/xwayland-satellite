@@ -73,3 +73,7 @@ a display number to satellite as the first argument, and then the `-listenfd` ar
 
 You can view [Niri's implementation of this integration](https://github.com/YaLTeR/niri/pull/1728/files) for understanding
 how it should work.
+
+
+## Extension support
+Satellite supports adding extensions to the X server through the `+extension` argument. This is particularly useful for OpenGl, which can be enabled with `+extension GLX`. Similar to `-listenfd`, you *must* pass a display number to satellite as the first argument.
