@@ -889,7 +889,7 @@ impl TestFixture<FakeXConnection> {
         }
     }
 
-    fn reposition_window(&mut self, window: Window, dims: WindowDims) {
+    fn reconfigure_window(&mut self, window: Window, dims: WindowDims, override_redirect: bool) {
         self.satellite
             .reconfigure_window(x::ConfigureNotifyEvent::new(
                 window,
@@ -900,7 +900,7 @@ impl TestFixture<FakeXConnection> {
                 dims.width,
                 dims.height,
                 0,
-                true,
+                override_redirect,
             ));
     }
 }
@@ -1725,7 +1725,7 @@ fn reconfigure_popup() {
         width: 80,
         height: 100,
     };
-    f.reposition_window(popup, new_dims);
+    f.reconfigure_window(popup, new_dims, true);
     f.run();
     f.run();
     f.assert_window_dimensions(popup, p_id, new_dims);
@@ -1759,7 +1759,7 @@ fn reconfigure_popup_after_map() {
     };
     f.new_window(popup, true, popup_data);
     f.satellite.map_window(popup);
-    f.reposition_window(popup, new_dims);
+    f.reconfigure_window(popup, new_dims, true);
     f.associate_window(&comp, popup, &surface);
     f.run();
     surface
@@ -1796,7 +1796,7 @@ fn reconfigure_toplevel() {
     // A toplevel can be resized, but not change position
     dims.x = 20;
     dims.y = 20;
-    f.reposition_window(toplevel, dims);
+    f.reconfigure_window(toplevel, dims, false);
     f.run();
     f.run();
 
@@ -2270,17 +2270,13 @@ fn fractional_scale_small_popup() {
     let pos = &data.popup().positioner_state;
     assert_eq!(pos.size.unwrap(), testwl::Vec2 { x: 1, y: 1 });
 
-    f.satellite.reconfigure_window(x::ConfigureNotifyEvent::new(
-        popup,
-        popup,
-        x::WINDOW_NONE,
-        0,
-        0,
-        2,
-        1,
-        0,
-        true,
-    ));
+    let dims = WindowDims {
+        x: 0,
+        y: 0,
+        width: 2,
+        height: 1,
+    };
+    f.reconfigure_window(popup, dims, true);
     f.run();
     f.run();
 
@@ -2837,17 +2833,13 @@ fn resize_decorations_on_reconfigure() {
         data.role
     );
 
-    f.satellite.reconfigure_window(x::ConfigureNotifyEvent::new(
-        window,
-        window,
-        x::WINDOW_NONE,
-        0,
-        0,
-        200,
-        200,
-        0,
-        false,
-    ));
+    let dims = WindowDims {
+        x: 0,
+        y: 0,
+        width: 200,
+        height: 200,
+    };
+    f.reconfigure_window(window, dims, false);
     f.run();
     f.run();
 
