@@ -724,6 +724,7 @@ impl XState {
                     self.window_atoms.dropdown_menu,
                     self.window_atoms.tooltip,
                     self.window_atoms.drag_n_drop,
+                    self.window_atoms.utility,
                 ]
                 .contains(&x) =>
                 {

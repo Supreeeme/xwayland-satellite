@@ -343,6 +343,7 @@ xcb::atoms_struct! {
         win_type_popup_menu => b"_NET_WM_WINDOW_TYPE_POPUP_MENU",
         win_type_dropdown_menu => b"_NET_WM_WINDOW_TYPE_DROPDOWN_MENU",
         win_type_tooltip => b"_NET_WM_WINDOW_TYPE_TOOLTIP",
+        win_type_utility => b"_NET_WM_WINDOW_TYPE_UTILITY",
         win_type_dnd => b"_NET_WM_WINDOW_TYPE_DND",
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
         mime1 => b"text/plain" only_if_exists = false,
@@ -2002,6 +2003,15 @@ fn popup_heuristics() {
         &[connection.atoms.win_type_dropdown_menu],
     );
     f.map_as_popup(&mut connection, git_gui_dropdown);
+
+    let wechat_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
+    connection.set_property(
+        wechat_popup,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_utility],
+    );
+    f.map_as_popup(&mut connection, wechat_popup);
 }
 
 #[test]
