@@ -339,6 +339,7 @@ xcb::atoms_struct! {
         wm_check => b"_NET_SUPPORTING_WM_CHECK",
         win_type => b"_NET_WM_WINDOW_TYPE",
         win_type_normal => b"_NET_WM_WINDOW_TYPE_NORMAL",
+        win_type_dialog => b"_NET_WM_WINDOW_TYPE_DIALOG",
         win_type_menu => b"_NET_WM_WINDOW_TYPE_MENU",
         win_type_popup_menu => b"_NET_WM_WINDOW_TYPE_POPUP_MENU",
         win_type_dropdown_menu => b"_NET_WM_WINDOW_TYPE_DROPDOWN_MENU",
@@ -1909,6 +1910,8 @@ fn forced_1x_scale_consistent_x11_size() {
     assert_eq!(geo.height(), 30);
 }
 
+// All issues have been cited since they provide `xprop` outputs and `override_redirect`
+// information, as they provide documentation for refining the heuristics in the future.
 #[test]
 fn popup_heuristics() {
     let mut f = Fixture::new();
@@ -1917,12 +1920,13 @@ fn popup_heuristics() {
     let win_toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
     f.map_as_toplevel(&mut connection, win_toplevel);
 
+    // https://github.com/Supreeeme/xwayland-satellite/issues/110
     let ghidra_popup = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
         ghidra_popup,
         x::ATOM_ATOM,
         connection.atoms.win_type,
-        &[connection.atoms.win_type_normal],
+        &[connection.atoms.win_type_dialog],
     );
     connection.set_property(
         ghidra_popup,
@@ -1938,27 +1942,33 @@ fn popup_heuristics() {
     );
     f.map_as_popup(&mut connection, ghidra_popup);
 
-    let reaper_dialog = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    // https://github.com/Supreeeme/xwayland-satellite/issues/112
+    let reaper_dropdown = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
-        ghidra_popup,
+        reaper_dropdown,
+        x::ATOM_ATOM,
+        connection.atoms.net_wm_state,
+        &[connection.atoms.skip_taskbar],
+    );
+    f.map_as_popup(&mut connection, reaper_dropdown);
+
+    // https://github.com/Supreeeme/xwayland-satellite/issues/293
+    let reaper_yabridge = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        reaper_yabridge,
         x::ATOM_ATOM,
         connection.atoms.win_type,
         &[connection.atoms.win_type_normal],
     );
     connection.set_property(
-        ghidra_popup,
+        reaper_yabridge,
         x::ATOM_ATOM,
         connection.atoms.net_wm_state,
         &[connection.atoms.skip_taskbar],
     );
-    connection.set_property(
-        ghidra_popup,
-        connection.atoms.motif_wm_hints,
-        connection.atoms.motif_wm_hints,
-        &[0x2_u32, 0, 0x2a, 0, 0],
-    );
-    f.map_as_toplevel(&mut connection, reaper_dialog);
+    f.map_as_popup(&mut connection, reaper_yabridge);
 
+    // https://github.com/Supreeeme/xwayland-satellite/issues/161
     let chromium_menu = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
         chromium_menu,
@@ -1967,7 +1977,6 @@ fn popup_heuristics() {
         &[connection.atoms.win_type_menu],
     );
     f.map_as_popup(&mut connection, chromium_menu);
-
     let chromium_tooltip = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
         chromium_tooltip,
@@ -1977,6 +1986,7 @@ fn popup_heuristics() {
     );
     f.map_as_popup(&mut connection, chromium_tooltip);
 
+    // https://github.com/Supreeeme/xwayland-satellite/issues/166
     let discord_dnd = connection.new_window(connection.root, 20, 138, 48, 48, true);
     connection.set_property(
         discord_dnd,
@@ -1986,6 +1996,7 @@ fn popup_heuristics() {
     );
     f.map_as_popup(&mut connection, discord_dnd);
 
+    // https://github.com/Supreeeme/xwayland-satellite/issues/253
     let git_gui_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
         git_gui_popup,
@@ -1994,16 +2005,16 @@ fn popup_heuristics() {
         &[connection.atoms.win_type_popup_menu],
     );
     f.map_as_popup(&mut connection, git_gui_popup);
-
     let git_gui_dropdown = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
-        git_gui_popup,
+        git_gui_dropdown,
         x::ATOM_ATOM,
         connection.atoms.win_type,
         &[connection.atoms.win_type_dropdown_menu],
     );
     f.map_as_popup(&mut connection, git_gui_dropdown);
 
+    // https://github.com/Supreeeme/xwayland-satellite/issues/277
     let wechat_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
         wechat_popup,

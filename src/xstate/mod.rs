@@ -693,6 +693,10 @@ impl XState {
         let override_redirect = self.connection.wait_for_reply(attrs)?.override_redirect();
         let mut is_popup = override_redirect;
 
+        if let Some(states) = window_state.resolve()? {
+            is_popup |= states.contains(&self.atoms.skip_taskbar);
+        }
+
         let window_types = window_types.resolve()?.unwrap_or_else(|| {
             if !override_redirect && has_transient_for {
                 vec![self.window_atoms.dialog]
@@ -712,11 +716,10 @@ impl XState {
         }
         debug!("{window:?} override_redirect: {override_redirect:?}");
 
-        let mut known_window_type = false;
         for ty in window_types {
             match ty {
                 x if x == self.window_atoms.normal || x == self.window_atoms.dialog => {
-                    is_popup = override_redirect;
+                    break;
                 }
                 x if [
                     self.window_atoms.menu,
@@ -729,19 +732,9 @@ impl XState {
                 .contains(&x) =>
                 {
                     is_popup = true;
+                    break;
                 }
-                _ => {
-                    continue;
-                }
-            }
-
-            known_window_type = true;
-            break;
-        }
-
-        if !known_window_type {
-            if let Some(states) = window_state.resolve()? {
-                is_popup = states.contains(&self.atoms.skip_taskbar);
+                _ => {}
             }
         }
 
