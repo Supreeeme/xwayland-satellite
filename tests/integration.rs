@@ -1968,6 +1968,16 @@ fn popup_heuristics() {
     );
     f.map_as_popup(&mut connection, reaper_yabridge);
 
+    // https://github.com/Supreeeme/xwayland-satellite/issues/294
+    let ardour_yabridge = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        ardour_yabridge,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_utility],
+    );
+    f.map_as_toplevel(&mut connection, ardour_yabridge);
+
     // https://github.com/Supreeeme/xwayland-satellite/issues/161
     let chromium_menu = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
@@ -2021,6 +2031,12 @@ fn popup_heuristics() {
         x::ATOM_ATOM,
         connection.atoms.win_type,
         &[connection.atoms.win_type_utility],
+    );
+    connection.set_property(
+        wechat_popup,
+        x::ATOM_WINDOW,
+        connection.atoms.transient_for,
+        &[win_toplevel],
     );
     f.map_as_popup(&mut connection, wechat_popup);
 }
