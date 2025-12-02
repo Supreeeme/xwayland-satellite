@@ -12,13 +12,15 @@ use crate::{timespec_from_millis, X11Selection, XConnection};
 use clientside::MyWorld;
 use decoration::{DecorationsData, DecorationsDataSatellite};
 use hecs::Entity;
-use log::{debug, warn};
+use log::{debug, error, warn};
 use rustix::event::{poll, PollFd, PollFlags};
+use rustix::fs::Timespec;
 use smithay_client_toolkit::activation::ActivationState;
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
+use std::time::Duration;
 use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
 use wayland_client::{
     globals::{registry_queue_init, Global},
@@ -702,9 +704,37 @@ impl<C: XConnection> ServerState<C> {
 
         self.handle_selection_events();
         self.handle_activations();
-        self.queue
-            .flush()
-            .expect("Failed flushing clientside events");
+        if let Err(e) = self.queue.flush() {
+            match e {
+                wayland_client::backend::WaylandError::Io(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    let fd = PollFd::new(&self.queue, PollFlags::OUT);
+                    match poll(
+                        &mut [fd],
+                        Some(&Timespec {
+                            tv_sec: 0,
+                            tv_nsec: Duration::from_millis(50).as_nanos() as _,
+                        }),
+                    ) {
+                        Ok(0) => {
+                            error!("Failed to flush clientside events (timeout)! Will try again later.");
+                        }
+                        Ok(_) => {
+                            self.queue.flush().unwrap();
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to flush clientside events ({e})! Will try again later."
+                            );
+                        }
+                    }
+                }
+                other => {
+                    panic!("Failed flushing clientside events: {other:#?}");
+                }
+            }
+        }
     }
 
     fn close_x_window(&mut self, window: x::Window) {
