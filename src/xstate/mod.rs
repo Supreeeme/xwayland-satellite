@@ -718,7 +718,7 @@ impl XState {
 
         for ty in window_types {
             match ty {
-                x if x == self.window_atoms.normal || x == self.window_atoms.dialog => {
+                x if x == self.window_atoms.normal => {
                     break;
                 }
                 x if [
@@ -733,8 +733,8 @@ impl XState {
                     is_popup = true;
                     break;
                 }
-                x if x == self.window_atoms.utility => {
-                    is_popup = has_transient_for;
+                x if x == self.window_atoms.utility || x == self.window_atoms.dialog => {
+                    is_popup |= has_transient_for;
                     break;
                 }
                 _ => {}

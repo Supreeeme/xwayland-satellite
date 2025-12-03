@@ -2076,6 +2076,23 @@ fn popup_heuristics() {
         &[win_toplevel],
     );
     f.map_as_popup(&mut connection, wechat_popup);
+
+    // https://github.com/Supreeeme/xwayland-satellite/issues/280
+    // Popup since it is a _NET_WM_WINDOW_TYPE_DIALOG with WM_TRANSIENT_FOR
+    let clip_studio_paint_menu = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        clip_studio_paint_menu,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_dialog],
+    );
+    connection.set_property(
+        clip_studio_paint_menu,
+        x::ATOM_WINDOW,
+        connection.atoms.transient_for,
+        &[win_toplevel],
+    );
+    f.map_as_popup(&mut connection, clip_studio_paint_menu);
 }
 
 #[test]
