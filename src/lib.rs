@@ -36,6 +36,7 @@ type RealServerState = ServerState<RealConnection>;
 pub trait RunData {
     fn display(&self) -> Option<&str>;
     fn listenfds(&mut self) -> Vec<OwnedFd>;
+    fn ext_add(&self) -> Vec<&str>;
     fn server(&self) -> Option<UnixStream> {
         None
     }
@@ -84,6 +85,11 @@ pub fn main(mut data: impl RunData) -> Option<()> {
     let fds = data.listenfds();
     for fd in &fds {
         xwayland.args(["-listenfd", &fd.as_raw_fd().to_string()]);
+    }
+
+    let exts = data.ext_add();
+    for ext in &exts {
+        xwayland.args(["+extension", ext]);
     }
 
     let mut xwayland = xwayland
