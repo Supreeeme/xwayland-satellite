@@ -694,7 +694,7 @@ impl XState {
         let mut is_popup = override_redirect;
 
         if let Some(states) = window_state.resolve()? {
-            is_popup |= states.contains(&self.atoms.skip_taskbar);
+            is_popup |= states.contains(&self.atoms.net_wm_above);
         }
 
         let window_types = window_types.resolve()?.unwrap_or_else(|| {
@@ -987,8 +987,8 @@ xcb::atoms_struct! {
         net_wm_name => b"_NET_WM_NAME" only_if_exists = false,
         wm_pid => b"_NET_WM_PID" only_if_exists = false,
         net_wm_state => b"_NET_WM_STATE" only_if_exists = false,
+        net_wm_above => b"_NET_WM_STATE_ABOVE" only_if_exists = false,
         wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
-        skip_taskbar => b"_NET_WM_STATE_SKIP_TASKBAR" only_if_exists = false,
         active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
         supported => b"_NET_SUPPORTED" only_if_exists = false,
