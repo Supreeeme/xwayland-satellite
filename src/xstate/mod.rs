@@ -414,6 +414,15 @@ impl XState {
                         self.handle_window_properties(server_state, e.window())
                     );
                     server_state.map_window(e.window());
+                    unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
+                        &x::ChangeProperty {
+                            mode: x::PropMode::Replace,
+                            window: e.window(),
+                            property: self.atoms.wm_state,
+                            r#type: self.atoms.wm_state,
+                            data: &[WmState::Normal as u32, x::Window::none().resource_id()],
+                        }
+                    ));
                 }
                 xcb::Event::X(x::Event::ConfigureNotify(e)) => {
                     server_state.reconfigure_window(e);
@@ -443,6 +452,16 @@ impl XState {
                         &x::ChangeWindowAttributes {
                             window: e.window(),
                             value_list: &[x::Cw::EventMask(x::EventMask::empty())],
+                        }
+                    ));
+
+                    unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
+                        &x::ChangeProperty {
+                            mode: x::PropMode::Replace,
+                            window: e.window(),
+                            property: self.atoms.wm_state,
+                            r#type: self.atoms.wm_state,
+                            data: &[WmState::Withdrawn as u32, x::Window::none().resource_id()],
                         }
                     ));
                 }
