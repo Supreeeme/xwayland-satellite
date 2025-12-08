@@ -460,6 +460,12 @@ impl Connection {
     }
 
     #[track_caller]
+    fn unmap_window(&self, window: x::Window) {
+        self.send_and_check_request(&x::UnmapWindow { window })
+            .unwrap();
+    }
+
+    #[track_caller]
     fn destroy_window(&self, window: x::Window) {
         self.send_and_check_request(&x::DestroyWindow { window })
             .unwrap();
@@ -707,6 +713,16 @@ fn toplevel_flow() {
     connection.map_window(window);
     f.wait_and_dispatch();
 
+    let reply = connection.get_reply(&x::GetProperty {
+        delete: false,
+        window,
+        property: connection.atoms.wm_state,
+        r#type: connection.atoms.wm_state,
+        long_offset: 0,
+        long_length: 1,
+    });
+    assert_eq!(reply.value::<u32>(), &[WmState::Normal as u32]);
+
     let surface = f
         .testwl
         .last_created_surface_id()
@@ -757,6 +773,27 @@ fn toplevel_flow() {
         data.toplevel().max_size,
         Some(testwl::Vec2 { x: 150, y: 200 })
     );
+
+    connection.unmap_window(window);
+    f.wait_and_dispatch();
+
+    let reply = connection.get_reply(&x::GetProperty {
+        delete: false,
+        window,
+        property: connection.atoms.wm_state,
+        r#type: connection.atoms.wm_state,
+        long_offset: 0,
+        long_length: 1,
+    });
+    assert_eq!(reply.value::<u32>(), &[WmState::Withdrawn as u32]);
+
+    connection.map_window(window);
+    f.wait_and_dispatch();
+    let surface = f
+        .testwl
+        .last_created_surface_id()
+        .expect("No surface created!");
+    f.configure_and_verify_new_toplevel(&mut connection, window, surface);
 
     f.wm_delete_window(&mut connection, window, surface);
 
