@@ -14,6 +14,12 @@ use std::rc::Rc;
 use xcb::{x, Xid, XidNew};
 use xcb_util_cursor::{Cursor, CursorContext};
 
+// list of predefined wm_classes that are 100% popups
+const KNOWN_POPUP_WMCLASS: [&str; 2] = [
+    "yabridge-host.exe",    // wine 10.xx
+    "yabridge-host.exe.so", // wine 9.xx
+];
+
 // Sometimes we'll get events on windows that have already been destroyed
 #[derive(Debug)]
 enum MaybeBadWindow {
@@ -633,7 +639,9 @@ impl XState {
         if let Some(name) = title {
             server_state.set_win_title(window, name);
         }
+        let mut known_popup = false;
         if let Some(class) = class.resolve()? {
+            known_popup = KNOWN_POPUP_WMCLASS.contains(&class.as_ref());
             server_state.set_win_class(window, class);
         }
         if let Some(hints) = size_hints.resolve()? {
@@ -656,7 +664,8 @@ impl XState {
             .resolve()?
             .flatten();
 
-        let is_popup = self.guess_is_popup(window, motif_hints, transient_for.is_some())?;
+        let is_popup =
+            known_popup || self.guess_is_popup(window, motif_hints, transient_for.is_some())?;
         server_state.set_popup(window, is_popup);
         if let Some(parent) = transient_for.and_then(|t| (!is_popup).then_some(t)) {
             server_state.set_transient_for(window, parent);
