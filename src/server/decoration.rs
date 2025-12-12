@@ -382,8 +382,7 @@ fn title_pixmap(title: &str, max_width: u32, height: u32, scale: f32) -> Option<
 
     let width = glyphs
         .last()
-        .map(|g| g.position.x + font.h_advance(g.id))
-        .unwrap()
+        .map(|g| g.position.x + font.h_advance(g.id))?
         .ceil() as u32;
 
     let mut pixmap = Pixmap::new(width, height).unwrap();
