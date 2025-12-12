@@ -976,7 +976,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         };
         if dims == win.attrs.dims {
             return;
-        } else if win.attrs.is_popup {
+        } else if win.attrs.is_popup && (win.attrs.dims.x <= 0 || win.attrs.dims.y <= 0) {
             win.attrs.dims = dims;
         }
 
