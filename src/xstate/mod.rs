@@ -686,7 +686,10 @@ impl XState {
         motif_hints: Option<motif::Hints>,
         has_transient_for: bool,
     ) -> XResult<bool> {
+        let mut no_function_motif = false;
         if let Some(hints) = motif_hints {
+            // indicating motif flag is 0x2 decorations only
+            no_function_motif = hints.functions.is_none();
             // If the motif hints indicate the user shouldn't be able to do anything
             // to the window at all, it stands to reason it's probably a popup.
             if hints.functions.is_some_and(|f| f.is_empty()) {
@@ -737,13 +740,15 @@ impl XState {
                 x if x == self.window_atoms.normal || x == self.window_atoms.dialog => {
                     is_popup = override_redirect;
                 }
+                x if x == self.window_atoms.utility => {
+                    is_popup = no_function_motif;
+                }
                 x if [
                     self.window_atoms.menu,
                     self.window_atoms.popup_menu,
                     self.window_atoms.dropdown_menu,
                     self.window_atoms.tooltip,
                     self.window_atoms.drag_n_drop,
-                    self.window_atoms.utility,
                 ]
                 .contains(&x) =>
                 {
