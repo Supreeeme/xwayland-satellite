@@ -697,7 +697,7 @@ impl XState {
         wm_class: Option<String>,
     ) -> XResult<bool> {
         if let Some(class) = wm_class {
-            // If class is predefined is popup
+            // If class is predefined it's a popup
             if KNOWN_POPUP_WMCLASS.contains(&class.as_ref()) {
                 return Ok(true);
             }
