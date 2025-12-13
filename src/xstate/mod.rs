@@ -639,9 +639,9 @@ impl XState {
         if let Some(name) = title {
             server_state.set_win_title(window, name);
         }
-        let mut known_popup = false;
-        if let Some(class) = class.resolve()? {
-            known_popup = KNOWN_POPUP_WMCLASS.contains(&class.as_ref());
+
+        let wm_class = class.resolve()?;
+        if let Some(class) = wm_class.clone() {
             server_state.set_win_class(window, class);
         }
         if let Some(hints) = size_hints.resolve()? {
@@ -665,7 +665,7 @@ impl XState {
             .flatten();
 
         let is_popup =
-            known_popup || self.guess_is_popup(window, motif_hints, transient_for.is_some())?;
+            self.guess_is_popup(window, motif_hints, transient_for.is_some(), wm_class)?;
         server_state.set_popup(window, is_popup);
         if let Some(parent) = transient_for.and_then(|t| (!is_popup).then_some(t)) {
             server_state.set_transient_for(window, parent);
@@ -694,7 +694,14 @@ impl XState {
         window: x::Window,
         motif_hints: Option<motif::Hints>,
         has_transient_for: bool,
+        wm_class: Option<String>,
     ) -> XResult<bool> {
+        if let Some(class) = wm_class {
+            // If class is predefined is popup
+            if KNOWN_POPUP_WMCLASS.contains(&class.as_ref()) {
+                return Ok(true);
+            }
+        }
         if let Some(hints) = motif_hints {
             // If the motif hints indicate the user shouldn't be able to do anything
             // to the window at all, it stands to reason it's probably a popup.
