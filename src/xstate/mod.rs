@@ -688,7 +688,7 @@ impl XState {
     ) -> XResult<bool> {
         let mut no_function_motif = false;
         if let Some(hints) = motif_hints {
-            // indicating motif flag is 0x2 decorations only
+            // indicating motif flags first bit is not set (eg. 0x2 decorations only)
             no_function_motif = hints.functions.is_none();
             // If the motif hints indicate the user shouldn't be able to do anything
             // to the window at all, it stands to reason it's probably a popup.
