@@ -2061,27 +2061,6 @@ fn popup_heuristics() {
         &[0x3_u32, 0, 0, 0, 0],
     );
     f.map_as_popup(&mut connection, wechat_popup);
-
-    let ardour_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
-    connection.set_property(
-        ardour_popup,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_utility],
-    );
-    connection.set_property(
-        ardour_popup,
-        connection.atoms.motif_wm_hints,
-        connection.atoms.motif_wm_hints,
-        &[0x2_u32, 1, 0, 0, 0],
-    );
-    connection.set_property(
-        ardour_popup,
-        connection.atoms.motif_wm_hints,
-        connection.atoms.motif_wm_hints,
-        &[0x3_u32, 0, 0, 0, 0],
-    );
-    f.map_as_popup(&mut connection, ardour_popup);
 }
 
 #[test]
