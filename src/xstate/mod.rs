@@ -689,7 +689,7 @@ impl XState {
         let mut no_function_motif = false;
         if let Some(hints) = motif_hints {
             // indicating motif flags first bit is not set (eg. 0x2 decorations only)
-            no_function_motif = hints.functions.is_none();
+            no_function_motif = hints.functions.as_ref().is_none_or(|f| f.is_empty());
             // If the motif hints indicate the user shouldn't be able to do anything
             // to the window at all, it stands to reason it's probably a popup.
             if hints.functions.is_some_and(|f| f.is_empty()) {

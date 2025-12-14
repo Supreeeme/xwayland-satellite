@@ -2048,6 +2048,18 @@ fn popup_heuristics() {
         connection.atoms.win_type,
         &[connection.atoms.win_type_utility],
     );
+    connection.set_property(
+        wechat_popup,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x2_u32, 0, 0, 0, 0],
+    );
+    connection.set_property(
+        wechat_popup,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x3_u32, 0, 0, 0, 0],
+    );
     f.map_as_popup(&mut connection, wechat_popup);
 }
 
