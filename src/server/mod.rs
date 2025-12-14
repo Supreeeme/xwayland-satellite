@@ -613,6 +613,24 @@ impl<C: XConnection> ServerState<C> {
             event.handle(target, self);
         }
 
+        let query = self
+            .world
+            .query_mut::<(&PendingSurfaceState,)>()
+            .into_iter()
+            .map(|(e, _)| e)
+            .collect::<Vec<_>>();
+        for entity in query {
+            let dims = self
+                .world
+                .remove_one::<PendingSurfaceState>(entity)
+                .unwrap();
+            let entity = self.world.entity(entity).unwrap();
+            let mut query = entity.query::<(&x::Window,)>();
+            let window = *query.get().unwrap().0;
+            drop(query);
+            self.connection.set_window_dims(window, dims);
+        }
+
         if self.global_offset_updated {
             if self.global_output_offset.x.owner.is_none()
                 || self.global_output_offset.y.owner.is_none()

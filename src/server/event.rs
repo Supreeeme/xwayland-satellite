@@ -330,23 +330,20 @@ impl SurfaceEvents {
                 }
             }
 
-            connection.set_window_dims(
-                window,
-                PendingSurfaceState {
-                    x,
-                    y,
-                    width: width as _,
-                    height: height as _,
-                },
-            );
             window_data.attrs.dims = WindowDims {
                 x: x as i16,
                 y: y as i16,
                 width,
                 height,
             };
-
+            let pending = PendingSurfaceState {
+                x,
+                y,
+                width: width as _,
+                height: height as _,
+            };
             drop(query);
+            state.world.insert_one(target, pending).unwrap();
             update_surface_viewport(&state.world, state.world.query_one(target).unwrap());
         }
 
