@@ -2061,6 +2061,7 @@ fn popup_heuristics() {
         &[0x3_u32, 0, 0, 0, 0],
     );
     f.map_as_popup(&mut connection, wechat_popup);
+
     let ardour_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
         ardour_popup,
@@ -2080,7 +2081,6 @@ fn popup_heuristics() {
         connection.atoms.motif_wm_hints,
         &[0x3_u32, 0, 0, 0, 0],
     );
-
     f.map_as_popup(&mut connection, ardour_popup);
 }
 
