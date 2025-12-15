@@ -741,7 +741,7 @@ impl XState {
                     is_popup = override_redirect;
                 }
                 x if x == self.window_atoms.utility => {
-                    is_popup = no_function_motif;
+                    is_popup = override_redirect || no_function_motif;
                 }
                 x if [
                     self.window_atoms.menu,
