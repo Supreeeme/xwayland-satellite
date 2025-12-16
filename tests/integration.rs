@@ -2041,7 +2041,7 @@ fn popup_heuristics() {
     );
     f.map_as_popup(&mut connection, git_gui_dropdown);
 
-    let wechat_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
+    let wechat_popup = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
         wechat_popup,
         x::ATOM_ATOM,
@@ -2055,6 +2055,30 @@ fn popup_heuristics() {
         &[0x2_u32, 0, 0, 0, 0],
     );
     f.map_as_popup(&mut connection, wechat_popup);
+
+    let godot_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
+    connection.set_property(
+        godot_popup,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_utility],
+    );
+    connection.set_property(
+        godot_popup,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x2_u32, 0, 0, 0, 0],
+    );
+    f.map_as_popup(&mut connection, godot_popup);
+
+    let ardour_win = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        ardour_win,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_utility],
+    );
+    f.map_as_toplevel(&mut connection, ardour_win);
 }
 
 #[test]
