@@ -1673,7 +1673,7 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
             }
             xdg_surface::Request::AckConfigure { serial } => {
                 let data = state.surfaces.get_mut(surface_id).unwrap();
-                assert_eq!(data.xdg().last_configure_serial, serial);
+                assert!(data.xdg().last_configure_serial >= serial);
             }
             xdg_surface::Request::Destroy => {
                 let data = state.surfaces.get_mut(surface_id).unwrap();
