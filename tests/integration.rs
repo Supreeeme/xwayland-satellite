@@ -2071,14 +2071,14 @@ fn popup_heuristics() {
     );
     f.map_as_popup(&mut connection, godot_popup);
 
-    let ardour_win = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    let ardour_toplevel = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
-        ardour_win,
+        ardour_toplevel,
         x::ATOM_ATOM,
         connection.atoms.win_type,
         &[connection.atoms.win_type_utility],
     );
-    f.map_as_toplevel(&mut connection, ardour_win);
+    f.map_as_toplevel(&mut connection, ardour_toplevel);
 }
 
 #[test]
