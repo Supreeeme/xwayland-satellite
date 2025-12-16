@@ -686,10 +686,11 @@ impl XState {
         motif_hints: Option<motif::Hints>,
         has_transient_for: bool,
     ) -> XResult<bool> {
-        let mut no_function_motif = false;
+        let mut motif_popup = false;
         if let Some(hints) = motif_hints {
-            // indicating motif flags first bit is not set (eg. 0x2 decorations only)
-            no_function_motif = hints.functions.as_ref().is_none_or(|f| f.is_empty());
+            // If _MOTIF_WM_HINTS has no function bitflag set (eg. 0x2, 0x1, 0x0, 0x0, 0x0) or has it but
+            // no function flags are set (eg. 0x3, 0x0, 0x0, 0x0, 0x0) we can assume its a popup
+            motif_popup = hints.functions.as_ref().is_none_or(|f| f.is_empty());
             // If the motif hints indicate the user shouldn't be able to do anything
             // to the window at all, it stands to reason it's probably a popup.
             if hints.functions.is_some_and(|f| f.is_empty()) {
@@ -741,7 +742,7 @@ impl XState {
                     is_popup = override_redirect;
                 }
                 x if x == self.window_atoms.utility => {
-                    is_popup = override_redirect || no_function_motif;
+                    is_popup = override_redirect || motif_popup;
                 }
                 x if [
                     self.window_atoms.menu,
