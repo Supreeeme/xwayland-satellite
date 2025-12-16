@@ -160,6 +160,7 @@ struct WindowData {
 struct FakeXConnection {
     focused_window: Option<Window>,
     windows: HashMap<Window, WindowData>,
+    set_window_dims_counter: usize,
 }
 
 impl FakeXConnection {
@@ -219,6 +220,7 @@ impl super::XConnection for FakeXConnection {
             width: state.width as _,
             height: state.height as _,
         };
+        self.set_window_dims_counter += 1;
         true
     }
 
@@ -1774,6 +1776,35 @@ fn reconfigure_popup_after_map() {
     f.testwl.configure_popup(p_id);
     f.run();
     f.assert_window_dimensions(popup, p_id, new_dims);
+}
+
+#[test]
+fn drag_around_popup() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let toplevel = unsafe { Window::new(1) };
+    let (_, t_id) = f.create_toplevel(&comp, toplevel);
+
+    let popup = unsafe { Window::new(2) };
+    let (_, p_id) = f.create_popup(&comp, PopupBuilder::new(popup, toplevel, t_id).x(0).y(0));
+
+    let before_counter = f.connection().set_window_dims_counter;
+    let mut new_dims = WindowDims {
+        x: 0,
+        y: 0,
+        width: 10,
+        height: 10,
+    };
+    for _ in 0..10 {
+        new_dims.x += 5;
+        new_dims.y += 5;
+        f.reconfigure_window(popup, new_dims, true);
+    }
+    f.run();
+    f.run();
+    f.assert_window_dimensions(popup, p_id, new_dims);
+
+    let after_counter = f.connection().set_window_dims_counter;
+    assert_eq!(before_counter + 1, after_counter);
 }
 
 #[test]
