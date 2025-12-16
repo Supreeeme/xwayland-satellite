@@ -273,7 +273,6 @@ impl SurfaceEvents {
         target: Entity,
         state: &mut ServerState<C>,
     ) {
-        let connection = &mut state.connection;
         let state = &mut state.inner;
         let xdg_surface::Event::Configure { serial } = event else {
             unreachable!();

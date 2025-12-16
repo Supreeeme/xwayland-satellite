@@ -613,22 +613,16 @@ impl<C: XConnection> ServerState<C> {
             event.handle(target, self);
         }
 
-        let query = self
-            .world
-            .query_mut::<(&PendingSurfaceState,)>()
+        let query = self.world.query_mut::<(&x::Window, &PendingSurfaceState)>();
+        let iter = query
             .into_iter()
-            .map(|(e, _)| e)
+            .map(|(e, (win, dims))| (e, (*win, *dims)))
             .collect::<Vec<_>>();
-        for entity in query {
-            let dims = self
-                .world
+        for (entity, (win, dims)) in iter.into_iter() {
+            self.connection.set_window_dims(win, dims);
+            self.world
                 .remove_one::<PendingSurfaceState>(entity)
                 .unwrap();
-            let entity = self.world.entity(entity).unwrap();
-            let mut query = entity.query::<(&x::Window,)>();
-            let window = *query.get().unwrap().0;
-            drop(query);
-            self.connection.set_window_dims(window, dims);
         }
 
         if self.global_offset_updated {
@@ -1534,7 +1528,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Copy, Clone)]
 pub struct PendingSurfaceState {
     pub x: i32,
     pub y: i32,
