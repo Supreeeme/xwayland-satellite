@@ -2850,6 +2850,21 @@ fn resize_decorations_on_reconfigure() {
     assert_eq!(buf_dims, testwl::Vec2 { x: 200, y: 25 });
 }
 
+#[test]
+fn decorations_with_title_on_thin_window() {
+    let (mut f, compositor) = TestFixture::new_with_compositor();
+    let window = unsafe { Window::new(1) };
+    let (_, id) = f.create_toplevel(&compositor, window);
+    f.testwl
+        .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ClientSide);
+    f.testwl.configure_toplevel(id, 1, 100, vec![]);
+    f.run();
+
+    // Asserts no panics occur with not enough space for even a single character of the title
+    f.satellite
+        .set_win_title(window, WmName::WmName("window".into()));
+}
+
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}
