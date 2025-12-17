@@ -712,6 +712,10 @@ impl XState {
         let override_redirect = self.connection.wait_for_reply(attrs)?.override_redirect();
         let mut is_popup = override_redirect;
 
+        if let Some(states) = window_state.resolve()? {
+            is_popup |= states.contains(&self.atoms.net_wm_above);
+        }
+
         let window_types = window_types.resolve()?.unwrap_or_else(|| {
             if !override_redirect && has_transient_for {
                 vec![self.window_atoms.dialog]
@@ -731,11 +735,10 @@ impl XState {
         }
         debug!("{window:?} override_redirect: {override_redirect:?}");
 
-        let mut known_window_type = false;
         for ty in window_types {
             match ty {
-                x if x == self.window_atoms.normal || x == self.window_atoms.dialog => {
-                    is_popup = override_redirect;
+                x if x == self.window_atoms.normal => {
+                    break;
                 }
                 x if [
                     self.window_atoms.menu,
@@ -743,24 +746,17 @@ impl XState {
                     self.window_atoms.dropdown_menu,
                     self.window_atoms.tooltip,
                     self.window_atoms.drag_n_drop,
-                    self.window_atoms.utility,
                 ]
                 .contains(&x) =>
                 {
                     is_popup = true;
+                    break;
                 }
-                _ => {
-                    continue;
+                x if x == self.window_atoms.utility || x == self.window_atoms.dialog => {
+                    is_popup |= has_transient_for;
+                    break;
                 }
-            }
-
-            known_window_type = true;
-            break;
-        }
-
-        if !known_window_type {
-            if let Some(states) = window_state.resolve()? {
-                is_popup = states.contains(&self.atoms.skip_taskbar);
+                _ => {}
             }
         }
 
@@ -1010,8 +1006,8 @@ xcb::atoms_struct! {
         net_wm_name => b"_NET_WM_NAME" only_if_exists = false,
         wm_pid => b"_NET_WM_PID" only_if_exists = false,
         net_wm_state => b"_NET_WM_STATE" only_if_exists = false,
+        net_wm_above => b"_NET_WM_STATE_ABOVE" only_if_exists = false,
         wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
-        skip_taskbar => b"_NET_WM_STATE_SKIP_TASKBAR" only_if_exists = false,
         active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
         supported => b"_NET_SUPPORTED" only_if_exists = false,

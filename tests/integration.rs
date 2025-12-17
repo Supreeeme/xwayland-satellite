@@ -330,6 +330,7 @@ xcb::atoms_struct! {
         wm_delete_window => b"WM_DELETE_WINDOW",
         net_wm_state => b"_NET_WM_STATE",
         skip_taskbar => b"_NET_WM_STATE_SKIP_TASKBAR",
+        net_wm_state_above => b"_NET_WM_STATE_ABOVE",
         transient_for => b"WM_TRANSIENT_FOR",
         clipboard => b"CLIPBOARD",
         primary => b"PRIMARY",
@@ -339,6 +340,7 @@ xcb::atoms_struct! {
         wm_check => b"_NET_SUPPORTING_WM_CHECK",
         win_type => b"_NET_WM_WINDOW_TYPE",
         win_type_normal => b"_NET_WM_WINDOW_TYPE_NORMAL",
+        win_type_dialog => b"_NET_WM_WINDOW_TYPE_DIALOG",
         win_type_menu => b"_NET_WM_WINDOW_TYPE_MENU",
         win_type_popup_menu => b"_NET_WM_WINDOW_TYPE_POPUP_MENU",
         win_type_dropdown_menu => b"_NET_WM_WINDOW_TYPE_DROPDOWN_MENU",
@@ -1946,6 +1948,8 @@ fn forced_1x_scale_consistent_x11_size() {
     assert_eq!(geo.height(), 30);
 }
 
+// All issues have been cited since they provide `xprop` outputs and `override_redirect`
+// information, as they provide documentation for refining the heuristics in the future.
 #[test]
 fn popup_heuristics() {
     let mut f = Fixture::new();
@@ -1954,12 +1958,14 @@ fn popup_heuristics() {
     let win_toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
     f.map_as_toplevel(&mut connection, win_toplevel);
 
+    // https://github.com/Supreeeme/xwayland-satellite/issues/110
+    // Popup because _MOTIF_WM_HINTS indicates user cannot interact which the window
     let ghidra_popup = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
         ghidra_popup,
         x::ATOM_ATOM,
         connection.atoms.win_type,
-        &[connection.atoms.win_type_normal],
+        &[connection.atoms.win_type_dialog],
     );
     connection.set_property(
         ghidra_popup,
@@ -1975,27 +1981,73 @@ fn popup_heuristics() {
     );
     f.map_as_popup(&mut connection, ghidra_popup);
 
-    let reaper_dialog = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    // https://github.com/Supreeeme/xwayland-satellite/issues/112
+    // Popup because override_redirect == true with no _NET_WM_WINDOW_TYPE
+    let reaper_dropdown = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
-        ghidra_popup,
+        reaper_dropdown,
+        x::ATOM_ATOM,
+        connection.atoms.net_wm_state,
+        &[connection.atoms.skip_taskbar],
+    );
+    f.map_as_popup(&mut connection, reaper_dropdown);
+
+    // https://github.com/Supreeeme/xwayland-satellite/issues/293
+    // Toplevel: _NET_WM_STATE_SKIP_TASKBAR was in the past used as a popup heuristic, however,
+    // those windows were also covered by the `override_redirect` and `_MOTIF_WM_HINTS` heuristics.
+    // Reaper has toplevel menus with `skip_taskbar`, but neither the aforementioned heuristics.
+    let reaper_fx_menu = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        reaper_fx_menu,
         x::ATOM_ATOM,
         connection.atoms.win_type,
         &[connection.atoms.win_type_normal],
     );
     connection.set_property(
-        ghidra_popup,
+        reaper_fx_menu,
         x::ATOM_ATOM,
         connection.atoms.net_wm_state,
         &[connection.atoms.skip_taskbar],
     );
+    f.map_as_toplevel(&mut connection, reaper_fx_menu);
+    // Popup: `_NET_WM_STATE_ABOVE` "indicates that the window should be on top of most windows"
+    // (EWMH § 5.7). Since toplevels are expected to be placed behind other toplevels in a stacking
+    // window compositor, this is a reasonable popup heuristic, moreso than `skip_taskbar`.
+    // The person who reported the issue also sent `xprop` output for Valhalla Plate, which matched
+    // Superior Drums but not the original popup issue reported with Valhalla Plate, see
+    // https://github.com/Supreeeme/xwayland-satellite/issues/221 for that issue.
+    let reaper_superior_drummer = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
-        ghidra_popup,
-        connection.atoms.motif_wm_hints,
-        connection.atoms.motif_wm_hints,
-        &[0x2_u32, 0, 0x2a, 0, 0],
+        reaper_superior_drummer,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_normal],
     );
-    f.map_as_toplevel(&mut connection, reaper_dialog);
+    connection.set_property(
+        reaper_superior_drummer,
+        x::ATOM_ATOM,
+        connection.atoms.net_wm_state,
+        &[
+            connection.atoms.net_wm_state_above,
+            connection.atoms.skip_taskbar,
+        ],
+    );
+    f.map_as_popup(&mut connection, reaper_superior_drummer);
 
+    // https://github.com/Supreeeme/xwayland-satellite/issues/294
+    // Toplevel for specifying the _NET_WM_WINDOW_TYPE_UTILITY window type WITHOUT setting
+    // WM_TRANSIENT_FOR
+    let ardour_yabridge = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        ardour_yabridge,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_utility],
+    );
+    f.map_as_toplevel(&mut connection, ardour_yabridge);
+
+    // https://github.com/Supreeeme/xwayland-satellite/issues/161
+    // Popup for specifying the _NET_WM_WINDOW_TYPE_MENU window type
     let chromium_menu = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
         chromium_menu,
@@ -2004,7 +2056,7 @@ fn popup_heuristics() {
         &[connection.atoms.win_type_menu],
     );
     f.map_as_popup(&mut connection, chromium_menu);
-
+    // Popup for specifying the _NET_WM_WINDOW_TYPE_TOOLTIP window type
     let chromium_tooltip = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
         chromium_tooltip,
@@ -2014,6 +2066,8 @@ fn popup_heuristics() {
     );
     f.map_as_popup(&mut connection, chromium_tooltip);
 
+    // https://github.com/Supreeeme/xwayland-satellite/issues/166
+    // Popup for specifying the _NET_WM_WINDOW_TYPE_DND window type
     let discord_dnd = connection.new_window(connection.root, 20, 138, 48, 48, true);
     connection.set_property(
         discord_dnd,
@@ -2023,6 +2077,8 @@ fn popup_heuristics() {
     );
     f.map_as_popup(&mut connection, discord_dnd);
 
+    // https://github.com/Supreeeme/xwayland-satellite/issues/253
+    // Popup for specifying the _NET_WM_WINDOW_TYPE_POPUP_MENU window type
     let git_gui_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
         git_gui_popup,
@@ -2031,16 +2087,18 @@ fn popup_heuristics() {
         &[connection.atoms.win_type_popup_menu],
     );
     f.map_as_popup(&mut connection, git_gui_popup);
-
+    // Popup for specifying the _NET_WM_WINDOW_TYPE_DROPDOWN_MENU window type
     let git_gui_dropdown = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
-        git_gui_popup,
+        git_gui_dropdown,
         x::ATOM_ATOM,
         connection.atoms.win_type,
         &[connection.atoms.win_type_dropdown_menu],
     );
     f.map_as_popup(&mut connection, git_gui_dropdown);
 
+    // https://github.com/Supreeeme/xwayland-satellite/issues/277
+    // Popup for specifying the _NET_WM_WINDOW_TYPE_UTILITY window type AND setting WM_TRANSIENT_FOR
     let wechat_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
         wechat_popup,
@@ -2048,7 +2106,30 @@ fn popup_heuristics() {
         connection.atoms.win_type,
         &[connection.atoms.win_type_utility],
     );
+    connection.set_property(
+        wechat_popup,
+        x::ATOM_WINDOW,
+        connection.atoms.transient_for,
+        &[win_toplevel],
+    );
     f.map_as_popup(&mut connection, wechat_popup);
+
+    // https://github.com/Supreeeme/xwayland-satellite/issues/280
+    // Popup since it is a _NET_WM_WINDOW_TYPE_DIALOG with WM_TRANSIENT_FOR
+    let clip_studio_paint_menu = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        clip_studio_paint_menu,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_dialog],
+    );
+    connection.set_property(
+        clip_studio_paint_menu,
+        x::ATOM_WINDOW,
+        connection.atoms.transient_for,
+        &[win_toplevel],
+    );
+    f.map_as_popup(&mut connection, clip_studio_paint_menu);
 }
 
 #[test]
