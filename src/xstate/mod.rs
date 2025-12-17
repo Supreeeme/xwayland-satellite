@@ -688,9 +688,12 @@ impl XState {
     ) -> XResult<bool> {
         let mut motif_popup = false;
         if let Some(hints) = motif_hints {
-            // If _MOTIF_WM_HINTS has no function bitflag set (eg. 0x2, 0x1, 0x0, 0x0, 0x0) or has it but
-            // no function flags are set (eg. 0x3, 0x0, 0x0, 0x0, 0x0) we can assume its a popup
-            motif_popup = hints.functions.as_ref().is_none_or(|f| f.is_empty());
+            // If MOTIF_WM_HINTS provides no decorations for client assume its a popup
+            let is_client_decoration = hints
+                .decorations
+                .is_some_and(|d| d.eq(&motif::Decorations::Client));
+            motif_popup =
+                is_client_decoration && hints.decorations_hints.is_some_and(|d| d.is_empty());
             // If the motif hints indicate the user shouldn't be able to do anything
             // to the window at all, it stands to reason it's probably a popup.
             if hints.functions.is_some_and(|f| f.is_empty()) {
@@ -739,7 +742,7 @@ impl XState {
         for ty in window_types {
             match ty {
                 x if x == self.window_atoms.normal || x == self.window_atoms.dialog => {
-                    is_popup = override_redirect;
+                    is_popup = override_redirect
                 }
                 x if x == self.window_atoms.utility => {
                     is_popup = override_redirect || motif_popup;
@@ -1157,10 +1160,23 @@ mod motif {
         }
     }
 
+    bitflags! {
+        pub(super) struct DecorationsHints: u32 {
+            const All = 1;
+            const Border = 2;
+            const Resizeh = 4;
+            const TitleBar = 8;
+            const Menu = 16;
+            const Minimize = 32;
+            const Maximize = 64;
+        }
+    }
+
     #[derive(Default)]
     pub(super) struct Hints {
         pub(super) functions: Option<Functions>,
         pub(super) decorations: Option<Decorations>,
+        pub(super) decorations_hints: Option<DecorationsHints>,
     }
 
     impl From<&[u32]> for Hints {
@@ -1174,6 +1190,7 @@ mod motif {
             }
             if flags.contains(HintsFlags::Decorations) {
                 ret.decorations = value[2].try_into().ok();
+                ret.decorations_hints = Some(DecorationsHints::from_bits_truncate(value[2]));
             }
 
             ret
