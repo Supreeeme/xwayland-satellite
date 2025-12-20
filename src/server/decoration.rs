@@ -6,6 +6,7 @@ use hecs::{CommandBuffer, Entity, World};
 use log::{error, warn};
 use smithay_client_toolkit::registry::SimpleGlobal;
 use smithay_client_toolkit::shm::slot::SlotPool;
+use std::borrow::Cow;
 use std::sync::LazyLock;
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Stroke, Transform};
 use tiny_skia::{ColorU8, Rect};
@@ -404,6 +405,25 @@ fn title_pixmap(title: &str, max_width: u32, height: u32, scale: f32) -> Option<
     Some(pixmap)
 }
 
+static FONT_DATA: LazyLock<Cow<'static, [u8]>> = LazyLock::new(|| {
+    #[cfg(feature = "fontconfig")]
+    {
+        let fc = fontconfig::Fontconfig::new().expect("Failed to initialize fontconfig.");
+        let font = fc
+            .find("opensans", None)
+            .expect("Failed to load Open Sans Regular.");
+        let data = std::fs::read(font.path).expect("Failed to read font from disk.");
+        Cow::Owned(data)
+    }
+    #[cfg(not(feature = "fontconfig"))]
+    {
+        Cow::Borrowed(include_bytes!("../../OpenSans-Regular.ttf"))
+    }
+});
+
+static FONT: LazyLock<FontRef<'_>> =
+    LazyLock::new(|| FontRef::try_from_slice(FONT_DATA.as_ref()).unwrap());
+
 fn layout_title_glyphs(
     text: &str,
     max_width: u32,
@@ -412,9 +432,6 @@ fn layout_title_glyphs(
 ) -> (Vec<Glyph>, PxScaleFont<&FontRef<'_>>) {
     const TEXT_SIZE: f32 = 10.0;
     const TEXT_MARGIN: f32 = 11.0;
-    static FONT: LazyLock<FontRef<'_>> = LazyLock::new(|| {
-        FontRef::try_from_slice(include_bytes!("../../OpenSans-Regular.ttf")).unwrap()
-    });
 
     let mut ret = Vec::<Glyph>::new();
 
