@@ -689,11 +689,8 @@ impl XState {
         let mut motif_popup = false;
         if let Some(hints) = motif_hints {
             // If MOTIF_WM_HINTS provides no decorations for client assume its a popup
-            let is_client_decoration = hints
-                .decorations
-                .is_some_and(|d| d.eq(&motif::Decorations::Client));
-            motif_popup =
-                is_client_decoration && hints.decorations_hints.is_some_and(|d| d.is_empty());
+            let is_client_decoration = hints.decorations.is_some_and(|d| d.is_clientside());
+            motif_popup = is_client_decoration && hints.decorations.is_some_and(|d| d.is_empty());
             // If the motif hints indicate the user shouldn't be able to do anything
             // to the window at all, it stands to reason it's probably a popup.
             if hints.functions.is_some_and(|f| f.is_empty()) {
@@ -1161,7 +1158,8 @@ mod motif {
     }
 
     bitflags! {
-        pub(super) struct DecorationsHints: u32 {
+        #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+            pub struct Decorations: u32 {
             const All = 1;
             const Border = 2;
             const Resizeh = 4;
@@ -1176,7 +1174,6 @@ mod motif {
     pub(super) struct Hints {
         pub(super) functions: Option<Functions>,
         pub(super) decorations: Option<Decorations>,
-        pub(super) decorations_hints: Option<DecorationsHints>,
     }
 
     impl From<&[u32]> for Hints {
@@ -1189,26 +1186,36 @@ mod motif {
                 ret.functions = Some(Functions::from_bits_truncate(value[1]));
             }
             if flags.contains(HintsFlags::Decorations) {
-                ret.decorations = value[2].try_into().ok();
-                ret.decorations_hints = Some(DecorationsHints::from_bits_truncate(value[2]));
+                ret.decorations = Some(Decorations::from_bits_truncate(value[2]));
             }
 
             ret
         }
     }
+    impl Decorations {
+        pub fn is_clientside(&self) -> bool {
+            self.is_empty()
+        }
 
-    #[derive(Debug, PartialEq, Eq, Clone, Copy, num_enum::TryFromPrimitive)]
-    #[repr(u32)]
-    pub enum Decorations {
-        Client = 0,
-        Server = 1,
+        pub fn is_serverside(&self) -> bool {
+            !self.is_empty()
+        }
+
+        pub fn clientside(&self) -> zxdg_toplevel_decoration_v1::Mode {
+            zxdg_toplevel_decoration_v1::Mode::ClientSide
+        }
+
+        pub fn serverside(&self) -> zxdg_toplevel_decoration_v1::Mode {
+            zxdg_toplevel_decoration_v1::Mode::ServerSide
+        }
     }
 
     impl From<Decorations> for zxdg_toplevel_decoration_v1::Mode {
-        fn from(value: Decorations) -> Self {
-            match value {
-                Decorations::Client => zxdg_toplevel_decoration_v1::Mode::ClientSide,
-                Decorations::Server => zxdg_toplevel_decoration_v1::Mode::ServerSide,
+        fn from(decorations: Decorations) -> Self {
+            if decorations.is_empty() {
+                zxdg_toplevel_decoration_v1::Mode::ClientSide
+            } else {
+                zxdg_toplevel_decoration_v1::Mode::ServerSide
             }
         }
     }
