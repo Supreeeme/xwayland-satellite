@@ -2041,7 +2041,7 @@ fn popup_heuristics() {
     );
     f.map_as_popup(&mut connection, git_gui_dropdown);
 
-    let wechat_popup = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    let wechat_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
         wechat_popup,
         x::ATOM_ATOM,
