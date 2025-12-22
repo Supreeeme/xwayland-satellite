@@ -697,7 +697,8 @@ impl XState {
             // WMHINTS is considered popup only if client is not decorated && client does not
             // accept input focus
             wmhint_popup = motif_popup && wm_hints.is_some_and(|h| !h.want_input);
-
+            // Sometimes popup is false-positive meaning both MOTIF Decorations and WM_HINTS input indicates its a popup
+            // but MOTIF has function flags that toplevel window should do
             if wmhint_popup
                 && hints.functions.as_ref().is_some_and(|f| {
                     f.contains(motif::Functions::Minimize)
