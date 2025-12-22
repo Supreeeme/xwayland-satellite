@@ -1400,11 +1400,8 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             .world
             .get::<&client::wl_surface::WlSurface>(entity)
             .unwrap();
-        let needs_satellite_decorations = wl_decoration.is_none()
-            && window
-                .attrs
-                .decorations
-                .is_none_or(|d| d == Decorations::Server);
+        let needs_satellite_decorations =
+            wl_decoration.is_none() && window.attrs.decorations.is_none_or(|d| d.is_serverside());
         let (sat_decoration, buf) = needs_satellite_decorations
             .then(|| {
                 DecorationsDataSatellite::try_new(
