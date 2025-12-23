@@ -2072,6 +2072,21 @@ fn popup_heuristics() {
     );
     f.map_as_popup(&mut connection, godot_popup);
 
+    let material_maker_popup = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        material_maker_popup,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_utility],
+    );
+    connection.set_property(
+        material_maker_popup,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x2_u32, 0, 0, 0, 0],
+    );
+    f.map_as_popup(&mut connection, material_maker_popup);
+
     let ardour_toplevel = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
         ardour_toplevel,
