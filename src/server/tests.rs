@@ -1325,6 +1325,7 @@ fn window_group_properties() {
         win,
         super::WmHints {
             window_group: Some(prop_win),
+            want_input: false,
         },
     );
     f.satellite.map_window(win);
