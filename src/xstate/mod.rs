@@ -696,7 +696,7 @@ impl XState {
             motif_popup = hints.decorations.is_some_and(|d| d.is_clientside());
             // WMHINTS is considered popup only if client is not decorated && client does not
             // accept input focus
-            wmhint_popup = motif_popup && wm_hints.is_some_and(|h| !h.want_input);
+            wmhint_popup = motif_popup && wm_hints.is_some_and(|h| !h.acquire_input_via_wm);
             // Sometimes popup is false-positive meaning both MOTIF Decorations and WM_HINTS input indicates its a popup
             // but MOTIF has function flags that toplevel window should do
             if wmhint_popup
@@ -1133,7 +1133,7 @@ impl From<&[u32]> for WmNormalHints {
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct WmHints {
     pub window_group: Option<x::Window>,
-    pub want_input: bool,
+    pub acquire_input_via_wm: bool,
 }
 
 impl From<&[u32]> for WmHints {
@@ -1146,7 +1146,7 @@ impl From<&[u32]> for WmHints {
             ret.window_group = Some(window);
         }
         if flags.contains(WmHintsFlags::Input) {
-            ret.want_input = value[1] == 1;
+            ret.acquire_input_via_wm = value[1] == 1;
         }
 
         ret
