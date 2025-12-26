@@ -2763,6 +2763,13 @@ fn client_side_decorations() {
     let data = f.testwl.get_surface_data(subsurface_id).unwrap();
     assert!(data.buffer.is_none());
 
+    // Make sure updating the window title does not draw the bar if it should not
+    f.satellite
+        .set_win_title(window, WmName::WmName("window".into()));
+    f.run();
+    let data = f.testwl.get_surface_data(subsurface_id).unwrap();
+    assert!(data.buffer.is_none());
+
     f.testwl
         .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ServerSide);
     f.testwl.configure_toplevel(id, 100, 100, vec![]);

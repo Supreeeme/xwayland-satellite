@@ -235,6 +235,9 @@ impl DecorationsDataSatellite {
 
     pub fn set_title(&mut self, world: &World, title: &str) {
         self.title = Some(title.to_string());
+        if !self.should_draw {
+            return;
+        }
 
         // Don't draw title if there's not enough space
         let title_pixmap = title_pixmap(
