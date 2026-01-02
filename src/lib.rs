@@ -36,6 +36,9 @@ type RealServerState = ServerState<RealConnection>;
 pub trait RunData {
     fn display(&self) -> Option<&str>;
     fn listenfds(&mut self) -> Vec<OwnedFd>;
+    fn flags(&self) -> Vec<String> {
+        vec![]
+    }
     fn server(&self) -> Option<UnixStream> {
         None
     }
@@ -58,12 +61,16 @@ pub const fn timespec_from_millis(millis: u64) -> Timespec {
     }
 }
 
-pub fn main(mut data: impl RunData) -> Option<()> {
+pub fn version() -> &'static str {
     let mut version = env!("VERGEN_GIT_DESCRIBE");
     if version == "VERGEN_IDEMPOTENT_OUTPUT" {
         version = env!("CARGO_PKG_VERSION");
     }
-    info!("Starting xwayland-satellite version {version}");
+    version
+}
+
+pub fn main(mut data: impl RunData) -> Option<()> {
+    info!("Starting xwayland-satellite version {}", version());
 
     let socket = ListeningSocket::bind_auto("xwls", 1..=128).unwrap();
     let mut display = Display::new().unwrap();
@@ -95,6 +102,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
             "-displayfd",
             &ready_tx.as_raw_fd().to_string(),
         ])
+        .args(data.flags())
         .env("WAYLAND_DISPLAY", socket.socket_name().unwrap())
         .stderr(Stdio::piped())
         .spawn()
