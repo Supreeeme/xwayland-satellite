@@ -547,8 +547,8 @@ impl XState {
                     warn!("unknown action for _NET_WM_STATE: {}", data[0]);
                     return;
                 };
-                let prop1 = unsafe { x::Atom::new(data[1]) };
-                let prop2 = unsafe { x::Atom::new(data[2]) };
+                let prop1 = x::Atom::new(data[1]);
+                let prop2 = x::Atom::new(data[2]);
 
                 trace!("_NET_WM_STATE ({action:?}) props: {prop1:?} {prop2:?}");
 
@@ -1122,7 +1122,7 @@ impl From<&[u32]> for WmHints {
         let flags = WmHintsFlags::from_bits_truncate(value[0]);
 
         if flags.contains(WmHintsFlags::WindowGroup) {
-            let window = unsafe { x::Window::new(value[8]) };
+            let window = x::Window::new(value[8]);
             ret.window_group = Some(window);
         }
 

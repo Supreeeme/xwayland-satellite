@@ -995,7 +995,7 @@ type Ev<T> = <T as Proxy>::Event;
 fn toplevel_flow() {
     let (mut f, compositor) = TestFixture::new_with_compositor();
 
-    let window = unsafe { Window::new(1) };
+    let window = Window::new(1);
     let (surface, testwl_id) = f.create_toplevel(&compositor, window);
     {
         let surface_data = f.testwl.get_surface_data(testwl_id).unwrap();
@@ -1028,10 +1028,10 @@ fn toplevel_flow() {
 fn popup_flow_simple() {
     let (mut f, compositor) = TestFixture::new_with_compositor();
 
-    let win_toplevel = unsafe { Window::new(1) };
+    let win_toplevel = Window::new(1);
     let (_, toplevel_id) = f.create_toplevel(&compositor, win_toplevel);
 
-    let win_popup = unsafe { Window::new(2) };
+    let win_popup = Window::new(2);
     let (popup_surface, popup_id) = f.create_popup(
         &compositor,
         PopupBuilder::new(win_popup, win_toplevel, toplevel_id),
@@ -1118,7 +1118,7 @@ fn pass_through_globals() {
 #[test]
 fn last_activated_toplevel_is_focused() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    let win1 = unsafe { Window::new(1) };
+    let win1 = Window::new(1);
 
     let (_surface1, id1) = f.create_toplevel(&comp, win1);
     assert_eq!(
@@ -1127,7 +1127,7 @@ fn last_activated_toplevel_is_focused() {
         "new toplevel's window is not focused"
     );
 
-    let win2 = unsafe { Window::new(2) };
+    let win2 = Window::new(2);
     let _data2 = f.create_toplevel(&comp, win2);
     assert_eq!(
         f.connection().focused_window,
@@ -1147,10 +1147,10 @@ fn last_activated_toplevel_is_focused() {
 #[test]
 fn popup_window_changes_surface() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    let t_win = unsafe { Window::new(1) };
+    let t_win = Window::new(1);
     let (_, toplevel_id) = f.create_toplevel(&comp, t_win);
 
-    let win = unsafe { Window::new(2) };
+    let win = Window::new(2);
     let (surface, old_id) = f.create_popup(&comp, PopupBuilder::new(win, t_win, toplevel_id));
 
     f.satellite.unmap_window(win);
@@ -1186,7 +1186,7 @@ fn popup_window_changes_surface() {
 #[test]
 fn override_redirect_window_after_toplevel_close() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    let win1 = unsafe { Window::new(1) };
+    let win1 = Window::new(1);
     let (obj, first) = f.create_toplevel(&comp, win1);
     f.testwl.close_toplevel(first);
     f.run();
@@ -1198,7 +1198,7 @@ fn override_redirect_window_after_toplevel_close() {
 
     assert!(f.testwl.get_surface_data(first).is_none());
 
-    let win2 = unsafe { Window::new(2) };
+    let win2 = Window::new(2);
     let (buffer, surface) = comp.create_surface();
     f.new_window(win2, true, WindowData::default());
     f.map_window(&comp, win2, &surface.obj, &buffer);
@@ -1214,7 +1214,7 @@ fn override_redirect_window_after_toplevel_close() {
 #[test]
 fn fullscreen() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    let win = unsafe { Window::new(1) };
+    let win = Window::new(1);
     let (_, id) = f.create_toplevel(&comp, win);
 
     f.satellite.set_fullscreen(win, SetState::Add);
@@ -1261,7 +1261,7 @@ fn fullscreen() {
 #[test]
 fn window_title_and_class() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    let win = unsafe { Window::new(1) };
+    let win = Window::new(1);
     let (_, id) = f.create_toplevel(&comp, win);
 
     f.satellite
@@ -1291,7 +1291,7 @@ fn window_title_and_class() {
 #[test]
 fn window_group_properties() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    let prop_win = unsafe { Window::new(1) };
+    let prop_win = Window::new(1);
     f.satellite.new_window(
         prop_win,
         false,
@@ -1306,7 +1306,7 @@ fn window_group_properties() {
         .set_win_title(prop_win, WmName::WmName("window".into()));
     f.satellite.set_win_class(prop_win, "class".into());
 
-    let win = unsafe { Window::new(2) };
+    let win = Window::new(2);
     let data = WindowData {
         mapped: true,
         dims: WindowDims {
@@ -1403,7 +1403,7 @@ selection_tests!(
 
 fn copy_from_x11<T: SelectionTest>() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    let win = unsafe { Window::new(1) };
+    let win = Window::new(1);
     let (_surface, _id) = f.create_toplevel(&comp, win);
 
     let mimes = std::rc::Rc::new(vec![
@@ -1435,7 +1435,7 @@ fn copy_from_x11<T: SelectionTest>() {
 fn copy_from_wayland<T: SelectionTest>() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
-    let win = unsafe { Window::new(1) };
+    let win = Window::new(1);
     let (_surface, _id) = f.create_toplevel(&comp, win);
 
     let mimes = vec![
@@ -1480,7 +1480,7 @@ fn copy_from_wayland<T: SelectionTest>() {
 fn selection_x11_then_wayland<T: SelectionTest>() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
-    let win = unsafe { Window::new(1) };
+    let win = Window::new(1);
     let (_surface, _id) = f.create_toplevel(&comp, win);
 
     let x11data = std::rc::Rc::new(vec![
@@ -1542,11 +1542,11 @@ fn selection_x11_then_wayland<T: SelectionTest>() {
 fn raise_window_on_pointer_event() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
-    let win1 = unsafe { Window::new(1) };
+    let win1 = Window::new(1);
     let (_, id1) = f.create_toplevel(&comp, win1);
     f.testwl.configure_toplevel(id1, 100, 100, vec![]);
 
-    let win2 = unsafe { Window::new(2) };
+    let win2 = Window::new(2);
     let (_, id2) = f.create_toplevel(&comp, win2);
     assert_eq!(f.connection().focused_window, Some(win2));
 
@@ -1565,11 +1565,11 @@ fn raise_window_on_pointer_event() {
 fn override_redirect_choose_hover_window() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
-    let win1 = unsafe { Window::new(1) };
+    let win1 = Window::new(1);
     let (_, id1) = f.create_toplevel(&comp, win1);
     f.testwl.configure_toplevel(id1, 100, 100, vec![]);
 
-    let win2 = unsafe { Window::new(2) };
+    let win2 = Window::new(2);
     let _ = f.create_toplevel(&comp, win2);
     assert_eq!(f.connection().focused_window, Some(win2));
 
@@ -1577,7 +1577,7 @@ fn override_redirect_choose_hover_window() {
     f.run();
     assert_eq!(f.satellite.last_hovered, Some(win1));
 
-    let win3 = unsafe { Window::new(3) };
+    let win3 = Window::new(3);
     let (buffer, surface) = comp.create_surface();
     f.new_window(
         win3,
@@ -1607,7 +1607,7 @@ fn output_offset() {
     f.create_xdg_output(&man, output_obj.obj);
     f.testwl.move_xdg_output(&output, 500, 100);
     f.run();
-    let window = unsafe { Window::new(1) };
+    let window = Window::new(1);
 
     {
         let (surface, surface_id) = f.create_toplevel(&comp, window);
@@ -1646,7 +1646,7 @@ fn output_offset() {
         assert_eq!(data.dims.y, 100);
     }
 
-    let popup = unsafe { Window::new(2) };
+    let popup = Window::new(2);
     let (p_surface, p_id) =
         f.create_popup(&comp, PopupBuilder::new(popup, window, t_id).x(510).y(110));
     f.testwl.move_surface_to_output(p_id, &output);
@@ -1680,7 +1680,7 @@ fn output_offset_change() {
     let (mut f, comp) = TestFixture::new_with_compositor();
 
     let (output_obj, output) = f.new_output(500, 100);
-    let window = unsafe { Window::new(1) };
+    let window = Window::new(1);
     let (_, id) = f.create_toplevel(&comp, window);
     f.testwl.move_surface_to_output(id, &output);
     f.run();
@@ -1715,10 +1715,10 @@ fn output_offset_change() {
 #[test]
 fn reconfigure_popup() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    let toplevel = unsafe { Window::new(1) };
+    let toplevel = Window::new(1);
     let (_, t_id) = f.create_toplevel(&comp, toplevel);
 
-    let popup = unsafe { Window::new(2) };
+    let popup = Window::new(2);
     let (_, p_id) = f.create_popup(&comp, PopupBuilder::new(popup, toplevel, t_id).x(20).y(40));
 
     let new_dims = WindowDims {
@@ -1736,10 +1736,10 @@ fn reconfigure_popup() {
 #[test]
 fn reconfigure_popup_after_map() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    let toplevel = unsafe { Window::new(1) };
+    let toplevel = Window::new(1);
     f.create_toplevel(&comp, toplevel);
 
-    let popup = unsafe { Window::new(2) };
+    let popup = Window::new(2);
     let old_dims = WindowDims {
         x: 20,
         y: 40,
@@ -1781,10 +1781,10 @@ fn reconfigure_popup_after_map() {
 #[test]
 fn drag_around_popup() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    let toplevel = unsafe { Window::new(1) };
+    let toplevel = Window::new(1);
     let (_, t_id) = f.create_toplevel(&comp, toplevel);
 
-    let popup = unsafe { Window::new(2) };
+    let popup = Window::new(2);
     let (_, p_id) = f.create_popup(&comp, PopupBuilder::new(popup, toplevel, t_id).x(0).y(0));
 
     let before_counter = f.connection().set_window_dims_counter;
@@ -1810,7 +1810,7 @@ fn drag_around_popup() {
 #[test]
 fn reconfigure_toplevel() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    let toplevel = unsafe { Window::new(1) };
+    let toplevel = Window::new(1);
     let (_, surface) = f.create_toplevel(&comp, toplevel);
 
     let mut dims = WindowDims {
@@ -1968,13 +1968,13 @@ fn fullscreen_heuristic() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     let (_, output) = f.new_output(0, 0);
 
-    let window1 = unsafe { Window::new(1) };
+    let window1 = Window::new(1);
     let (_, id) = f.create_toplevel(&comp, window1);
     f.testwl.move_surface_to_output(id, &output);
     f.run();
 
     let mut check_fullscreen = |id, override_redirect| {
-        let window = unsafe { Window::new(id) };
+        let window = Window::new(id);
         let (buffer, surface) = comp.create_surface();
         let data = WindowData {
             mapped: true,
@@ -2161,12 +2161,12 @@ fn scaled_output_popup() {
     f.run();
     f.run();
 
-    let toplevel = unsafe { Window::new(1) };
+    let toplevel = Window::new(1);
     let (_, toplevel_id) = f.create_toplevel(&comp, toplevel);
     f.testwl.move_surface_to_output(toplevel_id, &output);
     f.run();
 
-    let popup = unsafe { Window::new(2) };
+    let popup = Window::new(2);
     let builder = PopupBuilder::new(popup, toplevel, toplevel_id)
         .x(50)
         .y(50)
@@ -2190,7 +2190,7 @@ fn fractional_scale_popup() {
     let comp = f.compositor();
     let (_, output) = f.new_output(0, 0);
 
-    let toplevel = unsafe { Window::new(1) };
+    let toplevel = Window::new(1);
     let (_, toplevel_id) = f.create_toplevel(&comp, toplevel);
     let surface_data = f
         .testwl
@@ -2206,7 +2206,7 @@ fn fractional_scale_popup() {
     f.run();
     f.run();
 
-    let popup = unsafe { Window::new(2) };
+    let popup = Window::new(2);
     let builder = PopupBuilder::new(popup, toplevel, toplevel_id)
         .x(60)
         .y(60)
@@ -2233,12 +2233,12 @@ fn scaled_output_small_popup() {
     f.run();
     f.run();
 
-    let toplevel = unsafe { Window::new(1) };
+    let toplevel = Window::new(1);
     let (_, toplevel_id) = f.create_toplevel(&comp, toplevel);
     f.testwl.move_surface_to_output(toplevel_id, &output);
     f.run();
 
-    let popup = unsafe { Window::new(2) };
+    let popup = Window::new(2);
     let builder = PopupBuilder::new(popup, toplevel, toplevel_id)
         .x(50)
         .y(50)
@@ -2264,7 +2264,7 @@ fn fractional_scale_small_popup() {
     let comp = f.compositor();
 
     let (_, output) = f.new_output(0, 0);
-    let toplevel = unsafe { Window::new(1) };
+    let toplevel = Window::new(1);
     let (_, toplevel_id) = f.create_toplevel(&comp, toplevel);
     let data = f.testwl.get_surface_data(toplevel_id).unwrap();
     let fractional = data
@@ -2283,7 +2283,7 @@ fn fractional_scale_small_popup() {
         assert_eq!(viewport.height, 66);
     }
 
-    let popup = unsafe { Window::new(2) };
+    let popup = Window::new(2);
     let builder = PopupBuilder::new(popup, toplevel, toplevel_id)
         .width(1)
         .height(1)
@@ -2333,7 +2333,7 @@ fn toplevel_size_limits_scaled() {
     f.run();
     f.run();
 
-    let window = unsafe { Window::new(1) };
+    let window = Window::new(1);
     let (buffer, surface) = comp.create_surface();
     let data = WindowData {
         mapped: true,
@@ -2409,13 +2409,13 @@ fn toplevel_size_limits_scaled() {
 fn subpopup_positioning() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
-    let win_toplevel = unsafe { Window::new(1) };
+    let win_toplevel = Window::new(1);
     let (_, id_toplevel) = f.create_toplevel(&comp, win_toplevel);
 
     f.testwl.move_pointer_to(id_toplevel, 0.0, 0.0);
     f.run();
 
-    let win_popup = unsafe { Window::new(2) };
+    let win_popup = Window::new(2);
     let (_, id_popup) = f.create_popup(
         &comp,
         PopupBuilder::new(win_popup, win_toplevel, id_toplevel)
@@ -2426,7 +2426,7 @@ fn subpopup_positioning() {
     f.testwl.move_pointer_to(id_popup, 1.0, 1.0);
     f.run();
 
-    let win_subpopup = unsafe { Window::new(3) };
+    let win_subpopup = Window::new(3);
 
     f.create_popup(
         &comp,
@@ -2443,10 +2443,10 @@ fn subpopup_positioning() {
 #[test]
 fn transient_for_toplevel() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    let toplevel = unsafe { Window::new(1) };
+    let toplevel = Window::new(1);
     let (_, toplevel_id) = f.create_toplevel(&comp, toplevel);
 
-    let sub_toplevel = unsafe { Window::new(2) };
+    let sub_toplevel = Window::new(2);
     let (buffer, surface) = comp.create_surface();
     f.new_window(
         sub_toplevel,
@@ -2484,7 +2484,7 @@ fn touch_fractional_scale() {
     let touch = TestObject::<WlTouch>::from_request(&comp.seat.obj, wl_seat::Request::GetTouch {});
     f.run();
 
-    let toplevel = unsafe { Window::new(1) };
+    let toplevel = Window::new(1);
     let (_, id) = f.create_toplevel(&comp, toplevel);
     f.testwl.move_surface_to_output(id, &output);
 
@@ -2524,7 +2524,7 @@ fn tablet_tool_fractional_scale() {
     });
     let comp = f.compositor();
     let (_, output) = f.new_output(0, 0);
-    let toplevel = unsafe { Window::new(1) };
+    let toplevel = Window::new(1);
     let (_, id) = f.create_toplevel(&comp, toplevel);
     let surface_data = f.testwl.get_surface_data(id).unwrap();
     let fractional = surface_data.fractional.as_ref().cloned().unwrap();
@@ -2594,7 +2594,7 @@ fn output_updated_before_x_connection() {
 
     let mut f = f.upgrade_connection(FakeXConnection::default());
 
-    let window = unsafe { Window::new(1) };
+    let window = Window::new(1);
     let (_, surface_id) = f.create_toplevel(&comp, window);
     f.testwl.move_surface_to_output(surface_id, &output);
     f.run();
@@ -2608,7 +2608,7 @@ fn output_updated_before_x_connection() {
 fn quick_empty_data_offer() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
-    let win = unsafe { Window::new(1) };
+    let win = Window::new(1);
     let (_surface, _id) = f.create_toplevel(&comp, win);
     f.testwl.create_data_offer(vec![testwl::PasteData {
         mime_type: "text".to_string(),
@@ -2625,7 +2625,7 @@ fn quick_empty_data_offer() {
 fn quick_destroy_window_with_serial() {
     let (mut f, comp) = TestFixture::new_with_compositor();
 
-    let window = unsafe { Window::new(1) };
+    let window = Window::new(1);
     let data = WindowData {
         mapped: true,
         dims: WindowDims {
@@ -2680,7 +2680,7 @@ fn scaled_pointer_lock_position_hint() {
         TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
 
     let (_, output) = f.new_output(0, 0);
-    let win = unsafe { Window::new(1) };
+    let win = Window::new(1);
     let (surface, id) = f.create_toplevel(&comp, win);
     let surface_data = f.testwl.get_surface_data(id).expect("No surface data");
     let fractional = surface_data
@@ -2719,7 +2719,7 @@ fn scaled_pointer_lock_position_hint() {
 #[test]
 fn client_side_decorations() {
     let (mut f, compositor) = TestFixture::new_with_compositor();
-    let window = unsafe { Window::new(1) };
+    let window = Window::new(1);
     let (_, id) = f.create_toplevel(&compositor, window);
     f.testwl
         .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ClientSide);
@@ -2795,7 +2795,7 @@ fn client_side_decorations_no_global() {
         testwl.disable_decorations_global();
     });
     let compositor = f.compositor();
-    let window = unsafe { Window::new(1) };
+    let window = Window::new(1);
     let (buffer, surface) = compositor.create_surface();
 
     let data = WindowData {
@@ -2841,7 +2841,7 @@ fn client_side_decorations_no_global() {
 #[test]
 fn resize_decorations_on_reconfigure() {
     let (mut f, compositor) = TestFixture::new_with_compositor();
-    let window = unsafe { Window::new(1) };
+    let window = Window::new(1);
     let (_, id) = f.create_toplevel(&compositor, window);
     f.testwl
         .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ClientSide);
@@ -2891,7 +2891,7 @@ fn resize_decorations_on_reconfigure() {
 #[test]
 fn decorations_with_title_on_thin_window() {
     let (mut f, compositor) = TestFixture::new_with_compositor();
-    let window = unsafe { Window::new(1) };
+    let window = Window::new(1);
     let (_, id) = f.create_toplevel(&compositor, window);
     f.testwl
         .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ClientSide);
