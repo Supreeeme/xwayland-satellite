@@ -302,6 +302,7 @@ impl XState {
                 self.atoms.motif_wm_hints,
                 self.atoms.net_wm_state,
                 self.atoms.wm_fullscreen,
+                self.atoms.moveresize,
             ],
         );
 
