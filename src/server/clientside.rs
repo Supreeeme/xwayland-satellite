@@ -298,13 +298,14 @@ impl<P: Proxy> LateInitObjectKey<P>
 where
     P::Event: Into<ObjectEvent>,
 {
-    pub fn init(&self, key: Entity) {
-        self.key.set(key).expect("Object key should not be set");
+    pub fn get_or_init(&self, f: impl FnOnce() -> Entity) -> Entity {
+        let key = self.key.get_or_init(f);
         if let Some(sender) = self.sender.lock().unwrap().take() {
             for event in self.queued_events.lock().unwrap().drain(..) {
-                sender.send((key, event.into())).unwrap();
+                sender.send((*key, event.into())).unwrap();
             }
         }
+        *key
     }
 
     pub fn get(&self) -> Entity {

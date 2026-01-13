@@ -1456,27 +1456,63 @@ impl Event for zwp_confined_pointer_v1::Event {
     }
 }
 
+#[must_use]
+fn entity_from_client<Client: Proxy + Send + Sync + 'static, S: X11Selection + 'static>(
+    client: &Client,
+    state: &InnerServerState<S>,
+) -> Entity
+where
+    Client::Event: Send + Into<ObjectEvent>,
+{
+    let obj_key: &LateInitObjectKey<Client> = client.data().unwrap();
+    obj_key.get_or_init(|| state.world.reserve_entity())
+}
+impl<S: X11Selection + 'static> InnerServerState<S> {
+    fn create_resource<Server: Resource + 'static>(&self, entity: Entity) -> Server
+    where
+        Self: wayland_server::Dispatch<Server, Entity>,
+    {
+        self.client
+            .create_resource::<_, _, Self>(&self.dh, 1, entity)
+            .unwrap()
+    }
+}
+macro_rules! handle_tablet_event {
+    ($server:ty, $client:expr, $state:expr, $fn:expr) => {
+        let entity = entity_from_client(&$client, &$state);
+        let server = $state.world.get::<&$server>(entity);
+        if let Ok(server) = server {
+            $fn(&server);
+        } else {
+            drop(server);
+            let server = $state.create_resource::<_>(entity);
+            $fn(&server);
+            $state.world.spawn_at(entity, ($client, server));
+        }
+    };
+}
+
 impl Event for zwp_tablet_seat_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
         let seat = state.world.get::<&TabletSeatServer>(target).unwrap();
         match self {
             Self::TabletAdded { id } => {
-                let (e, tab) = from_client::<TabletServer, _, _>(&id, state);
-                seat.tablet_added(&tab);
-                drop(seat);
-                state.world.spawn_at(e, (tab, id));
+                handle_tablet_event!(TabletServer, id, state, |tab| {
+                    seat.tablet_added(tab);
+                    drop(seat);
+                });
             }
             Self::ToolAdded { id } => {
-                let (e, tool) = from_client::<TabletToolServer, _, _>(&id, state);
-                seat.tool_added(&tool);
-                drop(seat);
-                state.world.spawn_at(e, (tool, id));
+                handle_tablet_event!(TabletToolServer, id, state, |tool| {
+                    seat.tool_added(tool);
+                    drop(seat);
+                });
             }
             Self::PadAdded { id } => {
-                let (e, pad) = from_client::<TabletPadServer, _, _>(&id, state);
-                seat.pad_added(&pad);
-                drop(seat);
-                state.world.spawn_at(e, (pad, id));
+                handle_tablet_event!(TabletPadServer, id, state, |pad| {
+                    seat.pad_added(pad);
+                    drop(seat);
+                });
             }
             _ => log::warn!("unhandled {}: {self:?}", std::any::type_name::<Self>()),
         }
@@ -1504,17 +1540,16 @@ impl Event for zwp_tablet_pad_v2::Event {
         let s_surf;
         match self {
             Self::Group { pad_group } => {
-                let (e, s_group) = from_client::<TabletPadGroupServer, _, _>(&pad_group, state);
-                pad.group(&s_group);
-                drop(pad);
-                state.world.spawn_at(e, (pad_group, s_group));
+                handle_tablet_event!(TabletPadGroupServer, pad_group, state, |s_group| {
+                    pad.group(s_group);
+                    drop(pad);
+                });
             }
             Self::Enter {
                 serial,
                 tablet,
                 surface,
             } => {
-                let (e_tab, s_tablet) = from_client::<TabletServer, _, _>(&tablet, state);
                 let Some(surface) = surface
                     .data()
                     .copied()
@@ -1522,10 +1557,11 @@ impl Event for zwp_tablet_pad_v2::Event {
                 else {
                     return;
                 };
-                pad.enter(serial, &s_tablet, &surface);
-                drop(pad);
-                drop(surface);
-                state.world.spawn_at(e_tab, (tablet, s_tablet));
+                handle_tablet_event!(TabletServer, tablet, state, |s_tablet| {
+                    pad.enter(serial, s_tablet, &surface);
+                    drop(pad);
+                    drop(surface);
+                });
             }
             _ => simple_event_shunt! {
                 pad, self => [
@@ -1631,45 +1667,22 @@ impl Event for zwp_tablet_tool_v2::Event {
     }
 }
 
-#[must_use]
-fn from_client<
-    Server: Resource + 'static,
-    Client: Proxy + Send + Sync + 'static,
-    S: X11Selection + 'static,
->(
-    client: &Client,
-    state: &InnerServerState<S>,
-) -> (Entity, Server)
-where
-    Client::Event: Send + Into<ObjectEvent>,
-    InnerServerState<S>: wayland_server::Dispatch<Server, Entity>,
-{
-    let entity = state.world.reserve_entity();
-    let server = state
-        .client
-        .create_resource::<_, _, InnerServerState<S>>(&state.dh, 1, entity)
-        .unwrap();
-    let obj_key: &LateInitObjectKey<Client> = client.data().unwrap();
-    obj_key.init(entity);
-    (entity, server)
-}
-
 impl Event for zwp_tablet_pad_group_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
         let group = state.world.get::<&TabletPadGroupServer>(target).unwrap();
         match self {
             Self::Buttons { buttons } => group.buttons(buttons),
             Self::Ring { ring } => {
-                let (e, s_ring) = from_client::<TabletPadRingServer, _, _>(&ring, state);
-                group.ring(&s_ring);
-                drop(group);
-                state.world.spawn_at(e, (s_ring, ring));
+                handle_tablet_event!(TabletPadRingServer, ring, state, |s_ring| {
+                    group.ring(s_ring);
+                    drop(group);
+                });
             }
             Self::Strip { strip } => {
-                let (e, s_strip) = from_client::<TabletPadStripServer, _, _>(&strip, state);
-                group.strip(&s_strip);
-                drop(group);
-                state.world.spawn_at(e, (s_strip, strip));
+                handle_tablet_event!(TabletPadStripServer, strip, state, |s_strip| {
+                    group.strip(s_strip);
+                    drop(group);
+                });
             }
             Self::Modes { modes } => group.modes(modes),
             Self::ModeSwitch { time, serial, mode } => group.mode_switch(time, serial, mode),
