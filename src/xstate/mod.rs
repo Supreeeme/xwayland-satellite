@@ -730,6 +730,16 @@ impl XState {
             atoms_vec,
         );
 
+        let mut has_skip_taskbar = false;
+        if let Some(states) = window_state.resolve()? {
+            has_skip_taskbar = states.contains(&self.atoms.skip_taskbar);
+        }
+        // combine wmhint_popup with skip_taskbar
+        // fixed edge cases where certain apps (BattleNet client, PixelComposer spawn as popup)
+        if wmhint_popup {
+            wmhint_popup = has_skip_taskbar;
+        }
+
         let override_redirect = self.connection.wait_for_reply(attrs)?.override_redirect();
         let mut is_popup = override_redirect;
 
@@ -781,9 +791,7 @@ impl XState {
         }
 
         if !known_window_type {
-            if let Some(states) = window_state.resolve()? {
-                is_popup = states.contains(&self.atoms.skip_taskbar);
-            }
+            is_popup = has_skip_taskbar;
         }
 
         Ok(is_popup)
