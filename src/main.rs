@@ -1,4 +1,4 @@
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 fn main() {
     pretty_env_logger::formatted_timed_builder()
@@ -80,32 +80,28 @@ impl xwayland_satellite::RunData for RealData {
 
 fn parse_args() -> RealData {
     let mut data = RealData::default();
-    let args: Vec<_> = std::env::args().collect();
+    let mut args = std::env::args().skip(1).peekable();
 
-    // The first argument is optionally the display name.
-    let Some(arg) = args.get(1) else {
+    // The first argument (other than the skipped-over binary name) is optionally the display name.
+    let Some(arg) = args.peek() else {
         return data;
     };
-    let mut i = if arg.starts_with(':') {
+    if arg.starts_with(':') {
         data.display = Some(arg.to_owned());
-        2
-    } else {
-        1
-    };
+        args.next();
+    }
 
     // All other options (including the first if it was not a display name) are supported flags
-    while let Some(arg) = args.get(i) {
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "-ac" => {
                 data.disable_ac = true;
-                i += 1;
             }
             "-audit" => {
                 data.audit_level = args
-                    .get(i + 1)
+                    .next()
                     .and_then(|n| n.parse().ok())
                     .expect("argument to -audit not provided or integer");
-                i += 2;
             }
             "-auth" => {
                 // X.org lets you pass multiple `-auth` parameters but only uses the last one.
@@ -113,7 +109,7 @@ fn parse_args() -> RealData {
                 if data.auth_file.is_some() {
                     panic!("Multiple `-auth` flags passed");
                 }
-                let Some(file) = args.get(i + 1) else {
+                let Some(ref file) = args.next() else {
                     panic!("No authorization file passed");
                 };
                 std::fs::OpenOptions::new()
@@ -121,34 +117,26 @@ fn parse_args() -> RealData {
                     .open(file)
                     .expect("Could not open authorization file");
                 data.auth_file = Some(file.to_owned());
-                i += 2;
             }
             "-core" => {
                 data.coredump = true;
-                i += 1;
             }
             "+extension" => {
-                let ext = args
-                    .get(i + 1)
-                    .expect("argument to +extension not provided");
-                if let Some(idx) = data.extension_minus.iter().position(|e| e == ext) {
+                let ext = args.next().expect("argument to +extension not provided");
+                if let Some(idx) = data.extension_minus.iter().position(|e| *e == ext) {
                     data.extension_minus.swap_remove(idx);
                 }
                 data.extension_plus.push(ext.to_owned());
-                i += 2;
             }
             "-extension" => {
-                let ext = args
-                    .get(i + 1)
-                    .expect("argument to -extension not provided");
+                let ext = args.next().expect("argument to -extension not provided");
                 // Do not disable essential extensions (see XState::new for this list)
                 if !["COMPOSITE", "RANDR", "XFIXES", "X-Resource"].contains(&&ext[..]) {
-                    if let Some(idx) = data.extension_plus.iter().position(|e| e == ext) {
+                    if let Some(idx) = data.extension_plus.iter().position(|e| *e == ext) {
                         data.extension_plus.swap_remove(idx);
                     }
                     data.extension_minus.push(ext.to_owned());
                 }
-                i += 2;
             }
             "-help" => {
                 // Wording for most help messages taken directly from Xwayland
@@ -177,49 +165,43 @@ fn parse_args() -> RealData {
                 std::process::exit(0);
             }
             "-listen" => {
-                let protocol = args
-                    .get(i + 1)
-                    .expect("argument to -extension not provided");
-                if let Some(idx) = data.listen_minus.iter().position(|p| p == protocol) {
+                let protocol = args.next().expect("argument to -extension not provided");
+                if let Some(idx) = data.listen_minus.iter().position(|p| *p == protocol) {
                     data.listen_minus.swap_remove(idx);
                 }
                 data.listen_plus.push(protocol.to_owned());
-                i += 2;
             }
             "-nolisten" => {
-                let protocol = args
-                    .get(i + 1)
-                    .expect("argument to -extension not provided");
-                if let Some(idx) = data.listen_plus.iter().position(|p| p == protocol) {
+                let protocol = args.next().expect("argument to -extension not provided");
+                if let Some(idx) = data.listen_plus.iter().position(|p| *p == protocol) {
                     data.listen_plus.swap_remove(idx);
                 }
                 data.listen_minus.push(protocol.to_owned());
-                i += 2;
             }
             "-listenfd" => {
-                let next = i + 1;
-                if next == args.len() {
-                    // Matches the Xwayland error message.
-                    panic!("Required argument to -listenfd not specified");
-                }
-
-                let fd: RawFd = args[next].parse().expect("Error parsing -listenfd number");
+                let fd: RawFd = args
+                    .next()
+                    .expect("Required argument to -listenfd not specified")
+                    .parse()
+                    .expect("Error parsing -listenfd number");
                 // SAFETY:
                 // - whoever runs the binary must ensure this fd is open and valid.
                 // - parse_args() must only be called once to avoid double closing.
+                // - no fd can be provided multiple times to avoid double closing.
+                assert!(
+                    data.listenfds.iter().any(|l| l.as_raw_fd() == fd),
+                    "Multiple -listenfd with the same fd is not allowed"
+                );
                 let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-
                 data.listenfds.push(fd);
-                i += 2;
             }
             "--test-listenfd-support" => std::process::exit(0),
             "-verbose" => {
-                if let Some(v) = args.get(i + 1).and_then(|n| n.parse::<u32>().ok()) {
+                if let Some(v) = args.peek().and_then(|n| n.parse::<u32>().ok()) {
                     data.verbosity = v;
-                    i += 2;
+                    args.next();
                 } else {
                     data.verbosity += 1;
-                    i += 1;
                 }
             }
             "-version" => {
