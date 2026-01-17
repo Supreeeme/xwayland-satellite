@@ -691,29 +691,7 @@ impl XState {
     ) -> XResult<bool> {
         let mut motif_popup = false;
         let mut wmhint_popup = false;
-        if let Some(hints) = motif_hints {
-            // If MOTIF_WM_HINTS provides no decorations for client assume its a popup
-            motif_popup = hints.decorations.is_some_and(|d| d.is_clientside());
-            // WMHINTS is considered popup only if client is not decorated && client does not
-            // accept input focus
-            wmhint_popup = motif_popup && wm_hints.is_some_and(|h| !h.acquire_input_via_wm);
-            // Sometimes popup is false-positive meaning both MOTIF Decorations and WM_HINTS input indicates its a popup
-            // but MOTIF has function flags that toplevel window should do
-            if wmhint_popup
-                && hints.functions.as_ref().is_some_and(|f| {
-                    f.contains(motif::Functions::Minimize)
-                        || f.contains(motif::Functions::Maximize)
-                        || f.contains(motif::Functions::All)
-                })
-            {
-                wmhint_popup = false;
-            }
-            // If the motif hints indicate the user shouldn't be able to do anything
-            // to the window at all, it stands to reason it's probably a popup.
-            if hints.functions.is_some_and(|f| f.is_empty()) {
-                return Ok(true);
-            }
-        }
+        let mut has_skip_taskbar = false;
 
         let attrs = self
             .connection
@@ -730,14 +708,30 @@ impl XState {
             atoms_vec,
         );
 
-        let mut has_skip_taskbar = false;
         if let Some(states) = window_state.resolve()? {
             has_skip_taskbar = states.contains(&self.atoms.skip_taskbar);
         }
-        // combine wmhint_popup with skip_taskbar
-        // fixed edge cases where certain apps (BattleNet client, PixelComposer spawn as popup)
-        if wmhint_popup {
-            wmhint_popup = has_skip_taskbar;
+        if let Some(hints) = motif_hints {
+            // If MOTIF_WM_HINTS provides no decorations for client assume its a popup
+            motif_popup = hints.decorations.is_some_and(|d| d.is_clientside());
+            // WMHINTS is considered popup only if client is not decorated && client does not
+            // accept input focus
+            // Sometimes popup is false-positive meaning both MOTIF Decorations and WM_HINTS input indicates its a popup
+            // but MOTIF has function flags that toplevel window should do
+            // Also combine wmhint_popup with skip_taskbar which
+            // fixes some edge cases where certain apps (BattleNet client, PixelComposer spawn as popup)
+            wmhint_popup = motif_popup && wm_hints.is_some_and(|h| !h.acquire_input_via_wm)
+                && !hints.functions.as_ref().is_some_and(|f| {
+                    f.contains(motif::Functions::Minimize)
+                        || f.contains(motif::Functions::Maximize)
+                        || f.contains(motif::Functions::All)
+                })
+                && has_skip_taskbar;            
+            // If the motif hints indicate the user shouldn't be able to do anything
+            // to the window at all, it stands to reason it's probably a popup.
+            if hints.functions.is_some_and(|f| f.is_empty()) {
+                return Ok(true);
+            }
         }
 
         let override_redirect = self.connection.wait_for_reply(attrs)?.override_redirect();
