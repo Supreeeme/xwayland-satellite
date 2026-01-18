@@ -34,6 +34,7 @@ use wayland_protocols::{
     wp::{
         fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
+        linux_drm_syncobj::v1::server::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1,
         pointer_constraints::zv1::{
             client::{zwp_confined_pointer_v1, zwp_locked_pointer_v1},
             server::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
@@ -370,7 +371,8 @@ fn handle_globals<'a, S: X11Selection + 'static>(
             s_dmabuf::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
             ZxdgOutputManagerV1,
             ZwpPointerConstraintsV1,
-            ZwpTabletManagerV2
+            ZwpTabletManagerV2,
+            WpLinuxDrmSyncobjManagerV1
         ];
     }
 }

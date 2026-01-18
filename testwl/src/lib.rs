@@ -6,6 +6,7 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
+use wayland_protocols::wp::linux_drm_syncobj::v1::server::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1;
 use wayland_protocols::wp::primary_selection::zv1::server::zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1;
 use wayland_protocols::wp::primary_selection::zv1::server::zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1;
 use wayland_protocols::wp::primary_selection::zv1::server::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1;
@@ -476,6 +477,7 @@ impl Server {
         dh.create_global::<State, ZwpPointerConstraintsV1, _>(1, ());
         global_noop!(ZwpLinuxDmabufV1);
         global_noop!(ZwpRelativePointerManagerV1);
+        global_noop!(WpLinuxDrmSyncobjManagerV1);
 
         struct HandlerData;
         impl ObjectData<State> for HandlerData {
