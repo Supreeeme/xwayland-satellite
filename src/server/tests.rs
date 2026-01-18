@@ -1,8 +1,8 @@
-use super::{selection::Clipboard, InnerServerState, NoConnection, ServerState, WindowDims};
+use super::{InnerServerState, NoConnection, ServerState, WindowDims, selection::Clipboard};
 use crate::server::selection::{Primary, SelectionType};
 use crate::xstate::{SetState, WinSize, WmName};
-use crate::{timespec_from_millis, XConnection};
-use rustix::event::{poll, PollFd, PollFlags};
+use crate::{XConnection, timespec_from_millis};
+use rustix::event::{PollFd, PollFlags, poll};
 use std::collections::HashMap;
 use std::io::Write;
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -10,7 +10,8 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use testwl::{SendDataForMimeFn, SurfaceRole};
 use wayland_client::{
-    backend::{protocol::Message, Backend, ObjectData, ObjectId, WaylandError},
+    Connection, Proxy, WEnum,
+    backend::{Backend, ObjectData, ObjectId, WaylandError, protocol::Message},
     protocol::{
         wl_buffer::WlBuffer,
         wl_compositor::WlCompositor,
@@ -25,8 +26,8 @@ use wayland_client::{
         wl_surface::WlSurface,
         wl_touch::{self, WlTouch},
     },
-    Connection, Proxy, WEnum,
 };
+use wayland_protocols::wp::linux_drm_syncobj::v1::client::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1;
 use wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1;
 use wayland_protocols::{
     wp::{
@@ -39,14 +40,14 @@ use wayland_protocols::{
         tablet::zv2::client::{
             zwp_tablet_manager_v2::{self, ZwpTabletManagerV2},
             zwp_tablet_pad_group_v2::{
-                self, ZwpTabletPadGroupV2, EVT_RING_OPCODE, EVT_STRIP_OPCODE,
+                self, EVT_RING_OPCODE, EVT_STRIP_OPCODE, ZwpTabletPadGroupV2,
             },
             zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2,
             zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2,
-            zwp_tablet_pad_v2::{self, ZwpTabletPadV2, EVT_GROUP_OPCODE},
+            zwp_tablet_pad_v2::{self, EVT_GROUP_OPCODE, ZwpTabletPadV2},
             zwp_tablet_seat_v2::{
-                self, ZwpTabletSeatV2, EVT_PAD_ADDED_OPCODE, EVT_TABLET_ADDED_OPCODE,
-                EVT_TOOL_ADDED_OPCODE,
+                self, EVT_PAD_ADDED_OPCODE, EVT_TABLET_ADDED_OPCODE, EVT_TOOL_ADDED_OPCODE,
+                ZwpTabletSeatV2,
             },
             zwp_tablet_tool_v2::{self, ZwpTabletToolV2},
             zwp_tablet_v2::{self, ZwpTabletV2},
@@ -63,7 +64,7 @@ use wayland_protocols::{
         xwayland_shell_v1::XwaylandShellV1, xwayland_surface_v1::XwaylandSurfaceV1,
     },
 };
-use wayland_server::{protocol as s_proto, Display, Resource};
+use wayland_server::{Display, Resource, protocol as s_proto};
 use wl_drm::client::wl_drm::WlDrm;
 use xcb::x::{self, Window};
 
@@ -1097,7 +1098,8 @@ fn pass_through_globals() {
         WlDrm,
         ZwpPointerConstraintsV1,
         XwaylandShellV1,
-        ZwpTabletManagerV2
+        ZwpTabletManagerV2,
+        WpLinuxDrmSyncobjManagerV1
     }
 
     let mut globals = SupportedGlobals::default();
@@ -1222,40 +1224,46 @@ fn fullscreen() {
     f.run();
 
     let data = f.testwl.get_surface_data(id).unwrap();
-    assert!(data
-        .toplevel()
-        .states
-        .contains(&xdg_toplevel::State::Fullscreen));
+    assert!(
+        data.toplevel()
+            .states
+            .contains(&xdg_toplevel::State::Fullscreen)
+    );
 
     f.satellite.set_fullscreen(win, SetState::Remove);
     f.run();
     f.run();
 
     let data = f.testwl.get_surface_data(id).unwrap();
-    assert!(!data
-        .toplevel()
-        .states
-        .contains(&xdg_toplevel::State::Fullscreen));
+    assert!(
+        !data
+            .toplevel()
+            .states
+            .contains(&xdg_toplevel::State::Fullscreen)
+    );
 
     f.satellite.set_fullscreen(win, SetState::Toggle);
     f.run();
     f.run();
 
     let data = f.testwl.get_surface_data(id).unwrap();
-    assert!(data
-        .toplevel()
-        .states
-        .contains(&xdg_toplevel::State::Fullscreen));
+    assert!(
+        data.toplevel()
+            .states
+            .contains(&xdg_toplevel::State::Fullscreen)
+    );
 
     f.satellite.set_fullscreen(win, SetState::Toggle);
     f.run();
     f.run();
 
     let data = f.testwl.get_surface_data(id).unwrap();
-    assert!(!data
-        .toplevel()
-        .states
-        .contains(&xdg_toplevel::State::Fullscreen));
+    assert!(
+        !data
+            .toplevel()
+            .states
+            .contains(&xdg_toplevel::State::Fullscreen)
+    );
 }
 
 #[test]

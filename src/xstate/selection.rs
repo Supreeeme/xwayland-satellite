@@ -1,8 +1,8 @@
-use super::{get_atom_name, XState};
+use super::{XState, get_atom_name};
 use crate::server::selection::{Clipboard, ForeignSelection, Primary, SelectionType};
 use crate::{RealServerState, X11Selection};
 use log::{debug, error, warn};
-use rustix::event::{poll, PollFd, PollFlags};
+use rustix::event::{PollFd, PollFlags, poll};
 use smithay_client_toolkit::data_device_manager::WritePipe;
 use std::cell::RefCell;
 use std::collections::VecDeque;

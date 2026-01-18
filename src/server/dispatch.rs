@@ -47,6 +47,7 @@ use wayland_protocols::{
     },
 };
 use wayland_server::{
+    Dispatch, DisplayHandle, GlobalDispatch, Resource,
     protocol::{
         wl_buffer::WlBuffer,
         wl_callback::WlCallback,
@@ -61,7 +62,6 @@ use wayland_server::{
         wl_surface::WlSurface,
         wl_touch::WlTouch,
     },
-    Dispatch, DisplayHandle, GlobalDispatch, Resource,
 };
 
 // noop
@@ -1458,7 +1458,9 @@ impl<S: X11Selection> Dispatch<XwaylandSurfaceV1, Entity> for InnerServerState<S
                 if let Some(win_entity) = win_entity {
                     let bundle = state.world.take(win_entity).unwrap();
                     if !bundle.has::<x::Window>() {
-                        warn!("Window with same serial ({serial:?}) as {surface_id} has been destroyed?");
+                        warn!(
+                            "Window with same serial ({serial:?}) as {surface_id} has been destroyed?"
+                        );
                         return;
                     }
                     let mut builder = hecs::EntityBuilder::new();

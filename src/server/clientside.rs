@@ -16,7 +16,7 @@ use smithay_client_toolkit::{
         selection::PrimarySelectionSourceHandler,
     },
 };
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, mpsc};
 use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
     wl_keyboard::WlKeyboard, wl_output::WlOutput, wl_pointer::WlPointer, wl_region::WlRegion,
@@ -25,15 +25,10 @@ use wayland_client::protocol::{
     wl_touch::WlTouch,
 };
 use wayland_client::{
-    delegate_noop, event_created_child,
+    Connection, Dispatch, Proxy, QueueHandle, delegate_noop, event_created_child,
     globals::{Global, GlobalList, GlobalListContents},
-    Connection, Dispatch, Proxy, QueueHandle,
 };
 use wayland_protocols::{
-    wp::relative_pointer::zv1::client::{
-        zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
-        zwp_relative_pointer_v1::ZwpRelativePointerV1,
-    },
     wp::{
         fractional_scale::v1::client::{
             wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
@@ -43,6 +38,11 @@ use wayland_protocols::{
             self as dmabuf,
             zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1 as DmabufFeedback,
             zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+        },
+        linux_drm_syncobj::v1::client::{
+            wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1,
+            wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1,
+            wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1,
         },
         pointer_constraints::zv1::client::{
             zwp_confined_pointer_v1::ZwpConfinedPointerV1,
@@ -54,25 +54,31 @@ use wayland_protocols::{
             zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1,
             zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1,
         },
+        relative_pointer::zv1::client::{
+            zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+            zwp_relative_pointer_v1::ZwpRelativePointerV1,
+        },
         tablet::zv2::client::{
             zwp_tablet_manager_v2::ZwpTabletManagerV2,
-            zwp_tablet_pad_group_v2::{ZwpTabletPadGroupV2, EVT_RING_OPCODE, EVT_STRIP_OPCODE},
+            zwp_tablet_pad_group_v2::{EVT_RING_OPCODE, EVT_STRIP_OPCODE, ZwpTabletPadGroupV2},
             zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2,
             zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2,
-            zwp_tablet_pad_v2::{ZwpTabletPadV2, EVT_GROUP_OPCODE},
+            zwp_tablet_pad_v2::{EVT_GROUP_OPCODE, ZwpTabletPadV2},
             zwp_tablet_seat_v2::{
-                ZwpTabletSeatV2, EVT_PAD_ADDED_OPCODE, EVT_TABLET_ADDED_OPCODE,
-                EVT_TOOL_ADDED_OPCODE,
+                EVT_PAD_ADDED_OPCODE, EVT_TABLET_ADDED_OPCODE, EVT_TOOL_ADDED_OPCODE,
+                ZwpTabletSeatV2,
             },
             zwp_tablet_tool_v2::ZwpTabletToolV2,
             zwp_tablet_v2::ZwpTabletV2,
         },
         viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
     },
-    xdg::decoration::zv1::client::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
-    xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
     xdg::{
         activation::v1::client::xdg_activation_v1::XdgActivationV1,
+        decoration::zv1::client::{
+            zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
+            zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
+        },
         shell::client::{
             xdg_popup::XdgPopup, xdg_positioner::XdgPositioner, xdg_surface::XdgSurface,
             xdg_toplevel::XdgToplevel, xdg_wm_base::XdgWmBase,
@@ -185,6 +191,9 @@ delegate_noop!(MyWorld: ZxdgDecorationManagerV1);
 delegate_noop!(MyWorld: WpFractionalScaleManagerV1);
 delegate_noop!(MyWorld: ZwpPrimarySelectionDeviceManagerV1);
 delegate_noop!(MyWorld: WlSubsurface);
+delegate_noop!(MyWorld: WpLinuxDrmSyncobjManagerV1);
+delegate_noop!(MyWorld: WpLinuxDrmSyncobjSurfaceV1);
+delegate_noop!(MyWorld: WpLinuxDrmSyncobjTimelineV1);
 
 impl Dispatch<WlRegistry, GlobalListContents> for MyWorld {
     fn event(
