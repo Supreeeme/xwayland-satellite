@@ -346,6 +346,7 @@ xcb::atoms_struct! {
         win_type_utility => b"_NET_WM_WINDOW_TYPE_UTILITY",
         win_type_dnd => b"_NET_WM_WINDOW_TYPE_DND",
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
+        wm_hints => b"WM_HINTS",
         mime1 => b"text/plain" only_if_exists = false,
         mime2 => b"blah/blah" only_if_exists = false,
         incr => b"INCR",
@@ -2071,6 +2072,21 @@ fn popup_heuristics() {
     );
     f.map_as_popup(&mut connection, godot_popup);
 
+    let material_maker_popup = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        material_maker_popup,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_utility],
+    );
+    connection.set_property(
+        material_maker_popup,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x2_u32, 0, 0, 0, 0],
+    );
+    f.map_as_popup(&mut connection, material_maker_popup);
+
     let ardour_toplevel = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
         ardour_toplevel,
@@ -2079,6 +2095,75 @@ fn popup_heuristics() {
         &[connection.atoms.win_type_utility],
     );
     f.map_as_toplevel(&mut connection, ardour_toplevel);
+
+    let yabridge_popup = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        yabridge_popup,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_normal],
+    );
+    connection.set_property(
+        yabridge_popup,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x2_u32, 0, 0, 0, 0],
+    );
+    connection.set_property(
+        yabridge_popup,
+        connection.atoms.wm_hints,
+        connection.atoms.wm_hints,
+        &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
+    connection.set_property(
+        yabridge_popup,
+        x::ATOM_ATOM,
+        connection.atoms.net_wm_state,
+        &[connection.atoms.skip_taskbar],
+    );
+    f.map_as_popup(&mut connection, yabridge_popup);
+
+    let steam = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        steam,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_normal],
+    );
+    connection.set_property(
+        steam,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x2_u32, 0, 0, 0, 0],
+    );
+    connection.set_property(
+        steam,
+        connection.atoms.wm_hints,
+        connection.atoms.wm_hints,
+        &[0x1_u32, 1, 0, 0, 0, 0, 0, 0, 0],
+    );
+    f.map_as_toplevel(&mut connection, steam);
+
+    let battle_net = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        battle_net,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_normal],
+    );
+    connection.set_property(
+        battle_net,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x3_u32, 0x2c, 0x0, 0x0, 0x0],
+    );
+    connection.set_property(
+        battle_net,
+        connection.atoms.wm_hints,
+        connection.atoms.wm_hints,
+        &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
+    f.map_as_toplevel(&mut connection, battle_net);
 }
 
 #[test]
