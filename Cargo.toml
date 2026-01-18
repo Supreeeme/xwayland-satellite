@@ -12,7 +12,8 @@ rustix = "1.1.2"
 all = "deny"
 
 [workspace.package]
-rust-version = "1.83.0"
+rust-version = "1.85.0"
+edition = "2024"
 
 [package]
 name = "xwayland-satellite"
@@ -20,7 +21,7 @@ version = "0.8.0"
 authors = ["Shawn Wallace"]
 license = "MPL-2.0"
 description = "xwayland-satellite grants rootless Xwayland integration to any Wayland compositor implementing xdg_wm_base and viewporter. This is particularly useful for compositors that (understandably) do not want to go through implementing support for rootless Xwayland themselves."
-edition = "2021"
+edition.workspace = true
 rust-version.workspace = true
 
 [lints]
@@ -39,9 +40,7 @@ xcb = { version = "1.7.0", features = ["composite", "randr", "res"] }
 wl_drm = { path = "wl_drm" }
 log = "0.4.21"
 pretty_env_logger = "0.5.0"
-# xcb-util-cursor 0.4 uses Rust 2024, which would bump MSRV from 1.83 to 1.85, however it also has
-# no meaningful code changes, so we stick to the older version
-xcb-util-cursor = "0.3.5"
+xcb-util-cursor = "0.4"
 smithay-client-toolkit = { version = "0.20.0", default-features = false }
 
 fontconfig = { version = "0.10", optional = true }

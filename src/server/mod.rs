@@ -182,21 +182,21 @@ enum SurfaceRole {
 impl SurfaceRole {
     fn xdg(&self) -> Option<&XdgSurfaceData> {
         match self {
-            SurfaceRole::Toplevel(ref t) => t.as_ref().map(|t| &t.xdg),
-            SurfaceRole::Popup(ref p) => p.as_ref().map(|p| &p.xdg),
+            SurfaceRole::Toplevel(t) => t.as_ref().map(|t| &t.xdg),
+            SurfaceRole::Popup(p) => p.as_ref().map(|p| &p.xdg),
         }
     }
 
     fn xdg_mut(&mut self) -> Option<&mut XdgSurfaceData> {
         match self {
-            SurfaceRole::Toplevel(ref mut t) => t.as_mut().map(|t| &mut t.xdg),
-            SurfaceRole::Popup(ref mut p) => p.as_mut().map(|p| &mut p.xdg),
+            SurfaceRole::Toplevel(t) => t.as_mut().map(|t| &mut t.xdg),
+            SurfaceRole::Popup(p) => p.as_mut().map(|p| &mut p.xdg),
         }
     }
 
     fn destroy(&mut self) {
         match self {
-            SurfaceRole::Toplevel(Some(ref mut t)) => {
+            SurfaceRole::Toplevel(Some(t)) => {
                 if let Some(decoration) = t.decoration.wl.take() {
                     decoration.destroy();
                 }
@@ -1092,7 +1092,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return;
         };
 
-        let SurfaceRole::Toplevel(Some(ref toplevel)) = &*role else {
+        let SurfaceRole::Toplevel(Some(toplevel)) = &*role else {
             warn!("Tried to set an unmapped toplevel or non toplevel fullscreen: {window:?}");
             return;
         };

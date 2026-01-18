@@ -532,7 +532,7 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
         let Some(CurrentSelection::Wayland(WaylandSelection {
             mimes,
             inner,
-            ref mut incr_data,
+            incr_data,
         })) = &mut self.current_selection
         else {
             warn!("Got selection request, but we don't seem to be the selection owner");

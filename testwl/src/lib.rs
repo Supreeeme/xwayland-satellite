@@ -120,8 +120,8 @@ pub struct SurfaceData {
 impl SurfaceData {
     pub fn xdg(&self) -> &XdgSurfaceData {
         match self.role.as_ref().expect("Surface missing role") {
-            SurfaceRole::Toplevel(ref t) => &t.xdg,
-            SurfaceRole::Popup(ref p) => &p.xdg,
+            SurfaceRole::Toplevel(t) => &t.xdg,
+            SurfaceRole::Popup(p) => &p.xdg,
             SurfaceRole::Subsurface(_) => panic!("subsurface doesn't have an XdgSurface"),
             SurfaceRole::Cursor => panic!("cursor surface doesn't have an XdgSurface"),
         }
@@ -129,13 +129,13 @@ impl SurfaceData {
 
     pub fn toplevel(&self) -> &Toplevel {
         match self.role.as_ref().expect("Surface missing role") {
-            SurfaceRole::Toplevel(ref t) => t,
+            SurfaceRole::Toplevel(t) => t,
             other => panic!("Surface role was not toplevel: {other:?}"),
         }
     }
     pub fn popup(&self) -> &Popup {
         match self.role.as_ref().expect("Surface missing role") {
-            SurfaceRole::Popup(ref p) => p,
+            SurfaceRole::Popup(p) => p,
             other => panic!("Surface role was not popup: {other:?}"),
         }
     }
