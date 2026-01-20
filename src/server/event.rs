@@ -1514,7 +1514,6 @@ impl Event for zwp_tablet_pad_v2::Event {
                 tablet,
                 surface,
             } => {
-                let (e_tab, s_tablet) = from_client::<TabletServer, _, _>(&tablet, state);
                 let Some(surface) = surface
                     .data()
                     .copied()
@@ -1522,10 +1521,16 @@ impl Event for zwp_tablet_pad_v2::Event {
                 else {
                     return;
                 };
+                let Some(s_tablet) =
+                    tablet
+                        .data()
+                        .and_then(|key: &LateInitObjectKey<TabletClient>| {
+                            state.world.get::<&TabletServer>(key.get()).ok()
+                        })
+                else {
+                    return;
+                };
                 pad.enter(serial, &s_tablet, &surface);
-                drop(pad);
-                drop(surface);
-                state.world.spawn_at(e_tab, (tablet, s_tablet));
             }
             _ => simple_event_shunt! {
                 pad, self => [
