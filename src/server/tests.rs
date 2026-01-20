@@ -530,7 +530,19 @@ impl<C: XConnection> TestFixture<C> {
         );
         self.run();
         self.run();
-        (output, self.testwl.last_created_output())
+        (output, self.testwl.finalize_output())
+    }
+
+    fn remove_output(&mut self, output_s: wayland_server::protocol::wl_output::WlOutput) {
+        self.testwl.remove_output(output_s);
+        self.run();
+        self.run();
+        let mut events = std::mem::take(&mut *self.registry.data.events.lock().unwrap());
+        assert_eq!(events.len(), 1);
+        let event = events.pop().unwrap();
+        let Ev::<WlRegistry>::GlobalRemove { .. } = event else {
+            panic!("Unexpected event: {event:?}");
+        };
     }
 }
 
@@ -2723,6 +2735,52 @@ fn scaled_pointer_lock_position_hint() {
         lock_data.cursor_hint,
         Some(testwl::Vec2f { x: 50.0, y: 50.0 })
     );
+}
+
+#[test]
+fn disconnected_output_rescaling() {
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let comp = f.compositor();
+    let (_, output_main) = f.new_output(0, 0);
+    let (_, output_ext) = f.new_output(1000, 0);
+
+    let window = Window::new(1);
+    let (_, id) = f.create_toplevel(&comp, window);
+
+    let surface_data = f.testwl.get_surface_data(id).expect("No surface data");
+    let fractional = surface_data
+        .fractional
+        .as_ref()
+        .expect("No fractional scale for surface");
+    fractional.preferred_scale(240); // 2.0 scale
+    f.testwl.move_surface_to_output(id, &output_main);
+    f.run();
+
+    let surface_data = f.testwl.get_surface_data(id).expect("No surface data");
+    let fractional = surface_data
+        .fractional
+        .as_ref()
+        .expect("No fractional scale for surface");
+    fractional.preferred_scale(180); // 1.5 scale
+    f.testwl.move_surface_to_output(id, &output_ext);
+    f.run();
+    // Multiple monitors with different scaling will select the lowest scale across monitors
+    assert_eq!(f.satellite.inner.new_scale, Some(1.5));
+
+    f.remove_output(output_ext);
+    f.testwl.move_surface_to_output(id, &output_main);
+    let surface_data = f.testwl.get_surface_data(id).expect("No surface data");
+    let fractional = surface_data
+        .fractional
+        .as_ref()
+        .expect("No fractional scale for surface");
+    fractional.preferred_scale(240); // 2.0 scale
+    f.run();
+    f.run();
+    // Afteer the output is disconnected, only the 2x scale output remains, so use that scale
+    assert_eq!(f.satellite.inner.new_scale, Some(2.0));
 }
 
 #[test]
