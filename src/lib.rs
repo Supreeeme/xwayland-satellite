@@ -36,8 +36,8 @@ type RealServerState = ServerState<RealConnection>;
 pub trait RunData {
     fn display(&self) -> Option<&str>;
     fn listenfds(&mut self) -> Vec<OwnedFd>;
-    fn flags(&self) -> Vec<String> {
-        vec![]
+    fn flags(&self) -> &[String] {
+        &[]
     }
     fn server(&self) -> Option<UnixStream> {
         None
