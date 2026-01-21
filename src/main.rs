@@ -8,9 +8,27 @@ fn main() {
     xwayland_satellite::main(parse_args());
 }
 
+#[derive(Default)]
 struct RealData {
     display: Option<String>,
     listenfds: Vec<OwnedFd>,
+    flags: Vec<String>,
+}
+impl xwayland_satellite::RunData for RealData {
+    fn display(&self) -> Option<&str> {
+        self.display.as_deref()
+    }
+
+    fn listenfds(&mut self) -> Vec<OwnedFd> {
+        std::mem::take(&mut self.listenfds)
+    }
+
+    fn flags(&self) -> &[String] {
+        &self.flags
+    }
+}
+
+struct ParsedFlags {
     disable_ac: bool,
     audit_level: u32,
     auth_file: Option<String>,
@@ -21,11 +39,9 @@ struct RealData {
     listen_minus: Vec<String>,
     verbosity: u32,
 }
-impl Default for RealData {
+impl Default for ParsedFlags {
     fn default() -> Self {
         Self {
-            display: None,
-            listenfds: vec![],
             disable_ac: false,
             audit_level: 1,
             auth_file: None,
@@ -38,16 +54,8 @@ impl Default for RealData {
         }
     }
 }
-impl xwayland_satellite::RunData for RealData {
-    fn display(&self) -> Option<&str> {
-        self.display.as_deref()
-    }
-
-    fn listenfds(&mut self) -> Vec<OwnedFd> {
-        std::mem::take(&mut self.listenfds)
-    }
-
-    fn flags(&self) -> Vec<String> {
+impl ParsedFlags {
+    fn to_vec(&self) -> Vec<String> {
         let mut ret: Vec<&str> = vec![];
         if self.disable_ac {
             ret.push("-ac");
@@ -80,6 +88,7 @@ impl xwayland_satellite::RunData for RealData {
 
 fn parse_args() -> RealData {
     let mut data = RealData::default();
+    let mut flags = ParsedFlags::default();
     let mut args = std::env::args().skip(1).peekable();
 
     // The first argument (other than the skipped-over binary name) is optionally the display name.
@@ -95,10 +104,10 @@ fn parse_args() -> RealData {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-ac" => {
-                data.disable_ac = true;
+                flags.disable_ac = true;
             }
             "-audit" => {
-                data.audit_level = args
+                flags.audit_level = args
                     .next()
                     .and_then(|n| n.parse().ok())
                     .expect("argument to -audit not provided or integer");
@@ -106,7 +115,7 @@ fn parse_args() -> RealData {
             "-auth" => {
                 // X.org lets you pass multiple `-auth` parameters but only uses the last one.
                 // This is unintuitive enough that passing multiple `-auth` should be an error.
-                if data.auth_file.is_some() {
+                if flags.auth_file.is_some() {
                     panic!("Multiple `-auth` flags passed");
                 }
                 let Some(ref file) = args.next() else {
@@ -116,26 +125,26 @@ fn parse_args() -> RealData {
                     .read(true)
                     .open(file)
                     .expect("Could not open authorization file");
-                data.auth_file = Some(file.to_owned());
+                flags.auth_file = Some(file.to_owned());
             }
             "-core" => {
-                data.coredump = true;
+                flags.coredump = true;
             }
             "+extension" => {
                 let ext = args.next().expect("argument to +extension not provided");
-                if let Some(idx) = data.extension_minus.iter().position(|e| *e == ext) {
-                    data.extension_minus.swap_remove(idx);
+                if let Some(idx) = flags.extension_minus.iter().position(|e| *e == ext) {
+                    flags.extension_minus.swap_remove(idx);
                 }
-                data.extension_plus.push(ext.to_owned());
+                flags.extension_plus.push(ext.to_owned());
             }
             "-extension" => {
                 let ext = args.next().expect("argument to -extension not provided");
                 // Do not disable essential extensions (see XState::new for this list)
                 if !["COMPOSITE", "RANDR", "XFIXES", "X-Resource"].contains(&&ext[..]) {
-                    if let Some(idx) = data.extension_plus.iter().position(|e| *e == ext) {
-                        data.extension_plus.swap_remove(idx);
+                    if let Some(idx) = flags.extension_plus.iter().position(|e| *e == ext) {
+                        flags.extension_plus.swap_remove(idx);
                     }
-                    data.extension_minus.push(ext.to_owned());
+                    flags.extension_minus.push(ext.to_owned());
                 }
             }
             "-help" => {
@@ -166,17 +175,17 @@ fn parse_args() -> RealData {
             }
             "-listen" => {
                 let protocol = args.next().expect("argument to -extension not provided");
-                if let Some(idx) = data.listen_minus.iter().position(|p| *p == protocol) {
-                    data.listen_minus.swap_remove(idx);
+                if let Some(idx) = flags.listen_minus.iter().position(|p| *p == protocol) {
+                    flags.listen_minus.swap_remove(idx);
                 }
-                data.listen_plus.push(protocol.to_owned());
+                flags.listen_plus.push(protocol.to_owned());
             }
             "-nolisten" => {
                 let protocol = args.next().expect("argument to -extension not provided");
-                if let Some(idx) = data.listen_plus.iter().position(|p| *p == protocol) {
-                    data.listen_plus.swap_remove(idx);
+                if let Some(idx) = flags.listen_plus.iter().position(|p| *p == protocol) {
+                    flags.listen_plus.swap_remove(idx);
                 }
-                data.listen_minus.push(protocol.to_owned());
+                flags.listen_minus.push(protocol.to_owned());
             }
             "-listenfd" => {
                 let fd: RawFd = args
@@ -198,10 +207,10 @@ fn parse_args() -> RealData {
             "--test-listenfd-support" => std::process::exit(0),
             "-verbose" => {
                 if let Some(v) = args.peek().and_then(|n| n.parse::<u32>().ok()) {
-                    data.verbosity = v;
+                    flags.verbosity = v;
                     args.next();
                 } else {
-                    data.verbosity += 1;
+                    flags.verbosity += 1;
                 }
             }
             "-version" => {
@@ -213,6 +222,7 @@ fn parse_args() -> RealData {
             }
         }
     }
+    data.flags = flags.to_vec();
 
     data
 }
