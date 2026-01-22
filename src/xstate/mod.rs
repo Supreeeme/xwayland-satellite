@@ -719,16 +719,13 @@ impl XState {
             // accept input focus
             // Sometimes popup is false-positive meaning both MOTIF Decorations and WM_HINTS input indicates its a popup
             // but MOTIF has function flags that toplevel window should do
-            // Also combine wmhint_popup with skip_taskbar which
-            // fixes some edge cases where certain apps (BattleNet client, PixelComposer spawn as popup)
             wmhint_popup = motif_popup
                 && wm_hints.is_some_and(|h| !h.acquire_input_via_wm)
                 && !hints.functions.as_ref().is_some_and(|f| {
                     f.contains(motif::Functions::Minimize)
                         || f.contains(motif::Functions::Maximize)
                         || f.contains(motif::Functions::All)
-                })
-                && has_skip_taskbar;
+                });
             // If the motif hints indicate the user shouldn't be able to do anything
             // to the window at all, it stands to reason it's probably a popup.
             if hints.functions.is_some_and(|f| f.is_empty()) {
