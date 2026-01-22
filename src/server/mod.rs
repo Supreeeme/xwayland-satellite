@@ -8,12 +8,12 @@ mod tests;
 
 use self::event::*;
 use crate::xstate::{Decorations, MoveResizeDirection, WindowDims, WmHints, WmName, WmNormalHints};
-use crate::{timespec_from_millis, X11Selection, XConnection};
+use crate::{X11Selection, XConnection, timespec_from_millis};
 use clientside::MyWorld;
 use decoration::{DecorationsData, DecorationsDataSatellite};
 use hecs::Entity;
 use log::{debug, error, warn};
-use rustix::event::{poll, PollFd, PollFlags};
+use rustix::event::{PollFd, PollFlags, poll};
 use rustix::fs::Timespec;
 use smithay_client_toolkit::activation::ActivationState;
 use std::collections::{HashMap, HashSet};
@@ -23,8 +23,9 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
 use wayland_client::{
-    globals::{registry_queue_init, Global},
-    protocol as client, Connection, EventQueue, Proxy, QueueHandle,
+    Connection, EventQueue, Proxy, QueueHandle,
+    globals::{Global, registry_queue_init},
+    protocol as client,
 };
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1;
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::{self};
@@ -33,6 +34,7 @@ use wayland_protocols::{
     wp::{
         fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
+        linux_drm_syncobj::v1::server::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1,
         pointer_constraints::zv1::{
             client::{zwp_confined_pointer_v1, zwp_locked_pointer_v1},
             server::zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
@@ -62,11 +64,11 @@ use wayland_protocols::{
 };
 use wayland_server::protocol::wl_seat::WlSeat;
 use wayland_server::{
+    Client, DisplayHandle, Resource, WEnum,
     protocol::{
         wl_callback::WlCallback, wl_compositor::WlCompositor, wl_output::WlOutput, wl_shm::WlShm,
         wl_surface::WlSurface,
     },
-    Client, DisplayHandle, Resource, WEnum,
 };
 use wl_drm::{client::wl_drm::WlDrm as WlDrmClient, server::wl_drm::WlDrm as WlDrmServer};
 use xcb::x;
@@ -182,21 +184,21 @@ enum SurfaceRole {
 impl SurfaceRole {
     fn xdg(&self) -> Option<&XdgSurfaceData> {
         match self {
-            SurfaceRole::Toplevel(ref t) => t.as_ref().map(|t| &t.xdg),
-            SurfaceRole::Popup(ref p) => p.as_ref().map(|p| &p.xdg),
+            SurfaceRole::Toplevel(t) => t.as_ref().map(|t| &t.xdg),
+            SurfaceRole::Popup(p) => p.as_ref().map(|p| &p.xdg),
         }
     }
 
     fn xdg_mut(&mut self) -> Option<&mut XdgSurfaceData> {
         match self {
-            SurfaceRole::Toplevel(ref mut t) => t.as_mut().map(|t| &mut t.xdg),
-            SurfaceRole::Popup(ref mut p) => p.as_mut().map(|p| &mut p.xdg),
+            SurfaceRole::Toplevel(t) => t.as_mut().map(|t| &mut t.xdg),
+            SurfaceRole::Popup(p) => p.as_mut().map(|p| &mut p.xdg),
         }
     }
 
     fn destroy(&mut self) {
         match self {
-            SurfaceRole::Toplevel(Some(ref mut t)) => {
+            SurfaceRole::Toplevel(Some(t)) => {
                 if let Some(decoration) = t.decoration.wl.take() {
                     decoration.destroy();
                 }
@@ -369,7 +371,8 @@ fn handle_globals<'a, S: X11Selection + 'static>(
             s_dmabuf::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
             ZxdgOutputManagerV1,
             ZwpPointerConstraintsV1,
-            ZwpTabletManagerV2
+            ZwpTabletManagerV2,
+            WpLinuxDrmSyncobjManagerV1
         ];
     }
 }
@@ -485,7 +488,9 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             .expect("Could not bind xdg_wm_base");
 
         if xdg_wm_base.version() < 3 {
-            warn!("xdg_wm_base version 2 detected. Popup repositioning will not work, and some popups may not work correctly.");
+            warn!(
+                "xdg_wm_base version 2 detected. Popup repositioning will not work, and some popups may not work correctly."
+            );
         }
 
         let compositor = global_list
@@ -504,8 +509,13 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             .bind::<WpViewporter, _, _>(&qh, 1..=1, ())
             .expect("Could not bind wp_viewporter");
 
-        let fractional_scale = global_list.bind::<WpFractionalScaleManagerV1, _, _>(&qh, 1..=1, ())
-            .inspect_err(|e| warn!("Couldn't bind fractional scale manager: {e}. Fractional scaling will not work."))
+        let fractional_scale = global_list
+            .bind::<WpFractionalScaleManagerV1, _, _>(&qh, 1..=1, ())
+            .inspect_err(|e| {
+                warn!(
+                    "Couldn't bind fractional scale manager: {e}. Fractional scaling will not work."
+                )
+            })
             .ok();
 
         let activation_state = ActivationState::bind(&global_list, &qh)
@@ -692,7 +702,9 @@ impl<C: XConnection> ServerState<C> {
             }
 
             if mixed_scale {
-                warn!("Mixed output scales detected, choosing to give apps the smallest detected scale ({scale}x)");
+                warn!(
+                    "Mixed output scales detected, choosing to give apps the smallest detected scale ({scale}x)"
+                );
             }
 
             debug!("Using new scale {scale}");
@@ -730,7 +742,9 @@ impl<C: XConnection> ServerState<C> {
                         }),
                     ) {
                         Ok(0) => {
-                            error!("Failed to flush clientside events (timeout)! Will try again later.");
+                            error!(
+                                "Failed to flush clientside events (timeout)! Will try again later."
+                            );
                         }
                         Ok(_) => {
                             self.queue.flush().unwrap();
@@ -825,7 +839,9 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         let new_title = match &mut win.attrs.title {
             Some(w) => {
                 if matches!(w, WmName::NetWmName(_)) && matches!(name, WmName::WmName(_)) {
-                    debug!("skipping setting window name to {name:?} because a _NET_WM_NAME title is already set");
+                    debug!(
+                        "skipping setting window name to {name:?} because a _NET_WM_NAME title is already set"
+                    );
                     None
                 } else {
                     debug!("setting {window:?} title to {name:?}");
@@ -1092,7 +1108,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return;
         };
 
-        let SurfaceRole::Toplevel(Some(ref toplevel)) = &*role else {
+        let SurfaceRole::Toplevel(Some(toplevel)) = &*role else {
             warn!("Tried to set an unmapped toplevel or non toplevel fullscreen: {window:?}");
             return;
         };

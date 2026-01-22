@@ -8,13 +8,13 @@ use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::{Proxy, QueueHandle};
 
 use smithay_client_toolkit::data_device_manager::{
-    data_device::DataDevice, data_offer::SelectionOffer as WlSelectionOffer,
-    data_source::CopyPasteSource, DataDeviceManagerState,
+    DataDeviceManagerState, data_device::DataDevice,
+    data_offer::SelectionOffer as WlSelectionOffer, data_source::CopyPasteSource,
 };
+use smithay_client_toolkit::primary_selection::PrimarySelectionManagerState;
 use smithay_client_toolkit::primary_selection::device::PrimarySelectionDevice;
 use smithay_client_toolkit::primary_selection::offer::PrimarySelectionOffer;
 use smithay_client_toolkit::primary_selection::selection::PrimarySelectionSource;
-use smithay_client_toolkit::primary_selection::PrimarySelectionManagerState;
 use std::io::Read;
 use std::rc::{Rc, Weak};
 

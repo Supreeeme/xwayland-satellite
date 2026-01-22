@@ -8,6 +8,7 @@ use wayland_protocols::{
     wp::{
         fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1,
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
+        linux_drm_syncobj::v1::{client as c_sync, server as s_sync},
         pointer_constraints::zv1::{
             client::zwp_confined_pointer_v1::ZwpConfinedPointerV1 as ConfinedPointerClient,
             client::zwp_locked_pointer_v1::ZwpLockedPointerV1 as LockedPointerClient,
@@ -47,6 +48,7 @@ use wayland_protocols::{
     },
 };
 use wayland_server::{
+    Dispatch, DisplayHandle, GlobalDispatch, Resource,
     protocol::{
         wl_buffer::WlBuffer,
         wl_callback::WlCallback,
@@ -61,7 +63,6 @@ use wayland_server::{
         wl_surface::WlSurface,
         wl_touch::WlTouch,
     },
-    Dispatch, DisplayHandle, GlobalDispatch, Resource,
 };
 
 // noop
@@ -1232,6 +1233,107 @@ impl<S: X11Selection> Dispatch<s_tablet::zwp_tablet_pad_strip_v2::ZwpTabletPadSt
     }
 }
 
+impl<S: X11Selection>
+    Dispatch<
+        s_sync::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1,
+        ClientGlobalWrapper<c_sync::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1>,
+    > for InnerServerState<S>
+{
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &s_sync::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1,
+        request: <s_sync::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1 as Resource>::Request,
+        client: &ClientGlobalWrapper<
+            c_sync::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1,
+        >,
+        _: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        use s_sync::wp_linux_drm_syncobj_manager_v1::Request;
+        match request {
+            Request::GetSurface { id, surface } => {
+                let c_surface = state
+                    .world
+                    .get::<&client::wl_surface::WlSurface>(surface.data().copied().unwrap())
+                    .unwrap();
+                let client = client.get_surface(&c_surface, &state.qh, ());
+                data_init.init(id, client);
+            }
+            Request::ImportTimeline { id, fd } => {
+                let timeline = client.import_timeline(fd.as_fd(), &state.qh, ());
+                data_init.init(id, timeline);
+            }
+            Request::Destroy => {
+                client.destroy();
+            }
+            other => warn!("unhandled drm syncobj request: {other:?}"),
+        }
+    }
+}
+
+impl<S: X11Selection>
+    Dispatch<
+        s_sync::wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1,
+        c_sync::wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1,
+    > for InnerServerState<S>
+{
+    fn request(
+        _: &mut Self,
+        _: &Client,
+        _: &s_sync::wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1,
+        request: <s_sync::wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1 as Resource>::Request,
+        client: &c_sync::wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        use s_sync::wp_linux_drm_syncobj_surface_v1::Request;
+        match request {
+            Request::SetAcquirePoint {
+                timeline,
+                point_hi,
+                point_lo,
+            } => {
+                let c_timeline: &c_sync::wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1 = timeline.data().unwrap();
+                client.set_acquire_point(c_timeline, point_hi, point_lo);
+            }
+            Request::SetReleasePoint {
+                timeline,
+                point_hi,
+                point_lo,
+            } => {
+                let c_timeline: &c_sync::wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1 = timeline.data().unwrap();
+                client.set_release_point(c_timeline, point_hi, point_lo);
+            }
+            Request::Destroy => client.destroy(),
+            other => warn!("unhandled drm syncobj surface request: {other:?}"),
+        }
+    }
+}
+
+impl<S: X11Selection>
+    Dispatch<
+        s_sync::wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1,
+        c_sync::wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1,
+    > for InnerServerState<S>
+{
+    fn request(
+        _: &mut Self,
+        _: &Client,
+        _: &s_sync::wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1,
+        request: <s_sync::wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1 as Resource>::Request,
+        client: &c_sync::wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        use s_sync::wp_linux_drm_syncobj_timeline_v1::Request;
+        match request {
+            Request::Destroy => client.destroy(),
+            other => warn!("unhandled drm syncobj timeline request: {other:?}"),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ClientGlobalWrapper<T: Proxy>(Arc<OnceLock<T>>);
 impl<T: Proxy> std::ops::Deref for ClientGlobalWrapper<T> {
@@ -1321,6 +1423,10 @@ global_dispatch_no_events!(PointerConstraintsServer, PointerConstraintsClient);
 global_dispatch_no_events!(
     s_tablet::zwp_tablet_manager_v2::ZwpTabletManagerV2,
     c_tablet::zwp_tablet_manager_v2::ZwpTabletManagerV2
+);
+global_dispatch_no_events!(
+    s_sync::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1,
+    c_sync::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1
 );
 
 impl<S: X11Selection> GlobalDispatch<WlSeat, Global> for InnerServerState<S> {
@@ -1458,7 +1564,9 @@ impl<S: X11Selection> Dispatch<XwaylandSurfaceV1, Entity> for InnerServerState<S
                 if let Some(win_entity) = win_entity {
                     let bundle = state.world.take(win_entity).unwrap();
                     if !bundle.has::<x::Window>() {
-                        warn!("Window with same serial ({serial:?}) as {surface_id} has been destroyed?");
+                        warn!(
+                            "Window with same serial ({serial:?}) as {surface_id} has been destroyed?"
+                        );
                         return;
                     }
                     let mut builder = hecs::EntityBuilder::new();

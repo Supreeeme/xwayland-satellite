@@ -1208,9 +1208,9 @@ dependencies = [
 
 [[package]]
 name = "xcb-util-cursor"
-version = "0.3.5"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf6417c51a1f5eda49156061175021bd3ccf0a759bc7c402bbea6a6a1ae14239"
+checksum = "c256d10270e6789ebbed752ec17fcf98a04363dc97aa9b7b92ab1af3a7bc5744"
 dependencies = [
  "xcb",
  "xcb-util-cursor-sys",
@@ -1218,9 +1218,9 @@ dependencies = [
 
 [[package]]
 name = "xcb-util-cursor-sys"
-version = "0.1.6"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c78acb131647687ee62f9e64c988457f23ecb8f3a078a37a312f989b320cb47"
+checksum = "8346f6cad5cb6b38645c53431ffe35bd0634e8154f529fa9d3f5f762c03c98b6"
 dependencies = [
  "bindgen",
  "pkg-config",

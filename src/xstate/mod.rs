@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::fd::BorrowedFd;
 use std::rc::Rc;
-use xcb::{x, Xid, XidNew};
+use xcb::{Xid, XidNew, x};
 use xcb_util_cursor::{Cursor, CursorContext};
 
 // Sometimes we'll get events on windows that have already been destroyed
@@ -369,9 +369,9 @@ impl XState {
                         let attrs = self
                             .connection
                             .send_request(&x::GetWindowAttributes { window: e.window() });
-                        let geometry = unwrap_or_skip_bad_window_cont!(self
-                            .connection
-                            .wait_for_reply(geometry));
+                        let geometry = unwrap_or_skip_bad_window_cont!(
+                            self.connection.wait_for_reply(geometry)
+                        );
                         let attrs =
                             unwrap_or_skip_bad_window_cont!(self.connection.wait_for_reply(attrs));
 
@@ -400,9 +400,10 @@ impl XState {
                             value_list: &[x::ConfigWindow::StackMode(x::StackMode::Below)]
                         }
                     ));
-                    unwrap_or_skip_bad_window_cont!(self
-                        .connection
-                        .send_and_check_request(&x::MapWindow { window: e.window() }));
+                    unwrap_or_skip_bad_window_cont!(
+                        self.connection
+                            .send_and_check_request(&x::MapWindow { window: e.window() })
+                    );
                 }
                 xcb::Event::X(x::Event::MapNotify(e)) => {
                     unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
@@ -1469,9 +1470,10 @@ impl XConnection for RealConnection {
     }
 
     fn unmap_window(&mut self, window: x::Window) {
-        unwrap_or_skip_bad_window_ret!(self
-            .connection
-            .send_and_check_request(&x::UnmapWindow { window }));
+        unwrap_or_skip_bad_window_ret!(
+            self.connection
+                .send_and_check_request(&x::UnmapWindow { window })
+        );
     }
 
     fn raise_to_top(&mut self, window: x::Window) {

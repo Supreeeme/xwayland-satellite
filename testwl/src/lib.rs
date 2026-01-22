@@ -6,6 +6,7 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
+use wayland_protocols::wp::linux_drm_syncobj::v1::server::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1;
 use wayland_protocols::wp::primary_selection::zv1::server::zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1;
 use wayland_protocols::wp::primary_selection::zv1::server::zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1;
 use wayland_protocols::wp::primary_selection::zv1::server::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1;
@@ -120,8 +121,8 @@ pub struct SurfaceData {
 impl SurfaceData {
     pub fn xdg(&self) -> &XdgSurfaceData {
         match self.role.as_ref().expect("Surface missing role") {
-            SurfaceRole::Toplevel(ref t) => &t.xdg,
-            SurfaceRole::Popup(ref p) => &p.xdg,
+            SurfaceRole::Toplevel(t) => &t.xdg,
+            SurfaceRole::Popup(p) => &p.xdg,
             SurfaceRole::Subsurface(_) => panic!("subsurface doesn't have an XdgSurface"),
             SurfaceRole::Cursor => panic!("cursor surface doesn't have an XdgSurface"),
         }
@@ -129,13 +130,13 @@ impl SurfaceData {
 
     pub fn toplevel(&self) -> &Toplevel {
         match self.role.as_ref().expect("Surface missing role") {
-            SurfaceRole::Toplevel(ref t) => t,
+            SurfaceRole::Toplevel(t) => t,
             other => panic!("Surface role was not toplevel: {other:?}"),
         }
     }
     pub fn popup(&self) -> &Popup {
         match self.role.as_ref().expect("Surface missing role") {
-            SurfaceRole::Popup(ref p) => p,
+            SurfaceRole::Popup(p) => p,
             other => panic!("Surface role was not popup: {other:?}"),
         }
     }
@@ -476,6 +477,7 @@ impl Server {
         dh.create_global::<State, ZwpPointerConstraintsV1, _>(1, ());
         global_noop!(ZwpLinuxDmabufV1);
         global_noop!(ZwpRelativePointerManagerV1);
+        global_noop!(WpLinuxDrmSyncobjManagerV1);
 
         struct HandlerData;
         impl ObjectData<State> for HandlerData {
