@@ -770,6 +770,7 @@ impl XState {
                     self.window_atoms.dropdown_menu,
                     self.window_atoms.tooltip,
                     self.window_atoms.drag_n_drop,
+                    self.window_atoms.combo,
                 ]
                 .contains(&x) =>
                 {
@@ -1068,6 +1069,7 @@ xcb::atoms_struct! {
         dropdown_menu => b"_NET_WM_WINDOW_TYPE_DROPDOWN_MENU" only_if_exists = false,
         utility => b"_NET_WM_WINDOW_TYPE_UTILITY" only_if_exists = false,
         tooltip => b"_NET_WM_WINDOW_TYPE_TOOLTIP" only_if_exists = false,
+        combo => b"_NET_WM_WINDOW_TYPE_COMBO" only_if_exists = false,
     }
 }
 
