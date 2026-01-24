@@ -1,0 +1,108 @@
+.TH XWAYLAND\-SATELLITE 1
+.SH NAME
+xwayland\-satellite \- Rootless Xwayland integration for Wayland compositors
+.SH SYNOPSIS
+.B xwayland\-satellite
+[\fB:\fR\fIdisplay\fR]
+[\fIoption\fR ...]
+.SH DESCRIPTION
+.B xwayland\-satellite
+is a Wayland client providing a rootless
+.BR Xwayland (1)
+integration to any Wayland compositor implementing xdg_wm_base and wm_viewporter.
+.B xwayland\-satellite
+acts as an
+.BR X (7)
+window manager, useful for Wayland compositors which do not want to implement an
+.BR Xwayland (1)
+integration themselves.
+.SH OPTIONS
+Most of the options of
+.B xwayland\-satellite
+are forwarded to Xwayland. See
+.BR Xserver (1)
+and
+.BR Xwayland (1)
+for more details on these flags.
+.TP
+\fB:\fR\fIdisplay\fR
+Run the X server on the given \fIdisplay\fR.
+.TP
+\fB\-ac\fR
+Disable host-based access control mechanisms. Do not use unless you know exactly what you are doing.
+.TP
+\fB\-audit\fR \fIlevel\fR
+Set the audit trail verbosity level. These logging lines are captured by the logs in the `xwayland_process` category.
+.TP
+\fB\-auth\fR \fIauthorization-file\fR
+Specify a file with authorization records. This flag can be passed a maximum of one time. See the
+.BR xdm (1)
+and
+.BR Xsecurity (7)
+man pages.
+.TP
+\fB\-core\fR
+Cause Xwayland to generate a core dump on fatal errors. Note this does not generate a core dump on fatal
+.BR xwayland-satellite
+errors.
+.TP
+\fB+extension\fR \fIextension-name\fR
+Enable the given extension. Attempting to enable an unrecognized is not a fatal error.
+.TP
+\fB\-extension\fR \fIextension-name\fR
+Disable the given extension. Attempting to disable an unrecognized extension is not a fatal error.
+.RS
+In addition, the following extensions are required and cannot be disabled:
+.RS 4
+.nf
+COMPOSITE
+RANDR
+XFIXES
+X-Resource
+.fi
+.RE -4
+.TP
+\fB\-glamor\fR [\fIgl|es|none\fR]
+Force the use of the given rendering API for Glamor acceleration. Valid parameters are \fIgl\fR to use OpenGL, \fIes\fR to use GL ES, and \fInone\fR to use the shared memory backend. For maximum compatibility with
+.BR Xwayland (1)
+builds without the Glamor backend, the \fInone\fR option is converted to the \fI\-shm\fR flag under the hood.
+\fB\-help\fR
+Prints a basic usage message and list of accepted flags and returns 0.
+.TP
+\fB\-listen\fR
+Enable a transport mechanism. This option can be used multiple times to enable multiple transport mechanisms. This option overrides a previous \fB\-nolisten\fR sent with the same parameter.
+.TP
+\fB\-nolisten\fR
+Disable a transport mechanism. This option can be used multiple times to disable multiple transport mechanisms. This option overrides a previous \fB\-listen\fR sent with the same parameter.
+.TP
+\fB\-listenfd\fR \fIfd\fR
+Add the given \fIfd\fR as a socket for X clients to connect to. This option is used by integrating Wayland compositors to automatically start \fBxwayland\-satellite\fR when an X application is started.
+.TP
+\fB\-\-test\-listenfd\-support\fR
+Exit with status code 0 if the build of \fBxwayland\-satellite\fR supports the \fB\-listenfd\fR flag. For maximum compatibility with older versions of \fBxwayland\-satellite\fR, it is necessary to always pass the \fB:\fR\fIdisplay\fR option when using this flag and the \fB\-listenfd\fR flag.
+.TP
+\fB\-verbose\fR [\fIn\fR]
+Increases the verbosity of \fBXwayland\fR's logging. If a numeric variable is passed, set the verbosity to that level, otherwise increasing the verbosity level by 1. See the \fBRUST_LOG\fR environment variable for changing \fBxwayland\-satellite\fR's logging.
+.TP
+\fB\-version\fR
+Display the version identifier of \fBxwayland\-satellite\fR and return 0.
+.SH ENVIRONMENT
+.TP
+\fBRUST_LOG\fR
+Configures the output of the logs. See
+.BR https://docs.rs/env\-logger/#filtering\-results/
+for more information on how to set this variable.
+.TP
+\fBWAYLAND_DISPLAY\fR
+Name of the Wayland server's display.
+.TP
+\fBXDG_RUNTIME_DIR\fR
+The directory used by \fBxwayland\-satellite\fR to both look for the Wayland socket to connect to and to create the Wayland socket \fBXwayland\fR will connect to.
+.SH BUGS
+If you have found a bug in \fBxwayland\-satellite\fR, please report it to
+.BR https://github.com/Supreeeme/xwayland\-satellite/issues/ "."
+.
+.SH SEE ALSO
+.BR X (7),
+.BR Xserver (1),
+.BR Xwayland (1),
