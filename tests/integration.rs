@@ -345,6 +345,7 @@ xcb::atoms_struct! {
         win_type_tooltip => b"_NET_WM_WINDOW_TYPE_TOOLTIP",
         win_type_utility => b"_NET_WM_WINDOW_TYPE_UTILITY",
         win_type_dnd => b"_NET_WM_WINDOW_TYPE_DND",
+        win_type_combo => b"_NET_WM_WINDOW_TYPE_COMBO",
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
         wm_hints => b"WM_HINTS",
         mime1 => b"text/plain" only_if_exists = false,
@@ -2056,6 +2057,15 @@ fn popup_heuristics() {
         &[0x2_u32, 0, 0, 0, 0],
     );
     f.map_as_popup(&mut connection, wechat_popup);
+
+    let fcitx5_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
+    connection.set_property(
+        fcitx5_popup,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_combo],
+    );
+    f.map_as_popup(&mut connection, fcitx5_popup);
 
     let godot_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
     connection.set_property(
