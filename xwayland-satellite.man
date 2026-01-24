@@ -62,6 +62,10 @@ X-Resource
 .fi
 .RE -4
 .TP
+\fB\-glamor\fR [\fIgl|es|none\fR]
+Force the use of the given rendering API for Glamor acceleration. Valid parameters are \fIgl\fR to use OpenGL, \fIes\fR to use GL ES, and \fInone\fR to use the shared memory backend. For maximum compatibility with
+.BR Xwayland (1)
+builds without the Glamor backend, the \fInone\fR option is converted to the \fI\-shm\fR flag under the hood.
 \fB\-help\fR
 Prints a basic usage message and list of accepted flags and returns 0.
 .TP
@@ -69,13 +73,13 @@ Prints a basic usage message and list of accepted flags and returns 0.
 Enable a transport mechanism. This option can be used multiple times to enable multiple transport mechanisms. This option overrides a previous \fB\-nolisten\fR sent with the same parameter.
 .TP
 \fB\-nolisten\fR
-Disable a transport mechanism. This option can be used multiple times to enable multiple transport mechanisms. This option overrides a previous \fB\-listen\fR sent with the same parameter.
+Disable a transport mechanism. This option can be used multiple times to disable multiple transport mechanisms. This option overrides a previous \fB\-listen\fR sent with the same parameter.
 .TP
 \fB\-listenfd\fR \fIfd\fR
 Add the given \fIfd\fR as a socket for X clients to connect to. This option is used by integrating Wayland compositors to automatically start \fBxwayland\-satellite\fR when an X application is started.
 .TP
 \fB\-\-test\-listenfd\-support\fR
-Exit with status code 0 if the build of \fBxwayland\-satellite\fR supports the \fB\-listenfd\fR flag. For maximum compatiability with older versions of \fBxwayland\-satellite\fR, it is necessary to always pass the \fB:\fR\fIdisplay\fR option when using this flag and the \fB\-listenfd\fR flag.
+Exit with status code 0 if the build of \fBxwayland\-satellite\fR supports the \fB\-listenfd\fR flag. For maximum compatibility with older versions of \fBxwayland\-satellite\fR, it is necessary to always pass the \fB:\fR\fIdisplay\fR option when using this flag and the \fB\-listenfd\fR flag.
 .TP
 \fB\-verbose\fR [\fIn\fR]
 Increases the verbosity of \fBXwayland\fR's logging. If a numeric variable is passed, set the verbosity to that level, otherwise increasing the verbosity level by 1. See the \fBRUST_LOG\fR environment variable for changing \fBxwayland\-satellite\fR's logging.

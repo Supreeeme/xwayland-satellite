@@ -35,6 +35,7 @@ struct ParsedFlags {
     coredump: bool,
     extension_plus: Vec<String>,
     extension_minus: Vec<String>,
+    glamor: Option<&'static str>,
     listen_plus: Vec<String>,
     listen_minus: Vec<String>,
     verbosity: u32,
@@ -48,6 +49,7 @@ impl Default for ParsedFlags {
             coredump: false,
             extension_plus: vec![],
             extension_minus: vec![],
+            glamor: None,
             listen_plus: vec![],
             listen_minus: vec![],
             verbosity: 0,
@@ -73,6 +75,9 @@ impl ParsedFlags {
         }
         for ext in self.extension_minus.iter() {
             ret.extend(["-extension", ext]);
+        }
+        if let Some(glamor) = self.glamor {
+            ret.extend(glamor.split_ascii_whitespace());
         }
         for protocol in self.listen_plus.iter() {
             ret.extend(["-listen", protocol]);
@@ -147,6 +152,17 @@ fn parse_args() -> RealData {
                     flags.extension_minus.push(ext.to_owned());
                 }
             }
+            "-glamor" => {
+                let api = args.next().expect("argument to -glamor not provided");
+                match &api[..] {
+                    "gl" => flags.glamor = Some("-glamor gl"),
+                    "es" => flags.glamor = Some("-glamor es"),
+                    // For maximum compatability with Xwayland compiled without Glamor support, this
+                    // is equivalent to -glamor none and is always available
+                    "none" => flags.glamor = Some("-shm"),
+                    e => panic!("unknown rendering API passed: {e}"),
+                };
+            }
             "-help" => {
                 // Wording for most help messages taken directly from Xwayland
                 println!("use: xwayland-satellite [:<display>] [option]");
@@ -158,6 +174,10 @@ fn parse_args() -> RealData {
                 );
                 println!("{:<25} Enable extension", "+extension name");
                 println!("{:<25} Disable extension", "-extension name");
+                println!(
+                    "{:<25} use given API for Glamor acceleration",
+                    "-glamor [gl|es|none]"
+                );
                 println!("{:<25} prints message with these options", "-help");
                 println!("{:<25} listen on protocol", "-listen");
                 println!("{:<25} don't listen on protocol", "-nolisten");
@@ -174,14 +194,14 @@ fn parse_args() -> RealData {
                 std::process::exit(0);
             }
             "-listen" => {
-                let protocol = args.next().expect("argument to -extension not provided");
+                let protocol = args.next().expect("argument to -listen not provided");
                 if let Some(idx) = flags.listen_minus.iter().position(|p| *p == protocol) {
                     flags.listen_minus.swap_remove(idx);
                 }
                 flags.listen_plus.push(protocol.to_owned());
             }
             "-nolisten" => {
-                let protocol = args.next().expect("argument to -extension not provided");
+                let protocol = args.next().expect("argument to -nolisten not provided");
                 if let Some(idx) = flags.listen_plus.iter().position(|p| *p == protocol) {
                     flags.listen_plus.swap_remove(idx);
                 }
