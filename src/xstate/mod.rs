@@ -785,7 +785,7 @@ impl XState {
 
         if !known_window_type {
             if let Some(has_skip_taskbar) = has_skip_taskbar {
-                is_popup = has_skip_taskbar;
+                is_popup = has_skip_taskbar || override_redirect;
             }
         }
 
