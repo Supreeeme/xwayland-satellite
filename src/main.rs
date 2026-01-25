@@ -218,7 +218,7 @@ fn parse_args() -> RealData {
                 // - parse_args() must only be called once to avoid double closing.
                 // - no fd can be provided multiple times to avoid double closing.
                 assert!(
-                    data.listenfds.iter().any(|l| l.as_raw_fd() == fd),
+                    !data.listenfds.iter().any(|l| l.as_raw_fd() == fd),
                     "Multiple -listenfd with the same fd is not allowed"
                 );
                 let fd = unsafe { OwnedFd::from_raw_fd(fd) };
