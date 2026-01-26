@@ -120,10 +120,16 @@ struct WindowData {
     attrs: WindowAttributes,
     output_offset: WindowOutputOffset,
     activation_token: Option<String>,
+    pid: Option<u32>,
 }
 
 impl WindowData {
-    fn new(override_redirect: bool, dims: WindowDims, activation_token: Option<String>) -> Self {
+    fn new(
+        override_redirect: bool,
+        dims: WindowDims,
+        activation_token: Option<String>,
+        pid: Option<u32>,
+    ) -> Self {
         Self {
             mapped: false,
             attrs: WindowAttributes {
@@ -133,6 +139,7 @@ impl WindowData {
             },
             output_offset: WindowOutputOffset::default(),
             activation_token,
+            pid,
         }
     }
 
@@ -466,6 +473,24 @@ pub struct InnerServerState<S: X11Selection> {
     global_offset_updated: bool,
     updated_outputs: Vec<Entity>,
     new_scale: Option<f64>,
+    main_window_pid: HashMap<u32, x::Window>,
+}
+
+impl<S: X11Selection> InnerServerState<S> {
+    pub fn get_window_pid(&self, window: x::Window) -> Option<u32> {
+        self.windows
+            .get(&window)
+            .copied()
+            .and_then(|entity| self.world.get::<&WindowData>(entity).ok())
+            .and_then(|wd| wd.pid)
+    }
+
+    pub fn is_pid_window(&self, window: x::Window, pid: u32) -> bool {
+        self.main_window_pid
+            .get(&pid)
+            .map(|&main| main == window)
+            .unwrap_or(true)
+    }
 }
 
 impl<S: X11Selection> ServerState<NoConnection<S>> {
@@ -574,6 +599,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             new_scale: None,
             decoration_manager,
             world,
+            main_window_pid: HashMap::new(),
         };
         Self {
             inner,
@@ -804,10 +830,14 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         let id = self.world.spawn((
             window,
-            WindowData::new(override_redirect, dims, activation_token),
+            WindowData::new(override_redirect, dims, activation_token, pid),
         ));
 
         self.windows.insert(window, id);
+
+        if let Some(pid) = pid {
+            self.main_window_pid.entry(pid).or_insert(window);
+        }
     }
 
     pub fn set_popup(&mut self, window: x::Window, is_popup: bool) {

@@ -659,8 +659,15 @@ impl XState {
             .resolve()?
             .flatten();
 
-        let is_popup =
-            self.guess_is_popup(window, motif_hints, wmhints, transient_for.is_some())?;
+        // Main window cannot be a popup
+        // check if current window and pid window are same
+        let is_main_window = server_state
+            .get_window_pid(window)
+            .map(|pid| server_state.is_pid_window(window, pid))
+            .unwrap_or(false);
+
+        let is_popup = !is_main_window
+            && self.guess_is_popup(window, motif_hints, wmhints, transient_for.is_some())?;
         server_state.set_popup(window, is_popup);
         if let Some(parent) = transient_for.and_then(|t| (!is_popup).then_some(t)) {
             server_state.set_transient_for(window, parent);
