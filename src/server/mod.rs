@@ -143,7 +143,7 @@ impl WindowData {
         offset: WindowOutputOffset,
         connection: &mut C,
     ) {
-        log::trace!("offset: {offset:?}");
+        log::trace!(target: "output_offset", "offset: {offset:?}");
         if offset == self.output_offset {
             return;
         }
@@ -162,7 +162,7 @@ impl WindowData {
                 height: self.attrs.dims.height as _,
             },
         ) {
-            debug!("set {:?} offset to {:?}", window, self.output_offset);
+            debug!(target: "output_offset", "set {:?} offset to {:?}", window, self.output_offset);
         }
     }
 }
@@ -644,14 +644,15 @@ impl<C: XConnection> ServerState<C> {
                 .unwrap();
         }
 
+        if self.global_output_offset.x.owner.is_none()
+            || self.global_output_offset.y.owner.is_none()
+        {
+            self.calc_global_output_offset();
+            self.global_offset_updated = true;
+        }
         if self.global_offset_updated {
-            if self.global_output_offset.x.owner.is_none()
-                || self.global_output_offset.y.owner.is_none()
-            {
-                self.calc_global_output_offset();
-            }
-
             debug!(
+                target: "output_offset",
                 "updated global output offset: {}x{}",
                 self.global_output_offset.x.value, self.global_output_offset.y.value
             );
@@ -814,7 +815,9 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         for (entity, name) in query.iter() {
             if *name == global {
                 self.updated_outputs.push(*entity);
-                self.world.remove_one::<OutputScaleFactor>(*entity).unwrap();
+                self.world
+                    .remove::<(OutputScaleFactor, OutputDimensions)>(*entity)
+                    .unwrap();
                 let query = self
                     .world
                     .query_mut::<&OnOutput>()
@@ -825,6 +828,14 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                     if *on_out == OnOutput(*entity) {
                         self.world.remove_one::<OnOutput>(*e).unwrap();
                     }
+                }
+                if self.global_output_offset.x.owner == Some(*entity) {
+                    self.global_offset_updated = true;
+                    self.global_output_offset.x.owner = None;
+                }
+                if self.global_output_offset.y.owner == Some(*entity) {
+                    self.global_offset_updated = true;
+                    self.global_output_offset.y.owner = None;
                 }
                 break;
             }
@@ -1323,6 +1334,8 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     }
 
     fn calc_global_output_offset(&mut self) {
+        self.global_output_offset.x.value = i32::MAX;
+        self.global_output_offset.y.value = i32::MAX;
         for (entity, dimensions) in self.world.query_mut::<&OutputDimensions>() {
             if dimensions.x < self.global_output_offset.x.value {
                 self.global_output_offset.x = GlobalOutputOffsetDimension {

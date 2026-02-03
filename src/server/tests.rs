@@ -865,13 +865,6 @@ impl TestFixture<FakeXConnection> {
         match data.role {
             Some(SurfaceRole::Popup(_)) => {
                 assert_eq!(
-                    data.popup().positioner_state.offset,
-                    testwl::Vec2 {
-                        x: dims.x as _,
-                        y: dims.y as _
-                    }
-                );
-                assert_eq!(
                     data.popup().positioner_state.size,
                     Some(testwl::Vec2 {
                         x: dims.width as _,
@@ -1620,85 +1613,245 @@ fn override_redirect_choose_hover_window() {
     assert_eq!(&popup_data.popup().parent, win1_xdg);
 }
 
-#[test]
-fn output_offset() {
-    let (mut f, comp) = TestFixture::new_with_compositor();
-    let (output_obj, output) = f.new_output(0, 0);
-    let man = f.enable_xdg_output();
-    f.create_xdg_output(&man, output_obj.obj);
-    f.testwl.move_xdg_output(&output, 500, 100);
-    f.run();
-    let window = Window::new(1);
-
-    {
-        let (surface, surface_id) = f.create_toplevel(&comp, window);
-        f.testwl.move_surface_to_output(surface_id, &output);
-        f.run();
-        let data = &f.connection().windows[&window];
-        assert_eq!(data.dims.x, 500);
-        assert_eq!(data.dims.y, 100);
-
-        f.satellite.unmap_window(window);
-        surface.obj.destroy();
-        f.run();
+#[track_caller]
+fn check_output_position_event(output: &TestObject<WlOutput>, pos: (i32, i32)) {
+    let mut geo = None;
+    let events = std::mem::take(&mut *output.data.events.lock().unwrap());
+    log::debug!("events: {events:?}");
+    for event in events {
+        match event {
+            wl_output::Event::Geometry { x, y, .. } => {
+                geo = Some((x, y));
+            }
+            wl_output::Event::Done => {
+                if let Some(geo) = geo {
+                    assert_eq!(geo, pos);
+                    return;
+                }
+            }
+            _ => {}
+        }
     }
-
-    let (t_buffer, t_surface) = comp.create_surface();
-    f.map_window(&comp, window, &t_surface.obj, &t_buffer);
-    f.run();
-    let t_id = f.testwl.last_created_surface_id().unwrap();
-    f.testwl.move_surface_to_output(t_id, &output);
-    f.run();
-    {
-        let data = f.testwl.get_surface_data(t_id).unwrap();
-        assert!(
-            matches!(data.role, Some(testwl::SurfaceRole::Toplevel(_))),
-            "surface role: {:?}",
-            data.role
-        );
+    if geo.is_none() {
+        panic!("Did not receive any geometry events");
+    } else {
+        panic!("Did not receive a done event");
     }
-    f.testwl.configure_toplevel(t_id, 100, 100, vec![]);
-    f.testwl.focus_toplevel(t_id);
-    f.run();
+}
 
-    {
-        let data = &f.connection().windows[&window];
-        assert_eq!(data.dims.x, 500);
-        assert_eq!(data.dims.y, 100);
+#[track_caller]
+fn check_output_position_event_xdg(
+    xdg_out: &TestObject<ZxdgOutputV1>,
+    out: &TestObject<WlOutput>,
+    pos: (i32, i32),
+    goo_updated: bool,
+) {
+    let mut done = false;
+    let events = std::mem::take(&mut *xdg_out.data.events.lock().unwrap())
+        .into_iter()
+        .rev();
+    for event in events {
+        if let zxdg_output_v1::Event::LogicalPosition { x, y } = event {
+            assert_eq!(pos, (x, y));
+            done = true;
+            break;
+        }
     }
-
-    let popup = Window::new(2);
-    let (p_surface, p_id) =
-        f.create_popup(&comp, PopupBuilder::new(popup, window, t_id).x(510).y(110));
-    f.testwl.move_surface_to_output(p_id, &output);
-    f.run();
-    let data = f.testwl.get_surface_data(p_id).unwrap();
+    assert!(done, "Did not get zxdg_output_v1 logical_position");
+    let events = std::mem::take(&mut *out.data.events.lock().unwrap());
     assert_eq!(
-        data.popup().positioner_state.offset,
-        testwl::Vec2 { x: 10, y: 10 }
-    );
-
-    f.satellite.unmap_window(popup);
-    p_surface.obj.destroy();
-    f.run();
-
-    let (buffer, surface) = comp.create_surface();
-    f.map_window(&comp, popup, &surface.obj, &buffer);
-    f.run();
-    let p_id = f.testwl.last_created_surface_id().unwrap();
-    f.testwl.move_surface_to_output(p_id, &output);
-    f.testwl.configure_popup(p_id);
-    f.run();
-    let data = f.testwl.get_surface_data(p_id).unwrap();
-    assert_eq!(
-        data.popup().positioner_state.offset,
-        testwl::Vec2 { x: 10, y: 10 }
+        events
+            .into_iter()
+            .filter(|e| matches!(*e, wl_output::Event::Done))
+            .count(),
+        goo_updated as usize,
+        "Did not get expected wl_output done event"
     );
 }
 
 #[test]
-fn output_offset_change() {
+fn output_offset_one_output() {
+    // If there is only one output, that output is always positioned at 0x0
+    let (mut f, _) = TestFixture::new_with_compositor();
+    let (output_obj, output) = f.new_output(0, 0);
+    f.run();
+    f.run();
+    check_output_position_event(&output_obj, (0, 0));
+
+    f.testwl.move_output(&output, 500, 100);
+    f.run();
+    f.run();
+    check_output_position_event(&output_obj, (0, 0));
+
+    f.testwl.move_output(&output, -500, -100);
+    f.run();
+    f.run();
+    check_output_position_event(&output_obj, (0, 0));
+}
+
+#[test]
+fn output_offset_multi_output() {
+    // With multiple outputs, the top-most output is on the X-axis, the left-most output is on the
+    // Y-axis, and they always maintain relative positioning.
+    let (mut f, _) = TestFixture::new_with_compositor();
+
+    let (output_obj_1, output_1) = f.new_output(1000, 0);
+    f.run();
+    check_output_position_event(&output_obj_1, (0, 0));
+
+    let (output_obj_2, _) = f.new_output(0, 1000);
+    f.run();
+    check_output_position_event(&output_obj_1, (1000, 0));
+    check_output_position_event(&output_obj_2, (0, 1000));
+
+    f.testwl.move_output(&output_1, 1000, 2000);
+    f.run();
+    f.run();
+    check_output_position_event(&output_obj_1, (1000, 1000));
+    check_output_position_event(&output_obj_2, (0, 0));
+
+    // Global output offset does not change
+    f.testwl.move_output(&output_1, 1000, 1000);
+    f.run();
+    f.run();
+    check_output_position_event(&output_obj_1, (1000, 0));
+    assert!(&output_obj_2.data.events.lock().unwrap().is_empty());
+}
+
+#[test]
+fn output_offset_multi_output_xdg() {
+    let (mut f, _) = TestFixture::new_with_compositor();
+    let man = f.enable_xdg_output();
+
+    let (output_obj_1, output_1) = f.new_output(0, 0);
+    f.run();
+    std::mem::take(&mut *output_obj_1.data.events.lock().unwrap());
+    let output_xdg_1 = f.create_xdg_output(&man, output_obj_1.obj.clone());
+    f.testwl.move_xdg_output(&output_1, 1000, 0);
+    f.run();
+    f.run();
+    check_output_position_event_xdg(&output_xdg_1, &output_obj_1, (0, 0), true);
+
+    let (output_obj_2, output_2) = f.new_output(1000, 1000);
+    f.run();
+    std::mem::take(&mut *output_obj_2.data.events.lock().unwrap());
+    let output_xdg_2 = f.create_xdg_output(&man, output_obj_2.obj.clone());
+    f.testwl.move_xdg_output(&output_2, 0, 1000);
+    f.run();
+    f.run();
+    check_output_position_event_xdg(&output_xdg_1, &output_obj_1, (1000, 0), true);
+    check_output_position_event_xdg(&output_xdg_2, &output_obj_2, (0, 1000), true);
+
+    f.testwl.move_xdg_output(&output_1, 1000, 2000);
+    f.run();
+    f.run();
+    check_output_position_event_xdg(&output_xdg_1, &output_obj_1, (1000, 1000), true);
+    check_output_position_event_xdg(&output_xdg_2, &output_obj_2, (0, 0), true);
+
+    f.testwl.move_xdg_output(&output_1, 1000, 1000);
+    f.run();
+    f.run();
+    check_output_position_event_xdg(&output_xdg_1, &output_obj_1, (1000, 0), false);
+    assert!(output_xdg_2.data.events.lock().unwrap().is_empty());
+    assert!(output_obj_2.data.events.lock().unwrap().is_empty());
+}
+
+#[test]
+fn output_offset_remove_output() {
+    let (mut f, _) = TestFixture::new_with_compositor();
+
+    let (output_ext_c, output_ext) = f.new_output(0, 0);
+    let (output_main_c, _) = f.new_output(1000, 500);
+    f.run();
+
+    check_output_position_event(&output_ext_c, (0, 0));
+    check_output_position_event(&output_main_c, (1000, 500));
+
+    f.remove_output(output_ext);
+    f.run();
+    f.run();
+    check_output_position_event(&output_main_c, (0, 0));
+}
+
+#[test]
+fn output_offset_surface_positioning() {
     let (mut f, comp) = TestFixture::new_with_compositor();
+
+    f.new_output(0, 0);
+    let (_, output) = f.new_output(500, 100);
+    f.run();
+
+    let window = Window::new(1);
+    let (_, toplevel_id) = f.create_toplevel(&comp, window);
+    f.testwl.move_surface_to_output(toplevel_id, &output);
+    f.run();
+
+    let mut toplevel_pos = WindowDims {
+        x: 500,
+        y: 100,
+        width: 100,
+        height: 100,
+    };
+    f.assert_window_dimensions(window, toplevel_id, toplevel_pos);
+
+    let popup = Window::new(2);
+    let (_, p_id) = f.create_popup(
+        &comp,
+        PopupBuilder::new(popup, window, toplevel_id).x(510).y(110),
+    );
+    let mut popup_dims = WindowDims {
+        x: 510,
+        y: 110,
+        width: 50,
+        height: 50,
+    };
+    f.testwl.move_surface_to_output(p_id, &output);
+    f.run();
+    let data = f.testwl.get_surface_data(p_id).unwrap();
+    assert_eq!(
+        data.popup().positioner_state.offset,
+        testwl::Vec2 { x: 10, y: 10 }
+    );
+    f.assert_window_dimensions(popup, p_id, popup_dims);
+
+    f.testwl.move_output(&output, 600, 200);
+    f.run();
+    f.run();
+
+    toplevel_pos.x = 600;
+    toplevel_pos.y = 200;
+    f.assert_window_dimensions(window, toplevel_id, toplevel_pos);
+    let data = f.testwl.get_surface_data(p_id).unwrap();
+    assert_eq!(
+        data.popup().positioner_state.offset,
+        testwl::Vec2 { x: 10, y: 10 }
+    );
+    popup_dims.x = 610;
+    popup_dims.y = 210;
+    f.assert_window_dimensions(popup, p_id, popup_dims);
+
+    f.testwl.move_output(&output, -100, -200);
+    f.run();
+    f.run();
+
+    toplevel_pos.x = 0;
+    toplevel_pos.y = 0;
+    f.assert_window_dimensions(window, toplevel_id, toplevel_pos);
+    let data = f.testwl.get_surface_data(p_id).unwrap();
+    assert_eq!(
+        data.popup().positioner_state.offset,
+        testwl::Vec2 { x: 10, y: 10 }
+    );
+    popup_dims.x = 10;
+    popup_dims.y = 10;
+    f.assert_window_dimensions(popup, p_id, popup_dims);
+}
+
+#[test]
+fn output_offset_xdg_override() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    f.new_output(0, 0);
+    f.run();
 
     let (output_obj, output) = f.new_output(500, 100);
     let window = Window::new(1);
@@ -1713,13 +1866,8 @@ fn output_offset_change() {
     };
     test_position(&f, 500, 100);
 
-    f.testwl.move_output(&output, 600, 200);
-    f.run();
-    f.run();
-    test_position(&f, 600, 200);
-
     let man = f.enable_xdg_output();
-    f.create_xdg_output(&man, output_obj.obj);
+    f.create_xdg_output(&man, output_obj.obj.clone());
     // testwl inits xdg output position to 0, and it should take priority over wl_output position
     test_position(&f, 0, 0);
 
@@ -1731,6 +1879,82 @@ fn output_offset_change() {
     f.run();
     f.run();
     test_position(&f, 1000, 22);
+}
+
+#[test]
+fn output_offset_negative_position() {
+    let mut f = TestFixture::new();
+    std::mem::take(&mut *f.registry.data.events.lock().unwrap());
+    let (output, _) = f.new_output(-500, -500);
+    f.run();
+    f.run();
+    check_output_position_event(&output, (0, 0));
+
+    let (output2, _) = f.new_output(0, 0);
+    f.run();
+    f.run();
+    check_output_position_event(&output2, (500, 500));
+    assert!(output.data.events.lock().unwrap().is_empty());
+
+    let (output3, _) = f.new_output(500, 500);
+    f.run();
+    f.run();
+    check_output_position_event(&output3, (1000, 1000));
+    assert!(output.data.events.lock().unwrap().is_empty());
+    assert!(output2.data.events.lock().unwrap().is_empty());
+}
+
+#[test]
+fn output_offset_negative_position_update() {
+    let mut f = TestFixture::new();
+    std::mem::take(&mut *f.registry.data.events.lock().unwrap());
+
+    let (output, _) = f.new_output(-500, -500);
+    f.run();
+    f.run();
+    check_output_position_event(&output, (0, 0));
+
+    let (output2, _) = f.new_output(0, -1000);
+    f.run();
+    f.run();
+    check_output_position_event(&output, (0, 500));
+    check_output_position_event(&output2, (500, 0));
+
+    let (output3, o3) = f.new_output(-1000, 0);
+    f.run();
+    f.run();
+    check_output_position_event(&output, (500, 500));
+    check_output_position_event(&output2, (1000, 0));
+    check_output_position_event(&output3, (0, 1000));
+
+    f.testwl.move_output(&o3, 0, 0);
+    f.run();
+    f.run();
+    check_output_position_event(&output, (0, 500));
+    check_output_position_event(&output2, (500, 0));
+    check_output_position_event(&output3, (500, 1000));
+}
+
+#[test]
+fn output_offset_negative_position_update_xdg() {
+    let mut f = TestFixture::new();
+    std::mem::take(&mut *f.registry.data.events.lock().unwrap());
+    let xdg = f.enable_xdg_output();
+
+    let (output, _) = f.new_output(-500, -500);
+    f.run();
+    f.run();
+    check_output_position_event(&output, (0, 0));
+
+    let (output2, output_s) = f.new_output(0, 0);
+    f.run();
+    std::mem::take(&mut *output2.data.events.lock().unwrap());
+    let xdg_output = f.create_xdg_output(&xdg, output2.obj.clone());
+    f.testwl.move_xdg_output(&output_s, 0, -1000);
+    f.run();
+    f.run();
+    check_output_position_event(&output, (0, 500));
+    check_output_position_event_xdg(&xdg_output, &output2, (500, 0), true);
 }
 
 #[test]
@@ -2035,140 +2259,6 @@ fn fullscreen_heuristic() {
 
     check_fullscreen(2, false);
     check_fullscreen(3, true);
-}
-
-#[track_caller]
-fn check_output_position_event(output: &TestObject<WlOutput>, x: i32, y: i32) {
-    let events = std::mem::take(&mut *output.data.events.lock().unwrap());
-    assert!(!events.is_empty());
-    let mut done = false;
-    let mut geo = false;
-    for event in events {
-        match event {
-            wl_output::Event::Geometry {
-                x: geo_x, y: geo_y, ..
-            } => {
-                assert_eq!(geo_x, x);
-                assert_eq!(geo_y, y);
-                geo = true;
-            }
-            wl_output::Event::Done => {
-                done = true;
-            }
-            _ => {}
-        }
-    }
-
-    assert!(geo, "Didn't get geometry event");
-    assert!(done, "Didn't get done event");
-}
-
-#[test]
-fn negative_output_position() {
-    let mut f = TestFixture::new();
-    std::mem::take(&mut *f.registry.data.events.lock().unwrap());
-    let (output, _) = f.new_output(-500, -500);
-    f.run();
-    f.run();
-    check_output_position_event(&output, 0, 0);
-
-    let (output2, _) = f.new_output(0, 0);
-    f.run();
-    f.run();
-    check_output_position_event(&output2, 500, 500);
-    assert!(output.data.events.lock().unwrap().is_empty());
-
-    let (output3, _) = f.new_output(500, 500);
-    f.run();
-    f.run();
-    check_output_position_event(&output3, 1000, 1000);
-    assert!(output.data.events.lock().unwrap().is_empty());
-    assert!(output2.data.events.lock().unwrap().is_empty());
-}
-
-#[test]
-fn negative_output_position_update_offset() {
-    let mut f = TestFixture::new();
-    std::mem::take(&mut *f.registry.data.events.lock().unwrap());
-
-    let (output, _) = f.new_output(-500, -500);
-    f.run();
-    f.run();
-    check_output_position_event(&output, 0, 0);
-
-    let (output2, _) = f.new_output(0, -1000);
-    f.run();
-    f.run();
-    check_output_position_event(&output, 0, 500);
-    check_output_position_event(&output2, 500, 0);
-
-    let (output3, _) = f.new_output(-1000, 0);
-    f.run();
-    f.run();
-    check_output_position_event(&output, 500, 500);
-    check_output_position_event(&output2, 1000, 0);
-    check_output_position_event(&output3, 0, 1000);
-}
-
-#[test]
-fn negative_output_xdg_position_update_offset() {
-    let mut f = TestFixture::new();
-    std::mem::take(&mut *f.registry.data.events.lock().unwrap());
-    let xdg = f.enable_xdg_output();
-
-    let (output, _) = f.new_output(-500, -500);
-    f.run();
-    f.run();
-    check_output_position_event(&output, 0, 0);
-
-    let (output2, output_s) = f.new_output(0, 0);
-    let xdg_output = f.create_xdg_output(&xdg, output2.obj);
-    f.testwl.move_xdg_output(&output_s, 0, -1000);
-    f.run();
-    f.run();
-    check_output_position_event(&output, 0, 500);
-
-    let mut found = false;
-    let mut first = false;
-    for event in std::mem::take(&mut *xdg_output.data.events.lock().unwrap()) {
-        if let zxdg_output_v1::Event::LogicalPosition { x, y } = event {
-            // Testwl sends a logical position event when the output is first created
-            // We are interested in the second one generated by satellite
-            if !first {
-                first = true;
-                continue;
-            }
-            assert_eq!(x, 500);
-            assert_eq!(y, 0);
-            found = true;
-            break;
-        }
-    }
-    assert!(found, "Did not get xdg output logical position");
-    found = false;
-    for event in std::mem::take(&mut *output2.data.events.lock().unwrap()) {
-        if let wl_output::Event::Done = event {
-            found = true;
-            break;
-        }
-    }
-    assert!(found, "Did not get done event");
-}
-
-#[test]
-fn negative_output_position_remove_offset() {
-    let mut f = TestFixture::new();
-    std::mem::take(&mut *f.registry.data.events.lock().unwrap());
-
-    let (c_output, s_output) = f.new_output(-500, -500);
-    f.run();
-    f.run();
-    check_output_position_event(&c_output, 0, 0);
-
-    f.testwl.move_output(&s_output, 500, 500);
-    f.run();
-    f.run();
-    check_output_position_event(&c_output, 500, 500);
 }
 
 #[test]

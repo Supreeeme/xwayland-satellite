@@ -34,13 +34,16 @@ The code for the X11 portion of satellite lives in `src/xstate`. Satellite must 
 as any other standard X11 window manager. This includes:
 
 - Setting SubstructureRedirect and SubstructureNotify on the root window, to get notifications for when new windows are being created
-- Follwing (most of) the [ICCCM](https://www.x.org/releases/X11R7.6/doc/xorg-docs/specs/ICCCM/icccm.html) and [EWMH](https://specifications.freedesktop.org/wm-spec/latest/) specs
+- Following (most of) the [ICCCM](https://www.x.org/releases/X11R7.6/doc/xorg-docs/specs/ICCCM/icccm.html) and [EWMH](https://specifications.freedesktop.org/wm-spec/latest/) specs
 
 In addition, satellite must do some other things that a normal X11 window manager wouldn't - but a compositor integrating
 Xwayland would - such as synchronize X11 and Wayland selections. This is explained further in the Wayland server section.
 
 The way that satellite manages windows from the X11 point of view is as follows:
 
+- All monitors maintain their relative positions to one another. Their absolute position is such that
+  the top-most monitor's top edge is on the X-axis and the left-most monitor's left edge is on the Y-axis.
+    - All monitors are on non-negative coordinates with no gaps between the screen and any monitor, matching what `xrandr` does.
 - All toplevels on a monitor are positioned at 0x0 on that monitor. So if you have one monitor at 0x0,
 all the windows are located at 0x0. If you have a monitor at 300x600, all the windows on that monitor are at 300x600.
     - This offset is needed because all monitors rest in the same coordinate plane in X11, so missing this offset would
