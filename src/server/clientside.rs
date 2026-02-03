@@ -206,19 +206,22 @@ impl Dispatch<WlRegistry, GlobalListContents> for MyWorld {
         _: &wayland_client::Connection,
         _: &wayland_client::QueueHandle<Self>,
     ) {
-        if let Event::<WlRegistry>::Global {
-            name,
-            interface,
-            version,
-        } = event
-        {
-            state.new_globals.push(Global {
+        match event {
+            Event::<WlRegistry>::Global {
                 name,
                 interface,
                 version,
-            });
-        } else if let Event::<WlRegistry>::GlobalRemove { name } = event {
-            state.removed_globals.push(GlobalName(name));
+            } => {
+                state.new_globals.push(Global {
+                    name,
+                    interface,
+                    version,
+                });
+            }
+            Event::<WlRegistry>::GlobalRemove { name } => {
+                state.removed_globals.push(GlobalName(name));
+            }
+            _ => {}
         }
     }
 }

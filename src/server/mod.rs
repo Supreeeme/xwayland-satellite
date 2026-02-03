@@ -795,6 +795,9 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         handle_new_globals::<S>(&mut self.globals_map, &self.dh, &globals);
 
         let globals = std::mem::take(&mut self.world.removed_globals);
+        if globals.is_empty() {
+            return;
+        }
         let query = self
             .world
             .query_mut::<(&WlOutput, &GlobalName)>()
