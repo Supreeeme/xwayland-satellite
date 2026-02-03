@@ -212,7 +212,9 @@ impl SurfaceEvents {
 
                 let mut query = data.query::<(&x::Window, &mut WindowData)>();
                 if let Some((window, win_data)) = query.get() {
-                    let dimensions = output_data.get::<&OutputDimensions>().unwrap();
+                    let Some(dimensions) = output_data.get::<&OutputDimensions>() else {
+                        return;
+                    };
                     win_data.update_output_offset(
                         *window,
                         WindowOutputOffset {
@@ -1077,7 +1079,9 @@ fn update_output_offset(
     let connection = &mut state.connection;
     let state = &mut state.inner;
     {
-        let mut dimensions = state.world.get::<&mut OutputDimensions>(output).unwrap();
+        let Ok(mut dimensions) = state.world.get::<&mut OutputDimensions>(output) else {
+            return;
+        };
         if matches!(source, OutputDimensionsSource::Wl { .. })
             && matches!(dimensions.source, OutputDimensionsSource::Xdg)
         {
@@ -1093,7 +1097,8 @@ fn update_output_offset(
                 };
                 state.global_offset_updated = true;
             } else if dim.owner == Some(output) && value > dim.value {
-                *dim = Default::default();
+                // Another output's position could be less than the new value, so recalculate
+                dim.owner = None;
                 state.global_offset_updated = true;
             }
         };
@@ -1124,7 +1129,9 @@ fn update_window_output_offsets(
     world: &World,
     connection: &mut impl XConnection,
 ) {
-    let dimensions = world.get::<&OutputDimensions>(output).unwrap();
+    let Ok(dimensions) = world.get::<&OutputDimensions>(output) else {
+        return;
+    };
     let mut query = world.query::<(&x::Window, &mut WindowData, &OnOutput)>();
 
     for (_, (window, data, _)) in query
@@ -1150,7 +1157,9 @@ pub(super) fn update_global_output_offset(
 ) {
     let entity = world.entity(output).unwrap();
     let mut query = entity.query::<(&OutputDimensions, &WlOutput)>();
-    let (dimensions, server) = query.get().unwrap();
+    let Some((dimensions, server)) = query.get() else {
+        return;
+    };
 
     let x = dimensions.x - global_output_offset.x.value;
     let y = dimensions.y - global_output_offset.y.value;
@@ -1249,24 +1258,28 @@ impl OutputEvent {
                     state,
                 );
                 let global_output_offset = state.global_output_offset;
+                let global_offset_updated = state.global_offset_updated;
 
-                let (output, dimensions, xdg) = state
-                    .world
-                    .query_one_mut::<(&WlOutput, &mut OutputDimensions, Option<&XdgOutputServer>)>(
-                        target,
-                    )
-                    .unwrap();
+                let Ok((output, dimensions, xdg)) = state.world.query_one_mut::<(
+                    &WlOutput,
+                    &mut OutputDimensions,
+                    Option<&XdgOutputServer>,
+                )>(target) else {
+                    return;
+                };
 
-                output.geometry(
-                    x - global_output_offset.x.value,
-                    y - global_output_offset.y.value,
-                    physical_width,
-                    physical_height,
-                    convert_wenum(subpixel),
-                    make,
-                    model,
-                    convert_wenum(transform),
-                );
+                if !global_offset_updated {
+                    output.geometry(
+                        x - global_output_offset.x.value,
+                        y - global_output_offset.y.value,
+                        physical_width,
+                        physical_height,
+                        convert_wenum(subpixel),
+                        make,
+                        model,
+                        convert_wenum(transform),
+                    );
+                }
                 dimensions.rotated_90 = transform.into_result().is_ok_and(|t| {
                     matches!(
                         t,
@@ -1290,10 +1303,12 @@ impl OutputEvent {
                 height,
                 refresh,
             } => {
-                let (output, dimensions) = state
+                let Ok((output, dimensions)) = state
                     .world
                     .query_one_mut::<(&WlOutput, &mut OutputDimensions)>(target)
-                    .unwrap();
+                else {
+                    return;
+                };
 
                 if flags
                     .into_result()
@@ -1348,20 +1363,24 @@ impl OutputEvent {
         match event {
             Event::LogicalPosition { x, y } => {
                 update_output_offset(target, OutputDimensionsSource::Xdg, x, y, state);
-                state
-                    .world
-                    .get::<&XdgOutputServer>(target)
-                    .unwrap()
-                    .logical_position(
-                        x - state.global_output_offset.x.value,
-                        y - state.global_output_offset.y.value,
-                    );
+                if !state.global_offset_updated {
+                    state
+                        .world
+                        .get::<&XdgOutputServer>(target)
+                        .unwrap()
+                        .logical_position(
+                            x - state.global_output_offset.x.value,
+                            y - state.global_output_offset.y.value,
+                        );
+                }
             }
             Event::LogicalSize { .. } => {
-                let (xdg, dimensions) = state
+                let Ok((xdg, dimensions)) = state
                     .world
                     .query_one_mut::<(&XdgOutputServer, &OutputDimensions)>(target)
-                    .unwrap();
+                else {
+                    return;
+                };
                 if dimensions.rotated_90 {
                     xdg.logical_size(dimensions.height, dimensions.width);
                 } else {
