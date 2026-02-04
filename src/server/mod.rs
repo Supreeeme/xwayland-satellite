@@ -65,6 +65,7 @@ use wayland_protocols::{
 use wayland_server::protocol::wl_seat::WlSeat;
 use wayland_server::{
     Client, DisplayHandle, Resource, WEnum,
+    backend::GlobalId,
     protocol::{
         wl_callback::WlCallback, wl_compositor::WlCompositor, wl_output::WlOutput, wl_shm::WlShm,
         wl_surface::WlSurface,
@@ -342,7 +343,8 @@ enum ObjectEvent {
 }
 }
 
-fn handle_globals<'a, S: X11Selection + 'static>(
+fn handle_new_globals<'a, S: X11Selection + 'static>(
+    globals_map: &mut HashMap<GlobalName, (Global, GlobalId)>,
     dh: &DisplayHandle,
     globals: impl IntoIterator<Item = &'a Global>,
 ) {
@@ -353,7 +355,8 @@ fn handle_globals<'a, S: X11Selection + 'static>(
                     $(
                         ref x if x == <$global>::interface().name => {
                             let version = u32::min(global.version, <$global>::interface().version);
-                            dh.create_global::<InnerServerState<S>, $global, Global>(version, global.clone());
+                            let global_id = dh.create_global::<InnerServerState<S>, $global, Global>(version, global.clone());
+                            globals_map.insert(GlobalName(global.name), (global.clone(), global_id));
                         }
                     )+
                     _ => {}
@@ -376,6 +379,9 @@ fn handle_globals<'a, S: X11Selection + 'static>(
         ];
     }
 }
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub(super) struct GlobalName(pub u32);
 
 struct FocusData {
     window: x::Window,
@@ -446,6 +452,7 @@ pub struct InnerServerState<S: X11Selection> {
     world: MyWorld,
     queue: EventQueue<MyWorld>,
     qh: QueueHandle<MyWorld>,
+    globals_map: HashMap<GlobalName, (Global, GlobalId)>,
     client: Client,
     to_focus: Option<FocusData>,
     unfocus: bool,
@@ -532,9 +539,10 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
 
         dh.create_global::<InnerServerState<S>, XwaylandShellV1, _>(1, ());
 
+        let mut globals_map = HashMap::new();
         global_list
             .contents()
-            .with_list(|globals| handle_globals::<S>(&dh, globals));
+            .with_list(|globals| handle_new_globals::<S>(&mut globals_map, &dh, globals));
 
         let world = MyWorld::new(global_list);
         let client = dh.insert_client(client, std::sync::Arc::new(())).unwrap();
@@ -545,6 +553,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             client,
             queue,
             qh,
+            globals_map,
             dh,
             to_focus: None,
             unfocus: false,
@@ -613,7 +622,7 @@ impl<C: XConnection> ServerState<C> {
     }
 
     pub fn handle_clientside_events(&mut self) {
-        self.handle_new_globals();
+        self.handle_globals();
 
         for (target, event) in self.world.read_events() {
             if !self.world.contains(target) {
@@ -659,8 +668,10 @@ impl<C: XConnection> ServerState<C> {
         }
 
         if !self.updated_outputs.is_empty() {
-            for output in self.updated_outputs.iter() {
-                let output_scale = self.world.get::<&OutputScaleFactor>(*output).unwrap();
+            for output in std::mem::take(&mut self.updated_outputs).iter() {
+                let Ok(output_scale) = self.world.get::<&OutputScaleFactor>(*output) else {
+                    continue;
+                };
                 if matches!(*output_scale, OutputScaleFactor::Output(..)) {
                     let mut surface_query = self
                         .world
@@ -684,7 +695,6 @@ impl<C: XConnection> ServerState<C> {
                     }
                 }
             }
-            self.updated_outputs.clear();
 
             let mut mixed_scale = false;
             let mut scale;
@@ -780,9 +790,33 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         self.queue.as_fd()
     }
 
-    fn handle_new_globals(&mut self) {
+    fn handle_globals(&mut self) {
         let globals = std::mem::take(&mut self.world.new_globals);
-        handle_globals::<S>(&self.dh, globals.iter());
+        handle_new_globals::<S>(&mut self.globals_map, &self.dh, &globals);
+
+        let globals = std::mem::take(&mut self.world.removed_globals);
+        if globals.is_empty() {
+            return;
+        }
+        let query = self
+            .world
+            .query_mut::<(&WlOutput, &GlobalName)>()
+            .into_iter()
+            .map(|(e, (_, name))| (e, *name))
+            .collect::<Vec<_>>();
+        for global in globals {
+            let (global_struct, global_id) = self.globals_map.remove(&global).unwrap();
+            self.dh.disable_global::<InnerServerState<S>>(global_id);
+            if global_struct.interface == <WlOutput>::interface().name {
+                for (entity, name) in query.iter() {
+                    if *name == global {
+                        self.updated_outputs.push(*entity);
+                        self.world.despawn(*entity).unwrap();
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     pub fn new_window(

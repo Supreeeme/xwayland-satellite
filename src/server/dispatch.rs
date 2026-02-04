@@ -1479,6 +1479,7 @@ impl<S: X11Selection> GlobalDispatch<WlOutput, Global> for InnerServerState<S> {
                 client,
                 event::OutputScaleFactor::Output(1),
                 event::OutputDimensions::default(),
+                GlobalName(data.name),
             ),
         );
         state.updated_outputs.push(entity);

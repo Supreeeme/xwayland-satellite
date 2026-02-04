@@ -1,6 +1,6 @@
 use super::decoration::DecorationMarker;
 
-use super::ObjectEvent;
+use super::{GlobalName, ObjectEvent};
 use hecs::{Entity, World};
 use smithay_client_toolkit::{
     activation::{ActivationHandler, RequestData, RequestDataExt},
@@ -115,6 +115,7 @@ pub(super) struct MyWorld {
     pub world: World,
     pub global_list: GlobalList,
     pub new_globals: Vec<Global>,
+    pub removed_globals: Vec<GlobalName>,
     events: Vec<(Entity, ObjectEvent)>,
     queued_events: Vec<mpsc::Receiver<(Entity, ObjectEvent)>>,
     pub clipboard: SelectionEvents<SelectionOffer>,
@@ -128,6 +129,7 @@ impl MyWorld {
             world: World::new(),
             global_list,
             new_globals: Vec::new(),
+            removed_globals: Vec::new(),
             events: Vec::new(),
             queued_events: Vec::new(),
             clipboard: Default::default(),
@@ -204,18 +206,23 @@ impl Dispatch<WlRegistry, GlobalListContents> for MyWorld {
         _: &wayland_client::Connection,
         _: &wayland_client::QueueHandle<Self>,
     ) {
-        if let Event::<WlRegistry>::Global {
-            name,
-            interface,
-            version,
-        } = event
-        {
-            state.new_globals.push(Global {
+        match event {
+            Event::<WlRegistry>::Global {
                 name,
                 interface,
                 version,
-            });
-        };
+            } => {
+                state.new_globals.push(Global {
+                    name,
+                    interface,
+                    version,
+                });
+            }
+            Event::<WlRegistry>::GlobalRemove { name } => {
+                state.removed_globals.push(GlobalName(name));
+            }
+            _ => {}
+        }
     }
 }
 
