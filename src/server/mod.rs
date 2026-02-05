@@ -795,26 +795,38 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         handle_new_globals::<S>(&mut self.globals_map, &self.dh, &globals);
 
         let globals = std::mem::take(&mut self.world.removed_globals);
-        if globals.is_empty() {
-            return;
+        for global in globals {
+            let (global_struct, global_id) = self.globals_map.remove(&global).unwrap();
+            self.dh.disable_global::<InnerServerState<S>>(global_id);
+            if global_struct.interface == <WlOutput>::interface().name {
+                self.remove_output(global);
+            }
         }
+    }
+
+    fn remove_output(&mut self, global: GlobalName) {
         let query = self
             .world
             .query_mut::<(&WlOutput, &GlobalName)>()
             .into_iter()
             .map(|(e, (_, name))| (e, *name))
             .collect::<Vec<_>>();
-        for global in globals {
-            let (global_struct, global_id) = self.globals_map.remove(&global).unwrap();
-            self.dh.disable_global::<InnerServerState<S>>(global_id);
-            if global_struct.interface == <WlOutput>::interface().name {
-                for (entity, name) in query.iter() {
-                    if *name == global {
-                        self.updated_outputs.push(*entity);
-                        self.world.despawn(*entity).unwrap();
-                        break;
+        for (entity, name) in query.iter() {
+            if *name == global {
+                self.updated_outputs.push(*entity);
+                self.world.remove_one::<OutputScaleFactor>(*entity).unwrap();
+                let query = self
+                    .world
+                    .query_mut::<&OnOutput>()
+                    .into_iter()
+                    .map(|(e, on_out)| (e, *on_out))
+                    .collect::<Vec<_>>();
+                for (e, on_out) in query.iter() {
+                    if *on_out == OnOutput(*entity) {
+                        self.world.remove_one::<OnOutput>(*e).unwrap();
                     }
                 }
+                break;
             }
         }
     }
