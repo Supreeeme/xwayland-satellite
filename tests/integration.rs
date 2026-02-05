@@ -2174,6 +2174,27 @@ fn popup_heuristics() {
         &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
     );
     f.map_as_toplevel(&mut connection, battle_net);
+
+    let wallpaper_engine = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        wallpaper_engine,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_normal],
+    );
+    connection.set_property(
+        wallpaper_engine,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x3_u32, 0x6, 0x0, 0x0, 0x0],
+    );
+    connection.set_property(
+        wallpaper_engine,
+        connection.atoms.wm_hints,
+        connection.atoms.wm_hints,
+        &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
+    f.map_as_toplevel(&mut connection, wallpaper_engine);
 }
 
 #[test]
