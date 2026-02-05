@@ -725,6 +725,7 @@ impl XState {
                 && !hints.functions.as_ref().is_some_and(|f| {
                     f.contains(motif::Functions::Minimize)
                         || f.contains(motif::Functions::Maximize)
+                        || f.contains(motif::Functions::Resize)
                         || f.contains(motif::Functions::All)
                 });
             // If the motif hints indicate the user shouldn't be able to do anything
