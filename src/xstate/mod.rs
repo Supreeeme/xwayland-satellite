@@ -723,10 +723,12 @@ impl XState {
             wmhint_popup = motif_popup
                 && wm_hints.is_some_and(|h| !h.acquire_input_via_wm)
                 && !hints.functions.as_ref().is_some_and(|f| {
-                    f.contains(motif::Functions::Minimize)
-                        || f.contains(motif::Functions::Maximize)
-                        || f.contains(motif::Functions::Resize)
-                        || f.contains(motif::Functions::All)
+                    f.intersects(
+                        motif::Functions::Minimize
+                            | motif::Functions::Maximize
+                            | motif::Functions::Resize
+                            | motif::Functions::All,
+                    )
                 });
             // If the motif hints indicate the user shouldn't be able to do anything
             // to the window at all, it stands to reason it's probably a popup.
