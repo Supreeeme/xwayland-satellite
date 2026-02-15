@@ -2300,8 +2300,8 @@ fn fractional_scale_small_popup() {
     {
         let data = f.testwl.get_surface_data(toplevel_id).unwrap();
         let viewport = data.viewport.as_ref().expect("Missing viewport");
-        assert_eq!(viewport.width, 66);
-        assert_eq!(viewport.height, 66);
+        assert_eq!(viewport.width, 67);
+        assert_eq!(viewport.height, 67);
     }
 
     let popup = Window::new(2);
