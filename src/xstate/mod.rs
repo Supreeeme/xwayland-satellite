@@ -763,7 +763,7 @@ impl XState {
         for ty in window_types {
             match ty {
                 x if x == self.window_atoms.normal => is_popup = override_redirect || wmhint_popup,
-                x if x == self.window_atoms.dialog => is_popup = override_redirect,
+                x if x == self.window_atoms.dialog => is_popup = override_redirect || has_transient_for,
                 x if x == self.window_atoms.utility => is_popup = override_redirect || motif_popup,
                 x if [
                     self.window_atoms.menu,
