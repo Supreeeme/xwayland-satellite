@@ -1774,6 +1774,17 @@ fn output_offset_remove_output() {
 }
 
 #[test]
+fn remove_all_outputs() {
+    let (mut f, _) = TestFixture::new_with_compositor();
+
+    let (_, output) = f.new_output(0, 0);
+    f.run();
+
+    f.remove_output(output);
+    f.run();
+}
+
+#[test]
 fn output_offset_surface_positioning() {
     let (mut f, comp) = TestFixture::new_with_compositor();
 

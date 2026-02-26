@@ -701,25 +701,25 @@ impl<C: XConnection> ServerState<C> {
             let mut scale;
 
             let mut outputs = self.world.query_mut::<&OutputScaleFactor>().into_iter();
-            let (_, output_scale) = outputs.next().unwrap();
+            if let Some((_, output_scale)) = outputs.next() {
+                scale = output_scale.get();
 
-            scale = output_scale.get();
-
-            for (_, output_scale) in outputs {
-                if output_scale.get() != scale {
-                    mixed_scale = true;
-                    scale = scale.min(output_scale.get());
+                for (_, output_scale) in outputs {
+                    if output_scale.get() != scale {
+                        mixed_scale = true;
+                        scale = scale.min(output_scale.get());
+                    }
                 }
-            }
 
-            if mixed_scale {
-                warn!(
-                    "Mixed output scales detected, choosing to give apps the smallest detected scale ({scale}x)"
-                );
-            }
+                if mixed_scale {
+                    warn!(
+                        "Mixed output scales detected, choosing to give apps the smallest detected scale ({scale}x)"
+                    );
+                }
 
-            debug!("Using new scale {scale}");
-            self.new_scale = Some(scale);
+                debug!("Using new scale {scale}");
+                self.new_scale = Some(scale);
+            }
         }
 
         {
