@@ -20,8 +20,92 @@ impl WindowTypes {
     }
 }
 
+// The Tronche version of the ICCCM inexplicably leave out all of the `min` fields.
+// See the original ICCCM: https://www.x.org/docs/ICCCM/icccm.pdf page 22 (PDF page 27).
+struct WmNormalHints {
+    fields: [u32; 18],
+}
+impl From<WmNormalHints> for super::WmNormalHints {
+    fn from(value: WmNormalHints) -> Self {
+        value.fields.as_slice().into()
+    }
+}
+impl WmNormalHints {
+    fn new() -> Self {
+        Self { fields: [0; 18] }
+    }
+    /// If called after `program_pos`, both positions will be set to the value passed to `user_pos`.
+    fn user_pos(mut self, x: u32, y: u32) -> Self {
+        self.fields[0] |= WmSizeHintsFlags::UserPosition.bits();
+        self.fields[1] = x;
+        self.fields[2] = y;
+        self
+    }
+    /// If called after `program_size`, both sizes will be set to the value passed to `user_size`.
+    fn user_size(mut self, w: u32, h: u32) -> Self {
+        self.fields[0] |= WmSizeHintsFlags::UserSize.bits();
+        self.fields[3] = w;
+        self.fields[4] = h;
+        self
+    }
+    /// If called after `user_pos`, both positions will be set to the value passed to `program_pos`.
+    fn program_pos(mut self, x: u32, y: u32) -> Self {
+        self.fields[0] |= WmSizeHintsFlags::ProgramPosition.bits();
+        self.fields[1] = x;
+        self.fields[2] = y;
+        self
+    }
+    /// If called after `user_size`, both sizes will be set to the value passed to `program_size`.
+    fn program_size(mut self, w: u32, h: u32) -> Self {
+        self.fields[0] |= WmSizeHintsFlags::ProgramSize.bits();
+        self.fields[3] = w;
+        self.fields[4] = h;
+        self
+    }
+    fn min_size(mut self, w: u32, h: u32) -> Self {
+        self.fields[0] |= WmSizeHintsFlags::ProgramMinSize.bits();
+        self.fields[5] = w;
+        self.fields[6] = h;
+        self
+    }
+    fn max_size(mut self, w: u32, h: u32) -> Self {
+        self.fields[0] |= WmSizeHintsFlags::ProgramMaxSize.bits();
+        self.fields[7] = w;
+        self.fields[8] = h;
+        self
+    }
+    fn resize_incr(mut self, w: u32, h: u32) -> Self {
+        self.fields[0] |= WmSizeHintsFlags::ResizeIncrement.bits();
+        self.fields[9] = w;
+        self.fields[10] = h;
+        self
+    }
+    /// Each tuple's first number is its numerator and second is its denominator.
+    fn _aspect_ratios(mut self, min: (u32, u32), max: (u32, u32)) -> Self {
+        self.fields[0] |= WmSizeHintsFlags::AspectRatios.bits();
+        self.fields[11] = min.0;
+        self.fields[12] = min.1;
+        self.fields[13] = max.0;
+        self.fields[14] = max.1;
+        self
+    }
+    fn base_size(mut self, w: u32, h: u32) -> Self {
+        self.fields[0] |= WmSizeHintsFlags::BaseSize.bits();
+        self.fields[15] = w;
+        self.fields[16] = h;
+        self
+    }
+    fn win_gravity(mut self, gravity: xcb::x::Gravity) -> Self {
+        self.fields[0] |= WmSizeHintsFlags::Gravity.bits();
+        self.fields[17] = gravity as _;
+        self
+    }
+}
+
 mod window_role_heuristics {
+    use super::WmNormalHints;
     use crate::xstate::{WindowRole, WindowRoleHeuristics, WindowTypes, motif};
+    use xcb::x::Gravity;
 
     #[test]
     fn default() {
@@ -35,10 +119,15 @@ mod window_role_heuristics {
     #[test]
     fn ghidra_popup() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .program_pos(221, 589)
+            .program_size(133, 28)
+            .win_gravity(Gravity::NorthWest);
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.dialog],
             has_transient_for: true,
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0, 0, 0, 0].as_slice())),
+            wm_normal_hints: Some(wm_normal_hints.into()),
             wm_class: Some("ghidra-Ghidra".into()),
             ..Default::default()
         };
@@ -49,9 +138,11 @@ mod window_role_heuristics {
     #[test]
     fn reaper_main_app() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new().program_size(936, 1048);
         let win = WindowRoleHeuristics {
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0x11, 0, 0].as_slice())),
             window_types: vec![win_types.normal],
+            wm_normal_hints: Some(wm_normal_hints.into()),
             wm_class: Some("REAPER".into()),
             ..Default::default()
         };
@@ -62,8 +153,13 @@ mod window_role_heuristics {
     #[test]
     fn reaper_dialog() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .program_pos(0, 0)
+            .min_size(382, 160)
+            .max_size(382, 160);
         let win = WindowRoleHeuristics {
             override_redirect: true,
+            wm_normal_hints: Some(wm_normal_hints.into()),
             wm_class: Some("REAPER".into()),
             ..Default::default()
         };
@@ -100,9 +196,14 @@ mod window_role_heuristics {
     #[test]
     fn git_gui_popup() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .user_pos(0, 0)
+            .min_size(1, 1)
+            .resize_incr(1, 1);
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.popup_menu],
             override_redirect: true,
+            wm_normal_hints: Some(wm_normal_hints.into()),
             wm_class: Some("Menu".into()),
             ..Default::default()
         };
@@ -125,12 +226,21 @@ mod window_role_heuristics {
     #[test]
     fn wechat_popup() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .user_pos(2178, 102)
+            .user_size(560, 112)
+            .min_size(560, 112)
+            .max_size(560, 112)
+            .resize_incr(2, 2)
+            .base_size(0, 0)
+            .win_gravity(Gravity::Static);
         let win = WindowRoleHeuristics {
             override_redirect: true,
             has_transient_for: true,
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 1, 0, 0, 0].as_slice())),
             window_types: vec![win_types.utility, win_types.normal],
             wm_class: Some("wechat".into()),
+            wm_normal_hints: Some(wm_normal_hints.into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
@@ -141,8 +251,14 @@ mod window_role_heuristics {
     #[test]
     fn godot_popup() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .program_pos(2542, 338)
+            .program_size(245, 329)
+            .min_size(245, 329)
+            .max_size(245, 329);
         let win = WindowRoleHeuristics {
             has_transient_for: true,
+            wm_normal_hints: Some(wm_normal_hints.into()),
             override_redirect: true,
             window_types: vec![win_types.utility],
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
@@ -156,8 +272,14 @@ mod window_role_heuristics {
     #[test]
     fn material_maker_popup() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .program_pos(2453, 413)
+            .program_size(340, 400)
+            .min_size(340, 400)
+            .max_size(340, 400);
         let win = WindowRoleHeuristics {
             has_transient_for: true,
+            wm_normal_hints: Some(wm_normal_hints.into()),
             window_types: vec![win_types.utility],
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
             wm_class: Some("Material Maker".into()),
@@ -171,8 +293,14 @@ mod window_role_heuristics {
     #[test]
     fn ardour_vst3_plugin() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .program_pos(0, 0)
+            .min_size(1190, 769)
+            .max_size(1190, 769)
+            .win_gravity(Gravity::NorthWest);
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.utility],
+            wm_normal_hints: Some(wm_normal_hints.into()),
             wm_class: Some("Ardour-8.12.0".into()),
             ..Default::default()
         };
@@ -181,10 +309,35 @@ mod window_role_heuristics {
     #[test]
     fn ardour_midi_setup_dialog() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .program_pos(0, 0)
+            .min_size(633, 397)
+            .win_gravity(Gravity::NorthWest);
         let win = WindowRoleHeuristics {
             has_transient_for: true,
             window_types: vec![win_types.utility],
+            wm_normal_hints: Some(wm_normal_hints.into()),
             wm_class: Some("Ardour-8.12.0".into()),
+            ..Default::default()
+        };
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
+    }
+
+    // https://github.com/Supreeeme/xwayland-satellite/issues/383
+    // UTILITY types which can be resized (min_size != max_size) should be top-level
+    #[test]
+    fn davinci_resolve_transcription() {
+        let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .user_pos(4225, 154)
+            .user_size(660, 657)
+            .min_size(660, 590)
+            .win_gravity(Gravity::Static);
+        let win = WindowRoleHeuristics {
+            has_transient_for: true,
+            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0x1, 0, 0, 0].as_slice())),
+            window_types: vec![win_types.utility, win_types.normal],
+            wm_normal_hints: Some(wm_normal_hints.into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
@@ -210,9 +363,15 @@ mod window_role_heuristics {
     #[test]
     fn yabridge_vst_menu() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .program_pos(1920, 0)
+            .min_size(307, 700)
+            .max_size(307, 700)
+            .win_gravity(Gravity::Static);
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.normal],
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x24, 0, 0, 0].as_slice())),
+            wm_normal_hints: Some(wm_normal_hints.into()),
             wm_class: Some("yabridge-host.exe.so".into()),
             ..Default::default()
         };
@@ -224,9 +383,15 @@ mod window_role_heuristics {
     #[test]
     fn steam_pixel_composer() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .program_pos(2387, 267)
+            .min_size(1600, 800)
+            .max_size(1600, 800)
+            .win_gravity(Gravity::Static);
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.normal],
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x24, 0, 0, 0].as_slice())),
+            wm_normal_hints: Some(wm_normal_hints.into()),
             wm_class: Some("steam_app_2299510".into()),
             ..Default::default()
         };
@@ -235,9 +400,15 @@ mod window_role_heuristics {
     #[test]
     fn battlenet_login() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .program_pos(2173, -19 as _)
+            .min_size(362, 645)
+            .max_size(362, 645)
+            .win_gravity(Gravity::Static);
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.normal],
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x2c, 0, 0, 0].as_slice())),
+            wm_normal_hints: Some(wm_normal_hints.into()),
             wm_class: Some("battle.net.exe".into()),
             ..Default::default()
         };
@@ -247,9 +418,13 @@ mod window_role_heuristics {
     #[test]
     fn wallpaper_engine() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .program_pos(1920, 0)
+            .win_gravity(Gravity::Static);
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.normal],
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x3e, 0, 0, 0].as_slice())),
+            wm_normal_hints: Some(wm_normal_hints.into()),
             wm_class: Some("steam_app_431960".into()),
             ..Default::default()
         };
@@ -261,10 +436,16 @@ mod window_role_heuristics {
     #[test]
     fn clip_studio_paint_menu() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .program_pos(0, 1080)
+            .min_size(363, 801)
+            .max_size(363, 801)
+            .win_gravity(Gravity::Static);
         let win = WindowRoleHeuristics {
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x24, 0, 0, 0].as_slice())),
             window_types: vec![win_types.dialog],
             has_transient_for: true,
+            wm_normal_hints: Some(wm_normal_hints.into()),
             wm_class: Some("clipstudiopaint.exe".into()),
             ..Default::default()
         };
@@ -276,11 +457,20 @@ mod window_role_heuristics {
     #[test]
     fn davinci_resolve_timeline_menu() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .user_pos(686, 642)
+            .user_size(992, 740)
+            .min_size(992, 740)
+            .max_size(992, 740)
+            .resize_incr(2, 2)
+            .base_size(-2 as _, -2 as _)
+            .win_gravity(Gravity::Static);
         let win = WindowRoleHeuristics {
             has_transient_for: true,
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0x1, 0, 0, 0].as_slice())),
             window_types: vec![win_types.dialog, win_types.normal],
             wm_class: Some("resolve".into()),
+            wm_normal_hints: Some(wm_normal_hints.into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
@@ -291,11 +481,17 @@ mod window_role_heuristics {
     #[test]
     fn krita_color_picker() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .user_pos(794, 234)
+            .user_size(505, 490)
+            .min_size(371, 356)
+            .win_gravity(Gravity::Static);
         let win = WindowRoleHeuristics {
             has_transient_for: true,
             motif_wm_hints: Some(motif::Hints::from([0x3, 0x26, 0x1e, 0x0, 0x0].as_slice())),
             window_types: vec![win_types.dialog, win_types.normal],
             wm_class: Some("krita".into()),
+            wm_normal_hints: Some(wm_normal_hints.into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);

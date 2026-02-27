@@ -644,8 +644,8 @@ impl XState {
             server_state.set_win_class(window, class);
         }
 
-        let size_hints = self.get_wm_size_hints(window);
-        if let Some(hints) = size_hints.resolve()? {
+        let size_hints = self.get_wm_size_hints(window).resolve()?;
+        if let Some(hints) = size_hints {
             server_state.set_size_hints(window, hints);
         }
 
@@ -679,6 +679,7 @@ impl XState {
             window_types,
             motif_wm_hints,
             wm_class,
+            wm_normal_hints: size_hints,
         };
         let role = heuristics.guess_window_role(&self.window_atoms);
         if log::log_enabled!(target: "window_role_heuristics", log::Level::Debug) {
@@ -1040,8 +1041,16 @@ bitflags! {
     /// From ICCCM spec.
     /// https://tronche.com/gui/x/icccm/sec-4.html#s-4.1.2.3
     pub struct WmSizeHintsFlags: u32 {
+        const UserPosition = 1;
+        const UserSize = 2;
+        const ProgramPosition = 4;
+        const ProgramSize = 8;
         const ProgramMinSize = 16;
         const ProgramMaxSize = 32;
+        const ResizeIncrement = 64;
+        const AspectRatios = 128;
+        const BaseSize = 256;
+        const Gravity = 512;
     }
 }
 
@@ -1222,6 +1231,7 @@ struct WindowRoleHeuristics {
     window_types: Vec<x::Atom>,
     motif_wm_hints: Option<motif::Hints>,
     wm_class: Option<String>,
+    wm_normal_hints: Option<WmNormalHints>,
 }
 impl WindowRoleHeuristics {
     fn guess_window_role(&self, window_atoms: &WindowTypes) -> WindowRole {
@@ -1246,6 +1256,13 @@ impl WindowRoleHeuristics {
             return WindowRole::Popup;
         }
 
+        let forced_size = self.wm_normal_hints.is_some_and(|hints| {
+            hints
+                .min_size
+                .zip(hints.max_size)
+                .is_some_and(|(min, max)| min == max)
+        });
+
         let mut window_types = self.window_types.clone();
         if self.window_types.is_empty() {
             if !self.override_redirect && self.has_transient_for {
@@ -1261,7 +1278,9 @@ impl WindowRoleHeuristics {
                 x if x == window_atoms.dialog => {
                     return WindowRole::new_basic(self.has_transient_for && motif_no_decor);
                 }
-                x if x == window_atoms.utility => return WindowRole::new_basic(motif_no_decor),
+                x if x == window_atoms.utility => {
+                    return WindowRole::new_basic(motif_no_decor && forced_size);
+                }
                 x if [
                     window_atoms.menu,
                     window_atoms.popup_menu,
@@ -1284,7 +1303,7 @@ impl WindowRoleHeuristics {
     fn log(&self, connection: &xcb::Connection) -> String {
         format!(
             "override_redirect: {}, has_transient_for: {}, window_types: {:?}, \
-            motif_wm_hints: {:?}, wm_class: {:?}",
+            motif_wm_hints: {:?}, wm_class: {:?}, wm_normal_hints: {:?}",
             self.override_redirect,
             self.has_transient_for,
             self.window_types
@@ -1293,6 +1312,7 @@ impl WindowRoleHeuristics {
                 .collect::<Vec<_>>(),
             self.motif_wm_hints,
             self.wm_class,
+            self.wm_normal_hints,
         )
     }
 }
