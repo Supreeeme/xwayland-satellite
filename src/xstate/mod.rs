@@ -65,35 +65,24 @@ macro_rules! unwrap_or_skip_bad_window_ret {
     };
 }
 
-/// Essentially a trait alias.
-trait PropertyResolver {
-    type Output;
-    fn resolve(self, reply: x::GetPropertyReply) -> Self::Output;
-}
-impl<T, Output> PropertyResolver for T
-where
-    T: FnOnce(x::GetPropertyReply) -> Output,
-{
-    type Output = Output;
-    fn resolve(self, reply: x::GetPropertyReply) -> Self::Output {
-        (self)(reply)
-    }
-}
-
-struct PropertyCookieWrapper<'a, F: PropertyResolver> {
+struct PropertyCookieWrapper<'a> {
     connection: &'a xcb::Connection,
     cookie: x::GetPropertyCookie,
-    resolver: F,
 }
-
-impl<F: PropertyResolver> PropertyCookieWrapper<'_, F> {
+impl PropertyCookieWrapper<'_> {
+    fn new(
+        connection: &'_ xcb::Connection,
+        cookie: x::GetPropertyCookie,
+    ) -> PropertyCookieWrapper<'_> {
+        PropertyCookieWrapper { connection, cookie }
+    }
     /// Get the result from our property cookie.
-    fn resolve(self) -> XResult<Option<F::Output>> {
+    fn resolve<F>(self, f: impl FnOnce(x::GetPropertyReply) -> F) -> XResult<Option<F>> {
         let reply = self.connection.wait_for_reply(self.cookie)?;
         if reply.r#type() == x::ATOM_NONE {
             Ok(None)
         } else {
-            Ok(Some(self.resolver.resolve(reply)))
+            Ok(Some(f(reply)))
         }
     }
 }
@@ -625,42 +614,38 @@ impl XState {
         server_state: &mut super::RealServerState,
         window: x::Window,
     ) -> XResult<()> {
-        let mut title = self.get_net_wm_name(window).resolve()?;
+        let mut title = self.get_net_wm_name(window)?;
         if title.is_none() {
-            title = self.get_wm_name(window).resolve()?;
+            title = self.get_wm_name(window)?;
         }
         if let Some(name) = title {
             server_state.set_win_title(window, name);
         }
 
-        let class = self.get_wm_class(window);
-        if let Some(class) = class.resolve()? {
+        if let Some(class) = self.get_wm_class(window)? {
             server_state.set_win_class(window, class);
         }
 
-        let size_hints = self.get_wm_size_hints(window);
-        if let Some(hints) = size_hints.resolve()? {
+        let size_hints = self.get_wm_size_hints(window)?;
+        if let Some(hints) = size_hints {
             server_state.set_size_hints(window, hints);
         }
 
-        let motif_wm_hints = self.get_motif_wm_hints(window).resolve()?;
+        let motif_wm_hints = self.get_motif_wm_hints(window)?;
         if let Some(decorations) = motif_wm_hints.as_ref().and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
         }
 
-        let wm_hints = self.get_wm_hints(window);
-        let wm_hints = wm_hints.resolve()?;
+        let wm_hints = self.get_wm_hints(window)?;
 
-        let transient_for = self.get_transient_for(window).resolve()?.flatten();
+        let transient_for = self.get_transient_for(window)?;
         let override_redirect = self.get_override_redirect(window)?;
 
         let window_types = self
-            .get_net_wm_window_types(window)
-            .resolve()?
+            .get_net_wm_window_types(window)?
             .unwrap_or_else(Vec::new);
         let skip_taskbar = self
-            .get_net_wm_state(window)
-            .resolve()?
+            .get_net_wm_state(window)?
             .map(|a| a.contains(&self.atoms.skip_taskbar));
 
         let heuristics = WindowRoleHeuristics {
@@ -705,10 +690,7 @@ impl XState {
         })
     }
 
-    fn get_wm_class(
-        &self,
-        window: x::Window,
-    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = String>> {
+    fn get_wm_class(&self, window: x::Window) -> XResult<Option<String>> {
         let cookie = self.get_property_cookie(window, x::ATOM_WM_CLASS, x::ATOM_STRING, 256);
         let resolver = move |reply: x::GetPropertyReply| {
             let data: &[u8] = reply.value();
@@ -727,17 +709,10 @@ impl XState {
             trace!("{window:?} class: {class:?}");
             class.to_string_lossy().to_string()
         };
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie,
-            resolver,
-        }
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
-    fn get_wm_name(
-        &self,
-        window: x::Window,
-    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = WmName>> {
+    fn get_wm_name(&self, window: x::Window) -> XResult<Option<WmName>> {
         let cookie = self.get_property_cookie(window, x::ATOM_WM_NAME, x::ATOM_STRING, 256);
         let resolver = |reply: x::GetPropertyReply| {
             let data: &[u8] = reply.value();
@@ -748,17 +723,10 @@ impl XState {
             WmName::WmName(name)
         };
 
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie,
-            resolver,
-        }
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
-    fn get_net_wm_name(
-        &self,
-        window: x::Window,
-    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = WmName>> {
+    fn get_net_wm_name(&self, window: x::Window) -> XResult<Option<WmName>> {
         let cookie =
             self.get_property_cookie(window, self.atoms.net_wm_name, self.atoms.utf8_string, 256);
         let resolver = |reply: x::GetPropertyReply| {
@@ -768,17 +736,10 @@ impl XState {
             WmName::NetWmName(name)
         };
 
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie,
-            resolver,
-        }
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
-    fn get_wm_hints(
-        &self,
-        window: x::Window,
-    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = WmHints>> {
+    fn get_wm_hints(&self, window: x::Window) -> XResult<Option<WmHints>> {
         let cookie = self.get_property_cookie(window, x::ATOM_WM_HINTS, x::ATOM_WM_HINTS, 9);
         let resolver = |reply: x::GetPropertyReply| {
             let data: &[u32] = reply.value();
@@ -786,17 +747,10 @@ impl XState {
             trace!("wm hints: {hints:?}");
             hints
         };
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie,
-            resolver,
-        }
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
-    fn get_wm_size_hints(
-        &self,
-        window: x::Window,
-    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = WmNormalHints>> {
+    fn get_wm_size_hints(&self, window: x::Window) -> XResult<Option<WmNormalHints>> {
         let cookie =
             self.get_property_cookie(window, x::ATOM_WM_NORMAL_HINTS, x::ATOM_WM_SIZE_HINTS, 9);
         let resolver = |reply: x::GetPropertyReply| {
@@ -804,17 +758,10 @@ impl XState {
             WmNormalHints::from(data)
         };
 
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie,
-            resolver,
-        }
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
-    fn get_motif_wm_hints(
-        &self,
-        window: x::Window,
-    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = motif::Hints>> {
+    fn get_motif_wm_hints(&self, window: x::Window) -> XResult<Option<motif::Hints>> {
         let cookie = self.get_property_cookie(
             window,
             self.atoms.motif_wm_hints,
@@ -826,51 +773,28 @@ impl XState {
             motif::Hints::from(data)
         };
 
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie,
-            resolver,
-        }
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
-    fn get_transient_for(
-        &self,
-        window: x::Window,
-    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = Option<x::Window>>> {
+    fn get_transient_for(&self, window: x::Window) -> XResult<Option<x::Window>> {
         let cookie =
             self.get_property_cookie(window, self.atoms.wm_transient_for, x::ATOM_WINDOW, 1);
         let resolver = |reply: x::GetPropertyReply| reply.value::<x::Window>().first().copied();
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie,
-            resolver,
-        }
+        PropertyCookieWrapper::new(&self.connection, cookie)
+            .resolve(resolver)
+            .map(Option::flatten)
     }
 
-    fn get_net_wm_window_types(
-        &self,
-        window: x::Window,
-    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = Vec<x::Atom>>> {
+    fn get_net_wm_window_types(&self, window: x::Window) -> XResult<Option<Vec<x::Atom>>> {
         let cookie = self.get_property_cookie(window, self.window_atoms.ty, x::ATOM_ATOM, 10);
         let resolver = |reply: x::GetPropertyReply| reply.value::<x::Atom>().to_vec();
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie,
-            resolver,
-        }
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
-    fn get_net_wm_state(
-        &self,
-        window: x::Window,
-    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = Vec<x::Atom>>> {
+    fn get_net_wm_state(&self, window: x::Window) -> XResult<Option<Vec<x::Atom>>> {
         let cookie = self.get_property_cookie(window, self.atoms.net_wm_state, x::ATOM_ATOM, 10);
         let resolver = |reply: x::GetPropertyReply| reply.value::<x::Atom>().to_vec();
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie,
-            resolver,
-        }
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
     fn get_override_redirect(&self, window: x::Window) -> XResult<bool> {
@@ -921,35 +845,28 @@ impl XState {
 
         match event.atom() {
             x if x == x::ATOM_WM_HINTS => {
-                let hints =
-                    unwrap_or_skip_bad_window_ret!(self.get_wm_hints(window).resolve()).unwrap();
+                let hints = unwrap_or_skip_bad_window_ret!(self.get_wm_hints(window)).unwrap();
                 server_state.set_win_hints(window, hints);
             }
             x if x == x::ATOM_WM_NORMAL_HINTS => {
-                let hints =
-                    unwrap_or_skip_bad_window_ret!(self.get_wm_size_hints(window).resolve())
-                        .unwrap();
+                let hints = unwrap_or_skip_bad_window_ret!(self.get_wm_size_hints(window)).unwrap();
                 server_state.set_size_hints(window, hints);
             }
             x if x == x::ATOM_WM_NAME => {
-                let name =
-                    unwrap_or_skip_bad_window_ret!(self.get_wm_name(window).resolve()).unwrap();
+                let name = unwrap_or_skip_bad_window_ret!(self.get_wm_name(window)).unwrap();
                 server_state.set_win_title(window, name);
             }
             x if x == self.atoms.net_wm_name => {
-                let name =
-                    unwrap_or_skip_bad_window_ret!(self.get_net_wm_name(window).resolve()).unwrap();
+                let name = unwrap_or_skip_bad_window_ret!(self.get_net_wm_name(window)).unwrap();
                 server_state.set_win_title(window, name);
             }
             x if x == x::ATOM_WM_CLASS => {
-                let class =
-                    unwrap_or_skip_bad_window_ret!(self.get_wm_class(window).resolve()).unwrap();
+                let class = unwrap_or_skip_bad_window_ret!(self.get_wm_class(window)).unwrap();
                 server_state.set_win_class(window, class);
             }
             x if x == self.atoms.motif_wm_hints => {
                 let motif_hints =
-                    unwrap_or_skip_bad_window_ret!(self.get_motif_wm_hints(window).resolve())
-                        .unwrap();
+                    unwrap_or_skip_bad_window_ret!(self.get_motif_wm_hints(window)).unwrap();
                 if let Some(decorations) = motif_hints.decorations {
                     server_state.set_win_decorations(window, decorations);
                 }
