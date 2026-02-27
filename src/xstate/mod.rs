@@ -654,6 +654,7 @@ impl XState {
             window_types,
             motif_wm_hints,
             wm_hints,
+            wm_normal_hints: size_hints,
             skip_taskbar,
         };
         let is_popup = heuristics.guess_window_role(&self.window_atoms);
@@ -1109,6 +1110,7 @@ struct WindowRoleHeuristics {
     window_types: Vec<x::Atom>,
     motif_wm_hints: Option<motif::Hints>,
     wm_hints: Option<WmHints>,
+    wm_normal_hints: Option<WmNormalHints>,
     skip_taskbar: Option<bool>,
 }
 impl WindowRoleHeuristics {
@@ -1119,6 +1121,7 @@ impl WindowRoleHeuristics {
 
         let mut motif_no_decor = false;
         let mut wmhint_popup = false;
+        let mut forced_size = false;
         if let Some(hints) = self.motif_wm_hints {
             motif_no_decor = hints.decorations.is_some_and(|d| d.is_clientside());
             // WMHINTS is considered popup only if client is not decorated && client does not
@@ -1144,6 +1147,12 @@ impl WindowRoleHeuristics {
                 return true;
             }
         }
+        if let Some(hints) = self.wm_normal_hints {
+            forced_size = hints
+                .min_size
+                .zip(hints.max_size)
+                .is_some_and(|(min, max)| min == max);
+        }
 
         let mut window_types = self.window_types.clone();
         if self.window_types.is_empty() {
@@ -1158,7 +1167,7 @@ impl WindowRoleHeuristics {
             match ty {
                 x if x == window_atoms.normal => return wmhint_popup,
                 x if x == window_atoms.dialog => return self.has_transient_for,
-                x if x == window_atoms.utility => return motif_no_decor,
+                x if x == window_atoms.utility => return motif_no_decor && forced_size,
                 x if [
                     window_atoms.menu,
                     window_atoms.popup_menu,
@@ -1182,7 +1191,7 @@ impl WindowRoleHeuristics {
     fn log(&self, connection: &xcb::Connection) -> String {
         format!(
             "override_redirect: {}, has_transient_for: {}, window_types: {:?}, \
-            motif_wm_hints: {:?}, wm_hints: {:?}, skip_taskbar: {:?}",
+            motif_wm_hints: {:?}, wm_hints: {:?}, wm_normal_hints: {:?}, skip_taskbar: {:?}",
             self.override_redirect,
             self.has_transient_for,
             self.window_types
@@ -1191,6 +1200,7 @@ impl WindowRoleHeuristics {
                 .collect::<Vec<_>>(),
             self.motif_wm_hints,
             self.wm_hints,
+            self.wm_normal_hints,
             self.skip_taskbar
         )
     }

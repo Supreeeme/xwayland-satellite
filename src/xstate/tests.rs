@@ -21,7 +21,7 @@ impl WindowTypes {
 }
 
 mod wrh {
-    use crate::xstate::{WindowRoleHeuristics, WindowTypes, WmHints, motif};
+    use crate::xstate::{WindowRoleHeuristics, WindowTypes, WmHints, WmNormalHints, motif};
 
     #[test]
     fn default() {
@@ -35,12 +35,16 @@ mod wrh {
     #[test]
     fn ghidra_popup() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = [
+            0x20c_u32, 221, 589, 133, 28, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ];
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.dialog],
             skip_taskbar: Some(true),
             wm_hints: Some(WmHints::from([0_u32, 0, 0, 0, 0, 0, 0, 0, 0].as_slice())),
             has_transient_for: true,
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0, 0, 0, 0].as_slice())),
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
         assert!(win.guess_window_role(&win_types));
@@ -50,12 +54,16 @@ mod wrh {
     #[test]
     fn reaper_main_app() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = [
+            0x008_u32, 0, 0, 936, 1048, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         let win = WindowRoleHeuristics {
             wm_hints: Some(WmHints::from(
                 [0x043_u32, 1, 1, 0, 0, 0, 0, 0, 0x3e00075].as_slice(),
             )),
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0x11, 0, 0].as_slice())),
             window_types: vec![win_types.normal],
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
         assert!(!win.guess_window_role(&win_types));
@@ -65,12 +73,16 @@ mod wrh {
     #[test]
     fn reaper_dialog() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = [
+            0x034_u32, 0, 0, 0, 0, 382, 160, 382, 160, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         let win = WindowRoleHeuristics {
             override_redirect: true,
             wm_hints: Some(WmHints::from(
                 [0x067_u32, 1, 1, 0x4000128, 0, 0, 0, 0x400012e, 0x4000001].as_slice(),
             )),
             skip_taskbar: Some(true),
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
         assert!(win.guess_window_role(&win_types));
@@ -106,9 +118,11 @@ mod wrh {
     #[test]
     fn git_gui_popup() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = [0x051_u32, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0];
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.popup_menu],
             override_redirect: true,
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             wm_hints: Some(WmHints::from(
                 [0x003_u32, 1, 1, 0, 0, 0, 0, 0, 0].as_slice(),
             )),
@@ -134,6 +148,9 @@ mod wrh {
     #[test]
     fn wechat_popup() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = [
+            0x373_u32, 2178, 102, 560, 112, 560, 112, 560, 112, 2, 2, 0, 0, 0, 0, 0, 0, 10,
+        ];
         let win = WindowRoleHeuristics {
             override_redirect: true,
             has_transient_for: true,
@@ -142,6 +159,7 @@ mod wrh {
             wm_hints: Some(WmHints::from(
                 [0x041_u32, 0, 0, 0, 0, 0, 0, 0, 0xa00008].as_slice(),
             )),
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
         assert!(win.guess_window_role(&win_types));
@@ -152,8 +170,12 @@ mod wrh {
     #[test]
     fn godot_popup() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = [
+            0x03c_u32, 2542, 338, 245, 329, 245, 329, 245, 329, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         let win = WindowRoleHeuristics {
             has_transient_for: true,
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             override_redirect: true,
             window_types: vec![win_types.utility],
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
@@ -166,8 +188,12 @@ mod wrh {
     #[test]
     fn material_maker_popup() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = [
+            0x03c_u32, 2453, 413, 340, 400, 340, 400, 340, 400, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         let win = WindowRoleHeuristics {
             has_transient_for: true,
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             window_types: vec![win_types.utility],
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
             ..Default::default()
@@ -180,11 +206,15 @@ mod wrh {
     #[test]
     fn ardour_vst3_plugin() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = [
+            0x234_u32, 0, 0, 0, 0, 1190, 769, 1190, 769, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ];
         let win = WindowRoleHeuristics {
             wm_hints: Some(WmHints::from(
                 [0x067_u32, 1, 1, 0x16002e2, 0, 0, 0, 0x16002e3, 0x1600001].as_slice(),
             )),
             window_types: vec![win_types.utility],
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
         assert!(!win.guess_window_role(&win_types));
@@ -192,12 +222,37 @@ mod wrh {
     #[test]
     fn ardour_midi_setup_dialog() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = [
+            0x214_u32, 0, 0, 0, 0, 633, 397, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ];
         let win = WindowRoleHeuristics {
             wm_hints: Some(WmHints::from(
                 [0x067_u32, 1, 1, 0x14002ce, 0, 0, 0, 0x14002cf, 0x1400001].as_slice(),
             )),
             has_transient_for: true,
             window_types: vec![win_types.utility],
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
+            ..Default::default()
+        };
+        assert!(!win.guess_window_role(&win_types));
+    }
+
+    // https://github.com/Supreeeme/xwayland-satellite/issues/383
+    // UTILITY types which can be resized (min_size != max_size) should be top-level
+    #[test]
+    fn davinci_resolve_transcription() {
+        let win_types = WindowTypes::new();
+        let wm_normal_hints = [
+            0x213_u32, 4225, 154, 660, 657, 660, 590, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10,
+        ];
+        let win = WindowRoleHeuristics {
+            has_transient_for: true,
+            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0x1, 0, 0, 0].as_slice())),
+            window_types: vec![win_types.utility, win_types.normal],
+            wm_hints: Some(WmHints::from(
+                [0x041_u32, 1, 0, 0, 0, 0, 0, 0, 0x600008].as_slice(),
+            )),
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
         assert!(!win.guess_window_role(&win_types));
@@ -222,6 +277,9 @@ mod wrh {
     #[test]
     fn yabridge_vst_menu() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = [
+            0x234_u32, 1920, 0, 0, 0, 307, 700, 307, 700, 0, 0, 0, 0, 0, 0, 0, 0, 10,
+        ];
         let win = WindowRoleHeuristics {
             skip_taskbar: Some(true),
             wm_hints: Some(WmHints::from(
@@ -229,6 +287,7 @@ mod wrh {
             )),
             window_types: vec![win_types.normal],
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x24, 0, 0, 0].as_slice())),
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
         assert!(win.guess_window_role(&win_types));
@@ -236,12 +295,16 @@ mod wrh {
     #[test]
     fn steam_pixel_composer() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = [
+            0x234_u32, 2387, 267, 0, 0, 1600, 800, 1600, 800, 0, 0, 0, 0, 0, 0, 0, 0, 10,
+        ];
         let win = WindowRoleHeuristics {
             wm_hints: Some(WmHints::from(
                 [0x067_u32, 0, 1, 0x4600036, 0, 0, 0, 0x4600038, 0x4800001].as_slice(),
             )),
             window_types: vec![win_types.normal],
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x24, 0, 0, 0].as_slice())),
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
         assert!(win.guess_window_role(&win_types));
@@ -249,12 +312,16 @@ mod wrh {
     #[test]
     fn battlenet_login() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = [
+            0x234_u32, 2173, -19 as _, 0, 0, 362, 645, 362, 645, 0, 0, 0, 0, 0, 0, 0, 0, 10,
+        ];
         let win = WindowRoleHeuristics {
             wm_hints: Some(WmHints::from(
                 [0x067_u32, 0, 1, 0x30005d9, 0, 0, 0, 0x30005db, 0x320000a].as_slice(),
             )),
             window_types: vec![win_types.normal],
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x2c, 0, 0, 0].as_slice())),
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
         assert!(!win.guess_window_role(&win_types));
@@ -266,12 +333,16 @@ mod wrh {
     #[test]
     fn wallpaper_engine() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = [
+            0x204_u32, 1920, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10,
+        ];
         let win = WindowRoleHeuristics {
             wm_hints: Some(WmHints::from(
                 [0x067_u32, 0, 1, 0x4a00031, 0, 0, 0, 0x4a00033, 0x4c00004].as_slice(),
             )),
             window_types: vec![win_types.normal],
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x3e, 0, 0, 0].as_slice())),
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
         assert!(!win.guess_window_role(&win_types));
@@ -282,6 +353,9 @@ mod wrh {
     #[test]
     fn clip_studio_paint_menu() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = [
+            0x234_u32, 0, 1080, 0, 0, 363, 801, 363, 801, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ];
         let win = WindowRoleHeuristics {
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x24, 0, 0, 0].as_slice())),
             wm_hints: Some(WmHints::from(
@@ -289,6 +363,7 @@ mod wrh {
             )),
             window_types: vec![win_types.dialog],
             has_transient_for: true,
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
         assert!(win.guess_window_role(&win_types));
@@ -299,6 +374,10 @@ mod wrh {
     #[test]
     fn davinci_resolve_timeline_menu() {
         let win_types = WindowTypes::new();
+        let wm_normal_hints = [
+            0x373_u32, 686, 642, 992, 740, 992, 740, 992, 740, 2, 2, 0, 0, 0, 0, -2 as _, -2 as _,
+            10,
+        ];
         let win = WindowRoleHeuristics {
             has_transient_for: true,
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 1, 0, 0, 0].as_slice())),
@@ -306,6 +385,7 @@ mod wrh {
             wm_hints: Some(WmHints::from(
                 [0x041_u32, 1, 0, 0, 0, 0, 0, 0, 0xa00008].as_slice(),
             )),
+            wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
         assert!(win.guess_window_role(&win_types));
