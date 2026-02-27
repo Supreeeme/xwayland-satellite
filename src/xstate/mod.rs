@@ -1157,7 +1157,7 @@ impl WindowRoleHeuristics {
         for ty in window_types {
             match ty {
                 x if x == window_atoms.normal => return wmhint_popup,
-                x if x == window_atoms.dialog => return false,
+                x if x == window_atoms.dialog => return self.has_transient_for,
                 x if x == window_atoms.utility => return motif_no_decor,
                 x if [
                     window_atoms.menu,

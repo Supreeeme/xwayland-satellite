@@ -276,4 +276,38 @@ mod wrh {
         };
         assert!(!win.guess_window_role(&win_types));
     }
+
+    // See also https://github.com/Supreeeme/xwayland-satellite/issues/280
+    // _NET_WM_WINDOW_TYPE_DIALOG is a pop-up if it has a window it is transient for
+    #[test]
+    fn clip_studio_paint_menu() {
+        let win_types = WindowTypes::new();
+        let win = WindowRoleHeuristics {
+            motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x24, 0, 0, 0].as_slice())),
+            wm_hints: Some(WmHints::from(
+                [0x067_u32, 0, 1, 0xe06180, 0, 0, 0, 0xe06182, 0x100000c].as_slice(),
+            )),
+            window_types: vec![win_types.dialog],
+            has_transient_for: true,
+            ..Default::default()
+        };
+        assert!(win.guess_window_role(&win_types));
+    }
+
+    // https://github.com/Supreeeme/xwayland-satellite/issues/307
+    // Same logic as above
+    #[test]
+    fn davinci_resolve_timeline_menu() {
+        let win_types = WindowTypes::new();
+        let win = WindowRoleHeuristics {
+            has_transient_for: true,
+            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 1, 0, 0, 0].as_slice())),
+            window_types: vec![win_types.dialog, win_types.normal],
+            wm_hints: Some(WmHints::from(
+                [0x041_u32, 1, 0, 0, 0, 0, 0, 0, 0xa00008].as_slice(),
+            )),
+            ..Default::default()
+        };
+        assert!(win.guess_window_role(&win_types));
+    }
 }
