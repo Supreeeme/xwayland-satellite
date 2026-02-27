@@ -7,7 +7,9 @@ pub(crate) mod selection;
 mod tests;
 
 use self::event::*;
-use crate::xstate::{Decorations, MoveResizeDirection, WindowDims, WmHints, WmName, WmNormalHints};
+use crate::xstate::{
+    Decorations, MoveResizeDirection, WindowDims, WindowRole, WmHints, WmName, WmNormalHints,
+};
 use crate::{X11Selection, XConnection, timespec_from_millis};
 use clientside::MyWorld;
 use decoration::{DecorationsData, DecorationsDataSatellite};
@@ -99,9 +101,9 @@ where
 
 #[derive(Default, Debug)]
 struct WindowAttributes {
-    is_popup: bool,
     acquire_input_via_wm: bool,
     has_take_focus: bool,
+    role: WindowRole,
     dims: WindowDims,
     size_hints: Option<WmNormalHints>,
     title: Option<WmName>,
@@ -137,7 +139,7 @@ impl WindowData {
         Self {
             mapped: false,
             attrs: WindowAttributes {
-                is_popup: override_redirect,
+                role: WindowRole::new_basic(override_redirect),
                 dims,
                 ..Default::default()
             },
@@ -883,17 +885,13 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         self.windows.insert(window, id);
     }
 
-    pub fn set_popup(&mut self, window: x::Window, is_popup: bool) {
+    pub fn set_window_role(&mut self, window: x::Window, role: WindowRole) {
         let Some(id) = self.windows.get(&window).copied() else {
             debug!("not setting popup for unknown window {window:?}");
             return;
         };
 
-        self.world
-            .get::<&mut WindowData>(id)
-            .unwrap()
-            .attrs
-            .is_popup = is_popup;
+        self.world.get::<&mut WindowData>(id).unwrap().attrs.role = role;
     }
 
     pub fn set_win_title(&mut self, window: x::Window, name: WmName) {
@@ -1066,7 +1064,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return true;
         };
 
-        !win.mapped || win.attrs.is_popup
+        !win.mapped || win.attrs.role.is_popup()
     }
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
@@ -1089,7 +1087,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         };
         if dims == win.attrs.dims {
             return;
-        } else if win.attrs.is_popup {
+        } else if win.attrs.role.is_popup() {
             win.attrs.dims = dims;
         }
 
@@ -1402,7 +1400,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             xdg_surface = self.xdg_wm_base.get_xdg_surface(&surface, &self.qh, entity);
 
             let window_data = data.get::<&WindowData>().unwrap();
-            if window_data.attrs.is_popup {
+            if window_data.attrs.role.is_popup() {
                 popup_for = self.last_hovered.or(self.last_focused_toplevel);
             }
 

@@ -629,169 +629,68 @@ impl XState {
         server_state: &mut super::RealServerState,
         window: x::Window,
     ) -> XResult<()> {
-        let name = self.get_net_wm_name(window);
-        let class = self.get_wm_class(window);
-        let size_hints = self.get_wm_size_hints(window);
-        let motif_wm_hints = self.get_motif_wm_hints(window);
-        let wm_hints = self.get_wm_hints(window);
-        let protocols = self.get_protocols(window);
-        let mut title = name.resolve()?;
+        let mut title = self.get_net_wm_name(window).resolve()?;
         if title.is_none() {
             title = self.get_wm_name(window).resolve()?;
         }
-
         if let Some(name) = title {
             server_state.set_win_title(window, name);
         }
+
+        let class = self.get_wm_class(window);
         if let Some(class) = class.resolve()? {
             server_state.set_win_class(window, class);
         }
+
+        let size_hints = self.get_wm_size_hints(window);
         if let Some(hints) = size_hints.resolve()? {
             server_state.set_size_hints(window, hints);
         }
+
+        let protocols = self.get_protocols(window);
         if let Some(reply) = protocols.resolve()? {
             let protocols: &[x::Atom] = reply.value();
             server_state.set_take_focus(window, protocols.contains(&self.atoms.wm_take_focus));
         }
-        let wmhints = wm_hints.resolve()?;
-        let motif_hints = motif_wm_hints.resolve()?;
-        if let Some(decorations) = motif_hints.as_ref().and_then(|m| m.decorations) {
+
+        let motif_wm_hints = self.get_motif_wm_hints(window).resolve()?;
+        if let Some(decorations) = motif_wm_hints.as_ref().and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
         }
-        if let Some(hints) = wmhints {
+
+        let wm_hints = self.get_wm_hints(window).resolve()?;
+        if let Some(hints) = wm_hints {
             server_state.set_win_hints(window, hints);
         }
 
-        let transient_for = self
-            .property_cookie_wrapper(
-                window,
-                self.atoms.wm_transient_for,
-                x::ATOM_WINDOW,
-                1,
-                |reply: x::GetPropertyReply| reply.value::<x::Window>().first().copied(),
-            )
-            .resolve()?
-            .flatten();
+        let transient_for = self.get_transient_for(window).resolve()?.flatten();
+        let override_redirect = self.get_override_redirect(window)?;
 
-        let is_popup =
-            self.guess_is_popup(window, motif_hints, wmhints, transient_for.is_some())?;
-        server_state.set_popup(window, is_popup);
-        if let Some(parent) = transient_for.and_then(|t| (!is_popup).then_some(t)) {
+        let window_types = self
+            .get_net_wm_window_types(window)
+            .resolve()?
+            .unwrap_or_else(Vec::new);
+
+        let heuristics = WindowRoleHeuristics {
+            override_redirect,
+            has_transient_for: transient_for.is_some(),
+            window_types,
+            motif_wm_hints,
+        };
+        let role = heuristics.guess_window_role(&self.window_atoms);
+        if log::log_enabled!(target: "window_role_heuristics", log::Level::Debug) {
+            debug!(
+                target: "window_role_heuristics",
+                "{window:?} set to {role:?} - properties: {}",
+                heuristics.log(&self.connection)
+            );
+        }
+        server_state.set_window_role(window, role);
+        if let Some(parent) = transient_for.and_then(|t| (!role.is_popup()).then_some(t)) {
             server_state.set_transient_for(window, parent);
         }
 
         Ok(())
-    }
-
-    fn property_cookie_wrapper<F: PropertyResolver>(
-        &self,
-        window: x::Window,
-        property: x::Atom,
-        ty: x::Atom,
-        len: u32,
-        resolver: F,
-    ) -> PropertyCookieWrapper<'_, F> {
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie: self.get_property_cookie(window, property, ty, len),
-            resolver,
-        }
-    }
-
-    fn guess_is_popup(
-        &self,
-        window: x::Window,
-        motif_hints: Option<motif::Hints>,
-        wm_hints: Option<WmHints>,
-        has_transient_for: bool,
-    ) -> XResult<bool> {
-        let mut motif_popup = false;
-        let mut has_skip_taskbar = None;
-
-        let attrs = self
-            .connection
-            .send_request(&x::GetWindowAttributes { window });
-
-        let atoms_vec = |reply: x::GetPropertyReply| reply.value::<x::Atom>().to_vec();
-        let window_types =
-            self.property_cookie_wrapper(window, self.window_atoms.ty, x::ATOM_ATOM, 10, atoms_vec);
-        let window_state = self.property_cookie_wrapper(
-            window,
-            self.atoms.net_wm_state,
-            x::ATOM_ATOM,
-            10,
-            atoms_vec,
-        );
-
-        if let Some(states) = window_state.resolve()? {
-            has_skip_taskbar = Some(states.contains(&self.atoms.skip_taskbar));
-        }
-        if let Some(hints) = motif_hints {
-            // If MOTIF_WM_HINTS provides no decorations for client assume its a popup
-            motif_popup = hints.decorations.is_some_and(|d| d.is_clientside());
-            // If the motif hints indicate the user shouldn't be able to do anything
-            // to the window at all, it stands to reason it's probably a popup.
-            if hints.functions.is_some_and(|f| f.is_empty()) {
-                return Ok(true);
-            }
-        }
-
-        let override_redirect = self.connection.wait_for_reply(attrs)?.override_redirect();
-        let mut is_popup = override_redirect;
-
-        let window_types = window_types.resolve()?.unwrap_or_else(|| {
-            if !override_redirect && has_transient_for {
-                vec![self.window_atoms.dialog]
-            } else {
-                vec![self.window_atoms.normal]
-            }
-        });
-
-        if log::log_enabled!(log::Level::Debug) {
-            let win_types = window_types
-                .iter()
-                .copied()
-                .map(|t| get_atom_name(&self.connection, t))
-                .collect::<Vec<_>>();
-
-            debug!("{window:?} window_types: {win_types:?}");
-        }
-        debug!("{window:?} override_redirect: {override_redirect:?}");
-
-        let mut known_window_type = false;
-        for ty in window_types {
-            match ty {
-                x if x == self.window_atoms.normal => is_popup = override_redirect,
-                x if x == self.window_atoms.dialog => is_popup = override_redirect,
-                x if x == self.window_atoms.utility => is_popup = override_redirect || motif_popup,
-                x if [
-                    self.window_atoms.menu,
-                    self.window_atoms.popup_menu,
-                    self.window_atoms.dropdown_menu,
-                    self.window_atoms.tooltip,
-                    self.window_atoms.drag_n_drop,
-                    self.window_atoms.combo,
-                ]
-                .contains(&x) =>
-                {
-                    is_popup = true;
-                }
-                _ => {
-                    continue;
-                }
-            }
-
-            known_window_type = true;
-            break;
-        }
-
-        if !known_window_type {
-            if let Some(has_skip_taskbar) = has_skip_taskbar {
-                is_popup = has_skip_taskbar || override_redirect;
-            }
-        }
-
-        Ok(is_popup)
     }
 
     fn get_property_cookie(
@@ -952,6 +851,43 @@ impl XState {
         }
     }
 
+    fn get_transient_for(
+        &self,
+        window: x::Window,
+    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = Option<x::Window>>> {
+        let cookie =
+            self.get_property_cookie(window, self.atoms.wm_transient_for, x::ATOM_WINDOW, 1);
+        let resolver = |reply: x::GetPropertyReply| reply.value::<x::Window>().first().copied();
+        PropertyCookieWrapper {
+            connection: &self.connection,
+            cookie,
+            resolver,
+        }
+    }
+
+    fn get_net_wm_window_types(
+        &self,
+        window: x::Window,
+    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = Vec<x::Atom>>> {
+        let cookie = self.get_property_cookie(window, self.window_atoms.ty, x::ATOM_ATOM, 10);
+        let resolver = |reply: x::GetPropertyReply| reply.value::<x::Atom>().to_vec();
+        PropertyCookieWrapper {
+            connection: &self.connection,
+            cookie,
+            resolver,
+        }
+    }
+
+    fn get_override_redirect(&self, window: x::Window) -> XResult<bool> {
+        self.connection
+            .wait_for_reply(
+                self.connection
+                    .send_request(&x::GetWindowAttributes { window }),
+            )
+            .map(|w| w.override_redirect())
+            .map_err(MaybeBadWindow::from)
+    }
+
     fn get_pid(&self, window: x::Window) -> Option<u32> {
         let Some(pid) = self
             .connection
@@ -1053,7 +989,6 @@ xcb::atoms_struct! {
         wm_pid => b"_NET_WM_PID" only_if_exists = false,
         net_wm_state => b"_NET_WM_STATE" only_if_exists = false,
         wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
-        skip_taskbar => b"_NET_WM_STATE_SKIP_TASKBAR" only_if_exists = false,
         active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
         supported => b"_NET_SUPPORTED" only_if_exists = false,
@@ -1189,6 +1124,7 @@ mod motif {
     }
 
     bitflags! {
+        #[derive(Debug, PartialEq, Eq, Clone, Copy)]
         pub(super) struct Functions: u32 {
             const All = 1;
             const Resize = 2;
@@ -1212,7 +1148,7 @@ mod motif {
         }
     }
 
-    #[derive(Default)]
+    #[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
     pub(super) struct Hints {
         pub(super) functions: Option<Functions>,
         pub(super) decorations: Option<Decorations>,
@@ -1252,6 +1188,93 @@ mod motif {
                 zxdg_toplevel_decoration_v1::Mode::ServerSide
             }
         }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum WindowRole {
+    #[default]
+    Toplevel,
+    Popup,
+}
+impl WindowRole {
+    /// Define a toplevel or popup with no special properties
+    pub fn new_basic(popup: bool) -> Self {
+        if popup { Self::Popup } else { Self::Toplevel }
+    }
+    pub fn is_popup(&self) -> bool {
+        *self == Self::Popup
+    }
+}
+
+#[derive(Default)]
+struct WindowRoleHeuristics {
+    override_redirect: bool,
+    has_transient_for: bool,
+    window_types: Vec<x::Atom>,
+    motif_wm_hints: Option<motif::Hints>,
+}
+impl WindowRoleHeuristics {
+    fn guess_window_role(&self, window_atoms: &WindowTypes) -> WindowRole {
+        if self.override_redirect {
+            return WindowRole::Popup;
+        }
+
+        let mut motif_no_decor = false;
+        if let Some(hints) = self.motif_wm_hints {
+            motif_no_decor = hints.decorations.is_some_and(|d| d.is_clientside());
+            // If the motif hints indicate the user shouldn't be able to do anything
+            // to the window at all, it stands to reason it's probably a popup.
+            if hints.functions.is_some_and(|f| f.is_empty()) {
+                return WindowRole::Popup;
+            }
+        }
+
+        let mut window_types = self.window_types.clone();
+        if self.window_types.is_empty() {
+            if !self.override_redirect && self.has_transient_for {
+                window_types = vec![window_atoms.dialog];
+            } else {
+                window_types = vec![window_atoms.normal];
+            }
+        }
+
+        for ty in window_types {
+            match ty {
+                x if x == window_atoms.normal => return WindowRole::Toplevel,
+                x if x == window_atoms.dialog => return WindowRole::Toplevel,
+                x if x == window_atoms.utility => return WindowRole::new_basic(motif_no_decor),
+                x if [
+                    window_atoms.menu,
+                    window_atoms.popup_menu,
+                    window_atoms.dropdown_menu,
+                    window_atoms.tooltip,
+                    window_atoms.drag_n_drop,
+                    window_atoms.combo,
+                ]
+                .contains(&x) =>
+                {
+                    return WindowRole::Popup;
+                }
+                _ => {}
+            };
+        }
+
+        WindowRole::Toplevel
+    }
+
+    fn log(&self, connection: &xcb::Connection) -> String {
+        format!(
+            "override_redirect: {}, has_transient_for: {}, window_types: {:?}, \
+            motif_wm_hints: {:?}",
+            self.override_redirect,
+            self.has_transient_for,
+            self.window_types
+                .iter()
+                .map(|t| get_atom_name(connection, *t))
+                .collect::<Vec<_>>(),
+            self.motif_wm_hints,
+        )
     }
 }
 
