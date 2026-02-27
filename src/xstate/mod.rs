@@ -1258,7 +1258,9 @@ impl WindowRoleHeuristics {
         for ty in window_types {
             match ty {
                 x if x == window_atoms.normal => return WindowRole::Toplevel,
-                x if x == window_atoms.dialog => return WindowRole::Toplevel,
+                x if x == window_atoms.dialog => {
+                    return WindowRole::new_basic(self.has_transient_for && motif_no_decor);
+                }
                 x if x == window_atoms.utility => return WindowRole::new_basic(motif_no_decor),
                 x if [
                     window_atoms.menu,

@@ -255,4 +255,49 @@ mod window_role_heuristics {
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
     }
+
+    // https://github.com/Supreeeme/xwayland-satellite/issues/280
+    // _NET_WM_WINDOW_TYPE_DIALOG is a pop-up if it has a TRANSIENT_FOR window and no Motif decor
+    #[test]
+    fn clip_studio_paint_menu() {
+        let win_types = WindowTypes::new();
+        let win = WindowRoleHeuristics {
+            motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x24, 0, 0, 0].as_slice())),
+            window_types: vec![win_types.dialog],
+            has_transient_for: true,
+            wm_class: Some("clipstudiopaint.exe".into()),
+            ..Default::default()
+        };
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
+    }
+
+    // https://github.com/Supreeeme/xwayland-satellite/issues/307
+    // Same logic as above
+    #[test]
+    fn davinci_resolve_timeline_menu() {
+        let win_types = WindowTypes::new();
+        let win = WindowRoleHeuristics {
+            has_transient_for: true,
+            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0x1, 0, 0, 0].as_slice())),
+            window_types: vec![win_types.dialog, win_types.normal],
+            wm_class: Some("resolve".into()),
+            ..Default::default()
+        };
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
+    }
+
+    // https://github.com/Supreeeme/xwayland-satellite/pull/390
+    // With Motif decorations, even a dialog with TRANSIENT_FOR is better treated as a top-level
+    #[test]
+    fn krita_color_picker() {
+        let win_types = WindowTypes::new();
+        let win = WindowRoleHeuristics {
+            has_transient_for: true,
+            motif_wm_hints: Some(motif::Hints::from([0x3, 0x26, 0x1e, 0x0, 0x0].as_slice())),
+            window_types: vec![win_types.dialog, win_types.normal],
+            wm_class: Some("krita".into()),
+            ..Default::default()
+        };
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
+    }
 }
