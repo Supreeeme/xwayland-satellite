@@ -2,7 +2,8 @@ mod settings;
 use settings::Settings;
 mod selection;
 use selection::{Selection, SelectionState};
-use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
+#[cfg(test)]
+mod tests;
 
 use crate::XConnection;
 use bitflags::bitflags;
@@ -11,6 +12,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::fd::BorrowedFd;
 use std::rc::Rc;
+use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
 use xcb::{Xid, XidNew, x};
 use xcb_util_cursor::{Cursor, CursorContext};
 
