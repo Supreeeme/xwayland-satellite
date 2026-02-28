@@ -346,6 +346,7 @@ xcb::atoms_struct! {
         win_type_utility => b"_NET_WM_WINDOW_TYPE_UTILITY",
         win_type_dnd => b"_NET_WM_WINDOW_TYPE_DND",
         win_type_combo => b"_NET_WM_WINDOW_TYPE_COMBO",
+        win_type_splash => b"_NET_WM_WINDOW_TYPE_SPLASH",
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
         wm_hints => b"WM_HINTS",
         mime1 => b"text/plain" only_if_exists = false,
@@ -1873,6 +1874,31 @@ fn xdg_decorations() {
             .and_then(|(_, decoration)| *decoration),
         Some(zxdg_toplevel_decoration_v1::Mode::ServerSide)
     );
+}
+
+#[test]
+fn splash_screen_fixed_size() {
+    let mut f = Fixture::new();
+    let connection = Connection::new(&f.display);
+
+    let splash = connection.new_window(connection.root, 10, 10, 400, 350, false);
+    connection.set_property(
+        splash,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_splash],
+    );
+    connection.map_window(splash);
+    f.wait_and_dispatch();
+    let geo = connection.get_reply(&x::GetGeometry {
+        drawable: x::Drawable::Window(splash),
+    });
+    assert_eq!(geo.width(), 400);
+    assert_eq!(geo.height(), 350);
+    let surface = f.testwl.last_created_surface_id().unwrap();
+    let toplevel = f.testwl.get_surface_data(surface).unwrap().toplevel();
+    assert_eq!(toplevel.min_size, Some(testwl::Vec2 { x: 400, y: 350 }));
+    assert_eq!(toplevel.max_size, Some(testwl::Vec2 { x: 400, y: 350 }));
 }
 
 #[test]

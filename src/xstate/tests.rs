@@ -21,13 +21,15 @@ impl WindowTypes {
 }
 
 mod wrh {
-    use crate::xstate::{WindowRoleHeuristics, WindowTypes, WmHints, WmNormalHints, motif};
+    use crate::xstate::{
+        WindowRole, WindowRoleHeuristics, WindowTypes, WmHints, WmNormalHints, motif,
+    };
 
     #[test]
     fn default() {
         let win_types = WindowTypes::new();
         let win = WindowRoleHeuristics::default();
-        assert!(!win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/110
@@ -47,7 +49,7 @@ mod wrh {
             wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
-        assert!(win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/112
@@ -66,7 +68,7 @@ mod wrh {
             wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
-        assert!(!win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
     }
     // Originally, `skip_taskbar` was used to check the pop-up status of the dialog, but since then,
     // override_redirect with no NET window type (fallback to NORMAL) is the used heuristic
@@ -85,7 +87,7 @@ mod wrh {
             wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
-        assert!(win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/161
@@ -97,7 +99,7 @@ mod wrh {
             window_types: vec![win_types.menu],
             ..Default::default()
         };
-        assert!(win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/166
@@ -110,7 +112,7 @@ mod wrh {
             override_redirect: true,
             ..Default::default()
         };
-        assert!(win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/253
@@ -129,7 +131,7 @@ mod wrh {
             skip_taskbar: Some(false),
             ..Default::default()
         };
-        assert!(win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
 
     // Popup for specifying the _NET_WM_WINDOW_TYPE_DROPDOWN_MENU window type
@@ -140,7 +142,7 @@ mod wrh {
             window_types: vec![win_types.dropdown_menu],
             ..Default::default()
         };
-        assert!(win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/277
@@ -162,7 +164,7 @@ mod wrh {
             wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
-        assert!(win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/pull/323
@@ -181,7 +183,7 @@ mod wrh {
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
             ..Default::default()
         };
-        assert!(win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
     // A UTILITY type can also be a pop-up if the `_MOTIF_WM_HINTS` have no decorations.
     // The above test also meets these conditions, but override_redirect takes precedence.
@@ -198,7 +200,7 @@ mod wrh {
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
             ..Default::default()
         };
-        assert!(win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/294
@@ -217,7 +219,7 @@ mod wrh {
             wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
-        assert!(!win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
     }
     #[test]
     fn ardour_midi_setup_dialog() {
@@ -234,7 +236,7 @@ mod wrh {
             wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
-        assert!(!win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/383
@@ -255,7 +257,7 @@ mod wrh {
             wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
-        assert!(!win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/356
@@ -268,7 +270,7 @@ mod wrh {
             override_redirect: true,
             ..Default::default()
         };
-        assert!(win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/pull/328
@@ -290,7 +292,7 @@ mod wrh {
             wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
-        assert!(win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
     #[test]
     fn steam_pixel_composer() {
@@ -307,7 +309,7 @@ mod wrh {
             wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
-        assert!(win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
     #[test]
     fn battlenet_login() {
@@ -324,7 +326,7 @@ mod wrh {
             wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
-        assert!(!win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/365
@@ -345,7 +347,7 @@ mod wrh {
             wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
-        assert!(!win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
     }
 
     // See also https://github.com/Supreeeme/xwayland-satellite/issues/280
@@ -366,7 +368,7 @@ mod wrh {
             wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
-        assert!(win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/307
@@ -388,6 +390,16 @@ mod wrh {
             wm_normal_hints: Some(WmNormalHints::from(wm_normal_hints.as_slice())),
             ..Default::default()
         };
-        assert!(win.guess_window_role(&win_types));
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
+    }
+
+    #[test]
+    fn splash_screen() {
+        let win_types = WindowTypes::new();
+        let win = WindowRoleHeuristics {
+            window_types: vec![win_types.splash],
+            ..Default::default()
+        };
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Splash);
     }
 }

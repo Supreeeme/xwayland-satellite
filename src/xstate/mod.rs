@@ -657,17 +657,16 @@ impl XState {
             wm_normal_hints: size_hints,
             skip_taskbar,
         };
-        let is_popup = heuristics.guess_window_role(&self.window_atoms);
+        let role = heuristics.guess_window_role(&self.window_atoms);
         if log::log_enabled!(target: "window_role_heuristics", log::Level::Debug) {
             debug!(
                 target: "window_role_heuristics",
-                "{window:?} set to {} - properties: {}",
-                if is_popup { "Popup" } else { "Toplevel" },
+                "{window:?} set to {role:?} - properties: {}",
                 heuristics.log(&self.connection)
             );
         }
-        server_state.set_popup(window, is_popup);
-        if let Some(parent) = transient_for.and_then(|t| (!is_popup).then_some(t)) {
+        server_state.set_window_role(window, role);
+        if let Some(parent) = transient_for.and_then(|t| (!role.is_popup()).then_some(t)) {
             server_state.set_transient_for(window, parent);
         }
 
@@ -1103,6 +1102,25 @@ mod motif {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum WindowRole {
+    #[default]
+    Toplevel,
+    Popup,
+    /// A special type of toplevel which is constrained to a fixed size
+    /// Commonly the window which displays while the main application is starting up
+    Splash,
+}
+impl WindowRole {
+    /// Define a toplevel or popup with no special properties
+    pub fn new_basic(popup: bool) -> Self {
+        if popup { Self::Popup } else { Self::Toplevel }
+    }
+    pub fn is_popup(&self) -> bool {
+        *self == Self::Popup
+    }
+}
+
 #[derive(Default)]
 struct WindowRoleHeuristics {
     override_redirect: bool,
@@ -1114,9 +1132,9 @@ struct WindowRoleHeuristics {
     skip_taskbar: Option<bool>,
 }
 impl WindowRoleHeuristics {
-    fn guess_window_role(&self, window_atoms: &WindowTypes) -> bool {
+    fn guess_window_role(&self, window_atoms: &WindowTypes) -> WindowRole {
         if self.override_redirect {
-            return true;
+            return WindowRole::Popup;
         }
 
         let mut motif_no_decor = false;
@@ -1144,7 +1162,7 @@ impl WindowRoleHeuristics {
             // If the motif hints indicate the user shouldn't be able to do anything
             // to the window at all, it stands to reason it's probably a popup.
             if hints.functions.is_some_and(|f| f.is_empty()) {
-                return true;
+                return WindowRole::Popup;
             }
         }
         if let Some(hints) = self.wm_normal_hints {
@@ -1165,9 +1183,14 @@ impl WindowRoleHeuristics {
 
         for ty in window_types {
             match ty {
-                x if x == window_atoms.normal => return wmhint_popup,
-                x if x == window_atoms.dialog => return self.has_transient_for,
-                x if x == window_atoms.utility => return motif_no_decor && forced_size,
+                x if x == window_atoms.normal => return WindowRole::new_basic(wmhint_popup),
+                x if x == window_atoms.dialog => {
+                    return WindowRole::new_basic(self.has_transient_for);
+                }
+                x if x == window_atoms.utility => {
+                    return WindowRole::new_basic(motif_no_decor && forced_size);
+                }
+                x if x == window_atoms.splash => return WindowRole::Splash,
                 x if [
                     window_atoms.menu,
                     window_atoms.popup_menu,
@@ -1178,14 +1201,14 @@ impl WindowRoleHeuristics {
                 ]
                 .contains(&x) =>
                 {
-                    return true;
+                    return WindowRole::Popup;
                 }
                 _ => {}
             };
         }
 
         // A last resort for windows with an unrecognized _NET_WM_WINDOW_TYPE
-        self.skip_taskbar.is_some_and(|x| x)
+        WindowRole::new_basic(self.skip_taskbar.is_some_and(|x| x))
     }
 
     fn log(&self, connection: &xcb::Connection) -> String {
