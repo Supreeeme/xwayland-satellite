@@ -1352,6 +1352,35 @@ fn window_group_properties() {
     assert_eq!(data.toplevel().app_id, Some("class".into()));
 }
 
+#[test]
+fn splash_window_fixed_size() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let splash = Window::new(1);
+    let (buffer, surface) = comp.create_surface();
+    let dims = WindowDims {
+        x: 0,
+        y: 0,
+        width: 400,
+        height: 300,
+    };
+    let data = WindowData {
+        mapped: false,
+        dims,
+        fullscreen: false,
+    };
+    f.new_window(splash, false, data);
+    f.satellite
+        .set_window_role(splash, crate::xstate::WindowRole::Splash);
+    f.map_window(&comp, splash, &surface.obj, &buffer);
+    f.run();
+
+    let id = f.testwl.last_created_surface_id().unwrap();
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let toplevel = data.toplevel();
+    assert_eq!(toplevel.min_size, Some(testwl::Vec2 { x: 400, y: 300 }));
+    assert_eq!(toplevel.max_size, Some(testwl::Vec2 { x: 400, y: 300 }));
+}
+
 trait SelectionTest {
     type SelectionType: SelectionType;
     fn mimes(testwl: &mut testwl::Server) -> Vec<String>;

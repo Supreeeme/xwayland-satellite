@@ -496,4 +496,14 @@ mod window_role_heuristics {
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
     }
+
+    #[test]
+    fn splash_screen() {
+        let win_types = WindowTypes::new();
+        let win = WindowRoleHeuristics {
+            window_types: vec![win_types.splash],
+            ..Default::default()
+        };
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Splash);
+    }
 }

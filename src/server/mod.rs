@@ -1390,6 +1390,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         let xdg_surface;
         let mut popup_for = None;
         let mut fullscreen = false;
+        let splash;
 
         {
             let data = self.world.entity(entity).unwrap();
@@ -1403,6 +1404,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             if window_data.attrs.role.is_popup() {
                 popup_for = self.last_hovered.or(self.last_focused_toplevel);
             }
+            splash = window_data.attrs.role == WindowRole::Splash;
 
             let (width, height) = (window_data.attrs.dims.width, window_data.attrs.dims.height);
             for (_, dimensions) in self.world.query::<&OutputDimensions>().iter() {
@@ -1418,7 +1420,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             let data = self.create_popup(entity, xdg_surface, parent);
             (SurfaceRole::Popup(Some(data)), false)
         } else {
-            let data = self.create_toplevel(entity, xdg_surface, fullscreen);
+            let data = self.create_toplevel(entity, xdg_surface, fullscreen, splash);
             (SurfaceRole::Toplevel(Some(data)), true)
         };
 
@@ -1447,6 +1449,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         entity: Entity,
         xdg: XdgSurface,
         fullscreen: bool,
+        splash: bool,
     ) -> ToplevelData {
         let window = self.world.get::<&WindowData>(entity).unwrap();
         debug!(
@@ -1462,6 +1465,15 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             if let Some(max) = &hints.max_size {
                 toplevel.set_max_size(max.width, max.height);
             }
+        }
+        // Application splash windows are usually startup displays, so reporting their dimensions
+        // as fixed has no downside. The upside is tiling Wayland compositors use fixed size as a
+        // heurisitc to display those windows on a seperate floating level.
+        // https://yalter.github.io/niri/Floating-Windows.html
+        if splash {
+            let dims = window.attrs.dims;
+            toplevel.set_min_size(dims.width.into(), dims.height.into());
+            toplevel.set_max_size(dims.width.into(), dims.height.into());
         }
 
         let group = window.attrs.group.and_then(|win| {

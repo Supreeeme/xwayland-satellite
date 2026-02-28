@@ -1126,6 +1126,9 @@ pub enum WindowRole {
     #[default]
     Toplevel,
     Popup,
+    /// A special type of toplevel which is constrained to a fixed size
+    /// Commonly the window which displays while the main application is starting up
+    Splash,
 }
 impl WindowRole {
     /// Define a toplevel or popup with no special properties
@@ -1199,6 +1202,7 @@ impl WindowRoleHeuristics {
                 x if x == window_atoms.utility => {
                     return WindowRole::new_basic(motif_no_decor && forced_size);
                 }
+                x if x == window_atoms.splash => return WindowRole::Splash,
                 x if [
                     window_atoms.menu,
                     window_atoms.popup_menu,
