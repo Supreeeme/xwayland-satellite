@@ -668,8 +668,13 @@ impl XState {
             .resolve()?
             .flatten();
 
-        let is_popup =
-            self.guess_is_popup(window, motif_hints, wmhints, transient_for.is_some(), wine_style)?;
+        let is_popup = self.guess_is_popup(
+            window,
+            motif_hints,
+            wmhints,
+            transient_for.is_some(),
+            wine_style,
+        )?;
         server_state.set_popup(window, is_popup);
         if let Some(parent) = transient_for.and_then(|t| (!is_popup).then_some(t)) {
             server_state.set_transient_for(window, parent);
@@ -960,12 +965,8 @@ impl XState {
         &self,
         window: x::Window,
     ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = WineHwndStyle>> {
-        let cookie = self.get_property_cookie(
-            window,
-            self.atoms.wine_hwnd_style,
-            x::ATOM_CARDINAL,
-            1,
-        );
+        let cookie =
+            self.get_property_cookie(window, self.atoms.wine_hwnd_style, x::ATOM_CARDINAL, 1);
 
         let resolver = |reply: x::GetPropertyReply| {
             let data: &[u32] = reply.value();
@@ -1181,7 +1182,7 @@ impl From<&[u32]> for WineHwndStyle {
 
 impl WineHwndStyle {
     pub fn has_popup_flag(&self) -> bool {
-        match self.style{
+        match self.style {
             Some(s) => s.contains(Window32Style::WS_POPUP),
             None => false,
         }
