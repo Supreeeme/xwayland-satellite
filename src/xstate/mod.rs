@@ -707,8 +707,8 @@ impl XState {
         //Take priority (appears in games/steam/proton). Motif hints can fail on games so check
         //directly what wine is assigning. There are some cases where even wine reports window as
         //WS_POPUP...
-        if wine_style.is_some_and(|s| s.has_popup_flag()) {
-            return Ok(true)
+        if let Some(style) = wine_style {
+            return Ok(style.has_popup_flag());
         }
 
         let attrs = self
