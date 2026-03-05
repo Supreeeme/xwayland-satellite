@@ -635,6 +635,7 @@ impl XState {
         let class = self.get_wm_class(window);
         let size_hints = self.get_wm_size_hints(window);
         let motif_wm_hints = self.get_motif_wm_hints(window);
+        let wine_hwnd_style = self.get_wine_hwnd_style(window);
         let wm_hints = self.get_wm_hints(window);
         let mut title = name.resolve()?;
         if title.is_none() {
@@ -655,7 +656,7 @@ impl XState {
         if let Some(decorations) = motif_hints.as_ref().and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
         }
-
+        let wine_style = wine_hwnd_style.resolve()?;
         let transient_for = self
             .property_cookie_wrapper(
                 window,
@@ -668,7 +669,7 @@ impl XState {
             .flatten();
 
         let is_popup =
-            self.guess_is_popup(window, motif_hints, wmhints, transient_for.is_some())?;
+            self.guess_is_popup(window, motif_hints, wmhints, transient_for.is_some(), wine_style)?;
         server_state.set_popup(window, is_popup);
         if let Some(parent) = transient_for.and_then(|t| (!is_popup).then_some(t)) {
             server_state.set_transient_for(window, parent);
@@ -698,10 +699,17 @@ impl XState {
         motif_hints: Option<motif::Hints>,
         wm_hints: Option<WmHints>,
         has_transient_for: bool,
+        wine_style: Option<WineHwndStyle>,
     ) -> XResult<bool> {
         let mut motif_popup = false;
         let mut wmhint_popup = false;
         let mut has_skip_taskbar = None;
+        //Take priority (appears in games/steam/proton). Motif hints can fail on games so check
+        //directly what wine is assigning. There are some cases where even wine reports window as
+        //WS_POPUP...
+        if wine_style.is_some_and(|s| s.has_popup_flag()) {
+            return Ok(true)
+        }
 
         let attrs = self
             .connection
@@ -948,6 +956,29 @@ impl XState {
         }
     }
 
+    fn get_wine_hwnd_style(
+        &self,
+        window: x::Window,
+    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = WineHwndStyle>> {
+        let cookie = self.get_property_cookie(
+            window,
+            self.atoms.wine_hwnd_style,
+            x::ATOM_CARDINAL,
+            1,
+        );
+
+        let resolver = |reply: x::GetPropertyReply| {
+            let data: &[u32] = reply.value();
+            WineHwndStyle::from(data)
+        };
+
+        PropertyCookieWrapper {
+            connection: &self.connection,
+            cookie,
+            resolver,
+        }
+    }
+
     fn get_pid(&self, window: x::Window) -> Option<u32> {
         let Some(pid) = self
             .connection
@@ -1053,6 +1084,7 @@ xcb::atoms_struct! {
         client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
         supported => b"_NET_SUPPORTED" only_if_exists = false,
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
+        wine_hwnd_style => b"_WINE_HWND_STYLE" only_if_exists = false,
         utf8_string => b"UTF8_STRING" only_if_exists = false,
         clipboard => b"CLIPBOARD" only_if_exists = false,
         clipboard_targets => b"_clipboard_targets" only_if_exists = false,
@@ -1120,6 +1152,40 @@ pub struct WinSize {
 pub struct WmNormalHints {
     pub min_size: Option<WinSize>,
     pub max_size: Option<WinSize>,
+}
+
+bitflags! {
+    /// https://learn.microsoft.com/en-us/windows/win32/winmsg/window-styles
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    pub struct Window32Style: u32 {
+        const WS_POPUP = 0x80000000;
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct WineHwndStyle {
+    pub style: Option<Window32Style>,
+}
+
+impl From<&[u32]> for WineHwndStyle {
+    fn from(value: &[u32]) -> Self {
+        let mut ret = Self::default();
+
+        if let Some(&raw) = value.first() {
+            ret.style = Some(Window32Style::from_bits_truncate(raw));
+        }
+
+        ret
+    }
+}
+
+impl WineHwndStyle {
+    pub fn has_popup_flag(&self) -> bool {
+        match self.style{
+            Some(s) => s.contains(Window32Style::WS_POPUP),
+            None => false,
+        }
+    }
 }
 
 impl From<&[u32]> for WmNormalHints {
