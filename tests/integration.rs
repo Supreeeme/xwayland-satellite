@@ -2208,7 +2208,7 @@ fn popup_heuristics() {
         wine_popup,
         x::ATOM_CARDINAL,
         connection.atoms.wine_hwnd_style,
-        &[2483027968_u32],
+        &[2147483648_u32],
     );
     f.map_as_popup(&mut connection, wine_popup);
 }

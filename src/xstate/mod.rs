@@ -1160,6 +1160,7 @@ bitflags! {
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub struct Window32Style: u32 {
         const WS_POPUP = 0x80000000;
+        const WS_CLIPSIBLINGS = 0x04000000;
     }
 }
 
@@ -1183,7 +1184,9 @@ impl From<&[u32]> for WineHwndStyle {
 impl WineHwndStyle {
     pub fn has_popup_flag(&self) -> bool {
         match self.style {
-            Some(s) => s.contains(Window32Style::WS_POPUP),
+            Some(s) => {
+                s.contains(Window32Style::WS_POPUP) && !s.contains(Window32Style::WS_CLIPSIBLINGS)
+            }
             None => false,
         }
     }
