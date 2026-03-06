@@ -709,11 +709,10 @@ impl XState {
         let mut motif_popup = false;
         let mut wmhint_popup = false;
         let mut has_skip_taskbar = None;
-        //Take priority (appears in games/steam/proton). Motif hints can fail on games so check
-        //directly what wine is assigning. There are some cases where even wine reports window as
-        //WS_POPUP...
+        let mut wine_popup = false;
+
         if let Some(style) = wine_style {
-            return Ok(style.has_popup_flag());
+            wine_popup = style.has_popup_flag();
         }
 
         let attrs = self
@@ -783,7 +782,9 @@ impl XState {
         let mut known_window_type = false;
         for ty in window_types {
             match ty {
-                x if x == self.window_atoms.normal => is_popup = override_redirect || wmhint_popup,
+                x if x == self.window_atoms.normal => {
+                    is_popup = wine_popup || override_redirect || wmhint_popup
+                }
                 x if x == self.window_atoms.dialog => is_popup = override_redirect,
                 x if x == self.window_atoms.utility => is_popup = override_redirect || motif_popup,
                 x if [
