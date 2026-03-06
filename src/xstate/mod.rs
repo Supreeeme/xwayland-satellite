@@ -709,13 +709,10 @@ impl XState {
         let mut motif_popup = false;
         let mut wmhint_popup = false;
         let mut has_skip_taskbar = None;
-        let mut wine_popup = false;
-        let mut wine_hints = false;
-        // Used for steam games, motif hints are not enough here to determine popup vs toplevel on
-        // some apps
+        let mut is_wine_toplevel = false;
+        // Used for steam/proton games, motif hints are not enough here to determine popup vs toplevel
         if let Some(style) = wine_style {
-            wine_hints = true;
-            wine_popup = style.has_popup_flag();
+            is_wine_toplevel = !style.is_popup();
         }
 
         let attrs = self
@@ -786,13 +783,11 @@ impl XState {
         for ty in window_types {
             match ty {
                 x if x == self.window_atoms.normal => {
-                    if wine_hints {
-                        is_popup = wine_popup
-                    } else {
-                        is_popup = override_redirect || wmhint_popup
-                    }
+                    is_popup = !is_wine_toplevel && (override_redirect || wmhint_popup);
                 }
-                x if x == self.window_atoms.dialog => is_popup = override_redirect,
+                x if x == self.window_atoms.dialog => {
+                    is_popup = override_redirect || has_transient_for
+                }
                 x if x == self.window_atoms.utility => is_popup = override_redirect || motif_popup,
                 x if [
                     self.window_atoms.menu,
@@ -1168,13 +1163,25 @@ bitflags! {
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub struct Window32Style: u32 {
         const WS_POPUP = 0x80000000;
-        const WS_CLIPSIBLINGS = 0x04000000;
+        const WS_CAPTION    = 0x00C00000;
+        const WS_THICKFRAME = 0x00040000;
+    }
+}
+
+bitflags! {
+    /// https://learn.microsoft.com/en-us/windows/win32/winmsg/extended-window-styles
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    pub struct Window32StyleEx: u32 {
+        const WS_EX_APPWINDOW  = 0x00040000;
+        const WS_EX_TOOLWINDOW = 0x00000080;
+        const WS_EX_LAYERED    = 0x00080000;
     }
 }
 
 #[derive(Default, Debug)]
 pub struct WineHwndStyle {
     pub style: Option<Window32Style>,
+    pub ex_style: Option<Window32StyleEx>,
 }
 
 impl From<&[u32]> for WineHwndStyle {
@@ -1184,16 +1191,33 @@ impl From<&[u32]> for WineHwndStyle {
         if let Some(&raw) = value.first() {
             ret.style = Some(Window32Style::from_bits_truncate(raw));
         }
+        if let Some(&raw) = value.get(1) {
+            ret.ex_style = Some(Window32StyleEx::from_bits_truncate(raw));
+        }
 
         ret
     }
 }
 
 impl WineHwndStyle {
-    pub fn has_popup_flag(&self) -> bool {
+    pub fn is_popup(&self) -> bool {
+        if let Some(ex) = self.ex_style {
+            if ex.contains(Window32StyleEx::WS_EX_APPWINDOW) {
+                return false;
+            }
+            // Toolwindows are popups
+            if ex.contains(Window32StyleEx::WS_EX_TOOLWINDOW) {
+                return true;
+            }
+        }
+
         match self.style {
             Some(s) => {
-                s.contains(Window32Style::WS_POPUP) && !s.contains(Window32Style::WS_CLIPSIBLINGS)
+                if !s.contains(Window32Style::WS_POPUP) {
+                    return false;
+                }
+                // caption or frame it toplevel
+                !s.intersects(Window32Style::WS_CAPTION | Window32Style::WS_THICKFRAME)
             }
             None => false,
         }
@@ -1262,6 +1286,7 @@ mod motif {
     }
 
     bitflags! {
+        #[derive(Debug)]
         pub(super) struct Functions: u32 {
             const All = 1;
             const Resize = 2;
