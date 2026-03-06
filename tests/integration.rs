@@ -347,6 +347,7 @@ xcb::atoms_struct! {
         win_type_dnd => b"_NET_WM_WINDOW_TYPE_DND",
         win_type_combo => b"_NET_WM_WINDOW_TYPE_COMBO",
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
+        wine_hwnd_style => b"_WINE_HWND_STYLE" only_if_exists = false,
         wm_hints => b"WM_HINTS",
         mime1 => b"text/plain" only_if_exists = false,
         mime2 => b"blah/blah" only_if_exists = false,
@@ -2195,6 +2196,61 @@ fn popup_heuristics() {
         &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
     );
     f.map_as_toplevel(&mut connection, wallpaper_engine);
+
+    let warframe = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        warframe,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_normal],
+    );
+    connection.set_property(
+        warframe,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x3_u32, 0x24, 0x0, 0x0, 0x0],
+    );
+    connection.set_property(
+        warframe,
+        connection.atoms.wm_hints,
+        connection.atoms.wm_hints,
+        &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
+
+    connection.set_property(
+        warframe,
+        x::ATOM_CARDINAL,
+        connection.atoms.wine_hwnd_style,
+        &[2491416576_u32],
+    );
+    f.map_as_toplevel(&mut connection, warframe);
+
+    let wine_popup = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        wine_popup,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_normal],
+    );
+    connection.set_property(
+        wine_popup,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x3_u32, 0x24, 0x0, 0x0, 0x0],
+    );
+    connection.set_property(
+        wine_popup,
+        connection.atoms.wm_hints,
+        connection.atoms.wm_hints,
+        &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
+    connection.set_property(
+        wine_popup,
+        x::ATOM_CARDINAL,
+        connection.atoms.wine_hwnd_style,
+        &[2617245696_u32],
+    );
+    f.map_as_popup(&mut connection, wine_popup);
 }
 
 #[test]
