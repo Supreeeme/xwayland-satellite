@@ -710,8 +710,11 @@ impl XState {
         let mut wmhint_popup = false;
         let mut has_skip_taskbar = None;
         let mut wine_popup = false;
-
+        let mut wine_hints = false;
+        // Used for steam games, motif hints are not enough here to determine popup vs toplevel on
+        // some apps
         if let Some(style) = wine_style {
+            wine_hints = true;
             wine_popup = style.has_popup_flag();
         }
 
@@ -783,7 +786,11 @@ impl XState {
         for ty in window_types {
             match ty {
                 x if x == self.window_atoms.normal => {
-                    is_popup = wine_popup || override_redirect || wmhint_popup
+                    if wine_hints {
+                        is_popup = wine_popup
+                    } else {
+                        is_popup = override_redirect || wmhint_popup
+                    }
                 }
                 x if x == self.window_atoms.dialog => is_popup = override_redirect,
                 x if x == self.window_atoms.utility => is_popup = override_redirect || motif_popup,
