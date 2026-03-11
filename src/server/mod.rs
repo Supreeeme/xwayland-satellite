@@ -465,6 +465,7 @@ pub struct InnerServerState<S: X11Selection> {
     shm: client::wl_shm::WlShm,
     viewporter: WpViewporter,
     fractional_scale: Option<WpFractionalScaleManagerV1>,
+    noscaling: bool,
     decoration_manager: Option<ZxdgDecorationManagerV1>,
     selection_states: selection::SelectionStates<S>,
     last_kb_serial: Option<(client::wl_seat::WlSeat, u32)>,
@@ -480,6 +481,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
         mut dh: DisplayHandle,
         server_connection: Option<UnixStream>,
         client: UnixStream,
+        noscaling: bool,
     ) -> Self {
         let connection = if let Some(stream) = server_connection {
             Connection::from_socket(stream).unwrap()
@@ -565,6 +567,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             shm,
             viewporter,
             fractional_scale,
+            noscaling,
             selection_states,
             last_kb_serial: None,
             activation_state,

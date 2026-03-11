@@ -13,6 +13,7 @@ struct RealData {
     display: Option<String>,
     listenfds: Vec<OwnedFd>,
     flags: Vec<String>,
+    noscaling: bool,
 }
 impl xwayland_satellite::RunData for RealData {
     fn display(&self) -> Option<&str> {
@@ -26,6 +27,10 @@ impl xwayland_satellite::RunData for RealData {
     fn flags(&self) -> &[String] {
         &self.flags
     }
+
+    fn noscaling(&self) -> bool {
+        self.noscaling
+    }
 }
 
 struct ParsedFlags {
@@ -38,6 +43,7 @@ struct ParsedFlags {
     glamor: Option<&'static str>,
     listen_plus: Vec<String>,
     listen_minus: Vec<String>,
+    noscaling: bool,
     verbosity: u32,
 }
 impl Default for ParsedFlags {
@@ -52,6 +58,7 @@ impl Default for ParsedFlags {
             glamor: None,
             listen_plus: vec![],
             listen_minus: vec![],
+            noscaling: false,
             verbosity: 0,
         }
     }
@@ -180,6 +187,10 @@ fn parse_args() -> RealData {
                 );
                 println!("{:<25} prints message with these options", "-help");
                 println!("{:<25} listen on protocol", "-listen");
+                println!(
+                    "{:<25} keep surfaces at 1x and let the compositor scale them",
+                    "-noscaling"
+                );
                 println!("{:<25} don't listen on protocol", "-nolisten");
                 println!("{:<25} add given fd as a listen socket", "-listenfd");
                 println!(
@@ -199,6 +210,9 @@ fn parse_args() -> RealData {
                     flags.listen_minus.swap_remove(idx);
                 }
                 flags.listen_plus.push(protocol.to_owned());
+            }
+            "-noscaling" => {
+                flags.noscaling = true;
             }
             "-nolisten" => {
                 let protocol = args.next().expect("argument to -nolisten not provided");
@@ -242,6 +256,7 @@ fn parse_args() -> RealData {
             }
         }
     }
+    data.noscaling = flags.noscaling;
     data.flags = flags.to_vec();
 
     data

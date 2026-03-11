@@ -374,7 +374,12 @@ impl EarlyTestFixture {
         });
 
         let (fake_client, xwls_server) = UnixStream::pair().unwrap();
-        let satellite = ServerState::new(display.handle(), Some(client_s), xwls_server);
+        let satellite = ServerState::new(
+            display.handle(),
+            Some(client_s),
+            xwls_server,
+            false,
+        );
         let testwl = thread.join().unwrap();
 
         let xwls_connection = Connection::from_socket(fake_client).unwrap();

@@ -94,6 +94,9 @@ impl Event for SurfaceEvents {
             SurfaceEvents::FractionalScale(event) => match event {
                 wp_fractional_scale_v1::Event::PreferredScale { scale } => {
                     let state = state.deref_mut();
+                    if state.noscaling {
+                        return;
+                    }
                     let entity = state.world.entity(target).unwrap();
                     let factor = scale as f64 / 120.0;
                     debug!(
@@ -229,7 +232,7 @@ impl SurfaceEvents {
                         connection.focus_window(*window, output);
                     }
 
-                    if state.fractional_scale.is_none() {
+                    if state.fractional_scale.is_none() && !state.noscaling {
                         let output_scale = output_data.get::<&OutputScaleFactor>().unwrap().get();
                         data.get::<&mut SurfaceScaleFactor>().unwrap().0 = output_scale;
                         drop(query);
@@ -1331,7 +1334,7 @@ impl OutputEvent {
                 ) {
                     state.updated_outputs.push(target);
                 }
-                if state.fractional_scale.is_none() {
+                if state.fractional_scale.is_none() && !state.noscaling {
                     state.world.get::<&WlOutput>(target).unwrap().scale(factor);
                 }
             }
