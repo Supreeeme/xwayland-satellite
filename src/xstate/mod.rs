@@ -655,6 +655,9 @@ impl XState {
         if let Some(decorations) = motif_hints.as_ref().and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
         }
+        if let Some(ref hints) = wmhints {
+            server_state.set_win_hints(window, hints);
+        }
 
         let transient_for = self
             .property_cookie_wrapper(
@@ -988,7 +991,7 @@ impl XState {
             x if x == x::ATOM_WM_HINTS => {
                 let hints =
                     unwrap_or_skip_bad_window_ret!(self.get_wm_hints(window).resolve()).unwrap();
-                server_state.set_win_hints(window, hints);
+                server_state.set_win_hints(window, &hints);
             }
             x if x == x::ATOM_WM_NORMAL_HINTS => {
                 let hints =

@@ -100,6 +100,7 @@ where
 #[derive(Default, Debug)]
 struct WindowAttributes {
     is_popup: bool,
+    acquire_input_via_wm: bool,
     dims: WindowDims,
     size_hints: Option<WmNormalHints>,
     title: Option<WmName>,
@@ -944,13 +945,15 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    pub fn set_win_hints(&mut self, window: x::Window, hints: WmHints) {
+    pub fn set_win_hints(&mut self, window: x::Window, hints: &WmHints) {
         let Some(id) = self.windows.get(&window).copied() else {
             debug!("not setting hints for unknown window {window:?}");
             return;
         };
 
-        self.world.get::<&mut WindowData>(id).unwrap().attrs.group = hints.window_group;
+        let attrs = &mut self.world.get::<&mut WindowData>(id).unwrap().attrs;
+        attrs.group = hints.window_group;
+        attrs.acquire_input_via_wm = hints.acquire_input_via_wm;
     }
 
     pub fn set_size_hints(&mut self, window: x::Window, hints: WmNormalHints) {

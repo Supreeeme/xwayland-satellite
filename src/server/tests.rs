@@ -44,10 +44,10 @@ use wayland_protocols::{
             },
             zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2,
             zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2,
-            zwp_tablet_pad_v2::{self, EVT_GROUP_OPCODE, ZwpTabletPadV2},
+            zwp_tablet_pad_v2::{self, ZwpTabletPadV2, EVT_GROUP_OPCODE},
             zwp_tablet_seat_v2::{
-                self, EVT_PAD_ADDED_OPCODE, EVT_TABLET_ADDED_OPCODE, EVT_TOOL_ADDED_OPCODE,
-                ZwpTabletSeatV2,
+                self, ZwpTabletSeatV2, EVT_PAD_ADDED_OPCODE, EVT_TABLET_ADDED_OPCODE,
+                EVT_TOOL_ADDED_OPCODE,
             },
             zwp_tablet_tool_v2::{self, ZwpTabletToolV2},
             zwp_tablet_v2::{self, ZwpTabletV2},
@@ -64,7 +64,7 @@ use wayland_protocols::{
         xwayland_shell_v1::XwaylandShellV1, xwayland_surface_v1::XwaylandSurfaceV1,
     },
 };
-use wayland_server::{Display, Resource, protocol as s_proto};
+use wayland_server::{protocol as s_proto, Display, Resource};
 use wl_drm::client::wl_drm::WlDrm;
 use xcb::x::{self, Window};
 
@@ -1229,46 +1229,40 @@ fn fullscreen() {
     f.run();
 
     let data = f.testwl.get_surface_data(id).unwrap();
-    assert!(
-        data.toplevel()
-            .states
-            .contains(&xdg_toplevel::State::Fullscreen)
-    );
+    assert!(data
+        .toplevel()
+        .states
+        .contains(&xdg_toplevel::State::Fullscreen));
 
     f.satellite.set_fullscreen(win, SetState::Remove);
     f.run();
     f.run();
 
     let data = f.testwl.get_surface_data(id).unwrap();
-    assert!(
-        !data
-            .toplevel()
-            .states
-            .contains(&xdg_toplevel::State::Fullscreen)
-    );
+    assert!(!data
+        .toplevel()
+        .states
+        .contains(&xdg_toplevel::State::Fullscreen));
 
     f.satellite.set_fullscreen(win, SetState::Toggle);
     f.run();
     f.run();
 
     let data = f.testwl.get_surface_data(id).unwrap();
-    assert!(
-        data.toplevel()
-            .states
-            .contains(&xdg_toplevel::State::Fullscreen)
-    );
+    assert!(data
+        .toplevel()
+        .states
+        .contains(&xdg_toplevel::State::Fullscreen));
 
     f.satellite.set_fullscreen(win, SetState::Toggle);
     f.run();
     f.run();
 
     let data = f.testwl.get_surface_data(id).unwrap();
-    assert!(
-        !data
-            .toplevel()
-            .states
-            .contains(&xdg_toplevel::State::Fullscreen)
-    );
+    assert!(!data
+        .toplevel()
+        .states
+        .contains(&xdg_toplevel::State::Fullscreen));
 }
 
 #[test]
@@ -1336,7 +1330,7 @@ fn window_group_properties() {
     f.satellite.new_window(win, false, dims, None);
     f.satellite.set_win_hints(
         win,
-        super::WmHints {
+        &super::WmHints {
             window_group: Some(prop_win),
             acquire_input_via_wm: false,
         },

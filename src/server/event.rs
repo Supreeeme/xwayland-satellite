@@ -620,10 +620,17 @@ impl Event for client::wl_pointer::Event {
                 let mut query = surface_entity.and_then(|e| {
                     state
                         .world
-                        .query_one::<(&WlSurface, &SurfaceRole, &SurfaceScaleFactor, &x::Window)>(e)
+                        .query_one::<(
+                            &WlSurface,
+                            &SurfaceRole,
+                            &SurfaceScaleFactor,
+                            &x::Window,
+                            &WindowData,
+                        )>(e)
                         .ok()
                 });
-                let Some((surface, role, scale, window)) = query.as_mut().and_then(|q| q.get())
+                let Some((surface, role, scale, window, window_data)) =
+                    query.as_mut().and_then(|q| q.get())
                 else {
                     if let Some(&DecorationMarker { parent }) = surface.data() {
                         drop(query);
@@ -642,12 +649,17 @@ impl Event for client::wl_pointer::Event {
                 cmd.insert(target, (*scale,));
 
                 let surface_is_popup = matches!(role, SurfaceRole::Popup(_));
+                let popup_wants_focus = surface_is_popup && window_data.attrs.acquire_input_via_wm;
                 let mut do_enter = || {
                     debug!("pointer entering {} ({serial} {})", surface.id(), scale.0);
                     server.enter(serial, surface, surface_x * scale.0, surface_y * scale.0);
                     connection.raise_to_top(*window);
                     if !surface_is_popup {
                         state.last_hovered = Some(*window);
+                    }
+                    if popup_wants_focus {
+                        debug!("focusing popup {:?} (acquire_input_via_wm)", window);
+                        connection.focus_window(*window, None);
                     }
                     cmd.insert_one(target, CurrentSurface::Xwayland(surface_entity.unwrap()));
                 };
@@ -691,6 +703,32 @@ impl Event for client::wl_pointer::Event {
                     decoration::handle_pointer_leave(state, parent);
                     return;
                 }
+
+                // If we're leaving a popup that acquired input focus, restore
+                // focus to the last focused toplevel.
+                if let Some(entity) = surface.data().copied() {
+                    let should_restore_focus = state
+                        .world
+                        .query_one::<(&SurfaceRole, &WindowData)>(entity)
+                        .ok()
+                        .and_then(|mut q| {
+                            q.get().map(|(role, wd)| {
+                                matches!(role, SurfaceRole::Popup(_))
+                                    && wd.attrs.acquire_input_via_wm
+                            })
+                        })
+                        .unwrap_or(false);
+                    if should_restore_focus {
+                        if let Some(toplevel) = state.inner.last_focused_toplevel {
+                            debug!(
+                                "restoring focus to toplevel {:?} after leaving popup",
+                                toplevel
+                            );
+                            state.connection.focus_window(toplevel, None);
+                        }
+                    }
+                }
+
                 if let Some(surface) = surface
                     .data()
                     .copied()
