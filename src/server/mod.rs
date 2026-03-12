@@ -1152,6 +1152,12 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
+    /// Returns the window to restore focus to when the active window is unmapped.
+    /// If a toplevel was previously focused, returns it; otherwise returns `WINDOW_NONE`.
+    pub fn focus_restore_target(&self) -> x::Window {
+        self.last_focused_toplevel.unwrap_or(x::WINDOW_NONE)
+    }
+
     pub fn set_fullscreen(&mut self, window: x::Window, state: super::xstate::SetState) {
         let Some(data) = self
             .windows
