@@ -1330,7 +1330,7 @@ fn window_group_properties() {
     f.satellite.new_window(win, false, dims, None);
     f.satellite.set_win_hints(
         win,
-        &super::WmHints {
+        super::WmHints {
             window_group: Some(prop_win),
             acquire_input_via_wm: false,
         },

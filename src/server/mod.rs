@@ -945,7 +945,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    pub fn set_win_hints(&mut self, window: x::Window, hints: &WmHints) {
+    pub fn set_win_hints(&mut self, window: x::Window, hints: WmHints) {
         let Some(id) = self.windows.get(&window).copied() else {
             debug!("not setting hints for unknown window {window:?}");
             return;

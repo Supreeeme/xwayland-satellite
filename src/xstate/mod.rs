@@ -653,7 +653,7 @@ impl XState {
         if let Some(decorations) = motif_hints.as_ref().and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
         }
-        if let Some(ref hints) = wmhints {
+        if let Some(hints) = wmhints {
             server_state.set_win_hints(window, hints);
         }
 
@@ -989,7 +989,7 @@ impl XState {
             x if x == x::ATOM_WM_HINTS => {
                 let hints =
                     unwrap_or_skip_bad_window_ret!(self.get_wm_hints(window).resolve()).unwrap();
-                server_state.set_win_hints(window, &hints);
+                server_state.set_win_hints(window, hints);
             }
             x if x == x::ATOM_WM_NORMAL_HINTS => {
                 let hints =
@@ -1146,7 +1146,7 @@ impl From<&[u32]> for WmNormalHints {
     }
 }
 
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq)]
 pub struct WmHints {
     pub window_group: Option<x::Window>,
     pub acquire_input_via_wm: bool,
