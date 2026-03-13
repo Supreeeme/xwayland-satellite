@@ -793,20 +793,12 @@ impl Event for client::wl_pointer::Event {
                 if let Some(entity) = popup_to_focus {
                     let should_focus = state
                         .world
-                        .query_one::<(&SurfaceRole, &WindowData, &x::Window)>(entity)
+                        .query_one_mut::<(&SurfaceRole, &WindowData, &x::Window)>(entity)
                         .ok()
-                        .and_then(|mut q| {
-                            q.get().map(|(role, wd, window)| {
-                                if matches!(role, SurfaceRole::Popup(_))
-                                    && wd.attrs.acquire_input_via_wm
-                                {
-                                    Some(*window)
-                                } else {
-                                    None
-                                }
-                            })
-                        })
-                        .flatten();
+                        .and_then(|(role, wd, window)| {
+                            (matches!(role, SurfaceRole::Popup(_)) && wd.attrs.acquire_input_via_wm)
+                                .then_some(*window)
+                        });
                     if let Some(window) = should_focus {
                         debug!(
                             "focusing popup {:?} on click (acquire_input_via_wm)",
