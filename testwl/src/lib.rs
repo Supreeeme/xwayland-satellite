@@ -851,22 +851,6 @@ impl Server {
         self.display.flush_clients().unwrap();
     }
 
-    #[track_caller]
-    pub fn click_pointer(&mut self, button: u32) {
-        let pointer = &self
-            .state
-            .pointer
-            .as_ref()
-            .expect("No pointer created")
-            .pointer;
-        let time = self.state.begin.elapsed().as_millis() as u32;
-        let serial = self.state.configure_serial;
-
-        pointer.button(serial, time, button, wl_pointer::ButtonState::Pressed);
-        pointer.frame();
-        self.display.flush_clients().unwrap();
-    }
-
     pub fn new_output(&mut self, x: i32, y: i32) {
         self.state.last_output_global =
             Some(self.dh.create_global::<State, WlOutput, _>(4, (x, y)));

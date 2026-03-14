@@ -765,14 +765,12 @@ impl Event for client::wl_pointer::Event {
                     pub const LEFT: u32 = 0x110;
                 }
 
-                let mut popup_to_focus = None;
                 if button_state == WEnum::Value(client::wl_pointer::ButtonState::Pressed)
                     && button == button_codes::LEFT
                 {
                     match current_surface {
                         CurrentSurface::Xwayland(entity) => {
                             cmd.insert(*entity, (LastClickSerial(seat.clone(), serial),));
-                            popup_to_focus = Some(*entity);
                         }
                         CurrentSurface::Decoration(parent) => {
                             let seat = seat.clone();
@@ -786,28 +784,6 @@ impl Event for client::wl_pointer::Event {
 
                 server.button(serial, time, button, convert_wenum(button_state));
                 drop(query);
-
-                // Focus popups that want input on click, so that X11 clients
-                // with text fields (e.g. Unity's "Add Component" search bar)
-                // can receive keyboard input.
-                if let Some(entity) = popup_to_focus {
-                    let should_focus = state
-                        .world
-                        .query_one_mut::<(&SurfaceRole, &WindowData, &x::Window)>(entity)
-                        .ok()
-                        .and_then(|(role, wd, window)| {
-                            (matches!(role, SurfaceRole::Popup(_)) && wd.attrs.acquire_input_via_wm)
-                                .then_some(*window)
-                        });
-                    if let Some(window) = should_focus {
-                        debug!(
-                            "focusing popup {:?} on click (acquire_input_via_wm)",
-                            window
-                        );
-                        state.connection.focus_window(window, None);
-                    }
-                }
-
                 cmd.run_on(&mut state.world);
             }
             _ => {

@@ -459,6 +459,7 @@ pub struct InnerServerState<S: X11Selection> {
     unfocus: bool,
     last_focused_toplevel: Option<x::Window>,
     last_hovered: Option<x::Window>,
+    popup_needs_focus: Option<x::Window>,
 
     xdg_wm_base: XdgWmBase,
     compositor: client::wl_compositor::WlCompositor,
@@ -560,6 +561,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             unfocus: false,
             last_focused_toplevel: None,
             last_hovered: None,
+            popup_needs_focus: None,
             xdg_wm_base,
             compositor,
             subcompositor,
@@ -736,6 +738,13 @@ impl<C: XConnection> ServerState<C> {
                 self.connection.focus_window(x::WINDOW_NONE, None);
             }
             self.unfocus = false;
+
+            // Focus popups that set WM_HINTS input=True at map time, matching
+            // what a real X11 WM would do (call SetInputFocus on map).
+            if let Some(popup_win) = self.popup_needs_focus.take() {
+                debug!("focusing popup {popup_win:?} at map time (acquire_input_via_wm)");
+                self.connection.focus_window(popup_win, None);
+            }
         }
 
         self.handle_selection_events();
@@ -1361,11 +1370,14 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    /// Returns true if the created window is a toplevel.
+    /// Creates the appropriate xdg role (toplevel or popup) for the given window.
+    /// Returns `true` if the created window is a toplevel, and sets
+    /// `self.popup_needs_focus` if a newly-created popup has `acquire_input_via_wm`.
     fn create_role_window(&mut self, window: x::Window, entity: Entity) -> bool {
         let xdg_surface;
         let mut popup_for = None;
         let mut fullscreen = false;
+        let mut focus_popup = false;
 
         {
             let data = self.world.entity(entity).unwrap();
@@ -1378,6 +1390,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             let window_data = data.get::<&WindowData>().unwrap();
             if window_data.attrs.is_popup {
                 popup_for = self.last_hovered.or(self.last_focused_toplevel);
+                focus_popup = window_data.attrs.acquire_input_via_wm;
             }
 
             let (width, height) = (window_data.attrs.dims.width, window_data.attrs.dims.height);
@@ -1414,6 +1427,16 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         client.commit();
         self.world.insert(entity, (role,)).unwrap();
+
+        // If an X11 popup set WM_HINTS input=True (acquire_input_via_wm),
+        // it expects the window manager to give it keyboard focus via
+        // SetInputFocus. Record this so the caller (which has access to the
+        // XConnection) can call focus_window. We do not use xdg_popup.grab()
+        // because grab() has dismissal semantics (PopupDone → unmap) that
+        // X11 clients don't expect.
+        if focus_popup && popup_for.is_some() {
+            self.popup_needs_focus = Some(window);
+        }
 
         is_toplevel
     }
