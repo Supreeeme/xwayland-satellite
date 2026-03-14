@@ -1640,7 +1640,7 @@ fn click_focuses_popup_with_acquire_input_via_wm() {
     // Move pointer onto the popup and click.
     f.testwl.move_pointer_to(popup_id, 5.0, 5.0);
     f.run();
-    f.testwl.click_pointer(popup_id, 0x110); // BTN_LEFT
+    f.testwl.click_pointer(0x110); // BTN_LEFT
     f.run();
 
     // The popup should now be focused.
@@ -1672,7 +1672,7 @@ fn click_does_not_focus_popup_without_acquire_input_via_wm() {
 
     f.testwl.move_pointer_to(popup_id, 5.0, 5.0);
     f.run();
-    f.testwl.click_pointer(popup_id, 0x110); // BTN_LEFT
+    f.testwl.click_pointer(0x110); // BTN_LEFT
     f.run();
 
     // Focus should remain on the toplevel.

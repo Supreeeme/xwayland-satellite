@@ -851,7 +851,8 @@ impl Server {
         self.display.flush_clients().unwrap();
     }
 
-    pub fn click_pointer(&mut self, _surface: SurfaceId, button: u32) {
+    #[track_caller]
+    pub fn click_pointer(&mut self, button: u32) {
         let pointer = &self
             .state
             .pointer
@@ -860,7 +861,6 @@ impl Server {
             .pointer;
         let time = self.state.begin.elapsed().as_millis() as u32;
         let serial = self.state.configure_serial;
-        self.state.configure_serial += 1;
 
         pointer.button(serial, time, button, wl_pointer::ButtonState::Pressed);
         pointer.frame();
