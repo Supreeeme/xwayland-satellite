@@ -9,7 +9,7 @@ use server::selection::{Clipboard, Primary};
 use smithay_client_toolkit::data_device_manager::WritePipe;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::os::unix::net::UnixStream;
+use std::os::unix::{net::UnixStream, process::ExitStatusExt};
 use std::process::{Command, ExitStatus, Stdio};
 use wayland_server::{Display, ListeningSocket};
 use xcb::x;
@@ -121,9 +121,9 @@ pub fn main(mut data: impl RunData) -> Option<()> {
             let line = line.unwrap();
             info!(target: "xwayland_process", "{line}");
         }
-        let status = Box::new(xwayland.wait().unwrap());
-        let status = Box::into_raw(status) as usize;
-        finish_tx.write_all(&status.to_ne_bytes()).unwrap();
+        let status = xwayland.wait().unwrap().into_raw();
+        // On a successful integration test, the rx will be dropped, so keep logs/GDB clean
+        let _ = finish_tx.write_all(&status.to_ne_bytes());
     });
 
     let mut ready_fds = [
@@ -131,11 +131,10 @@ pub fn main(mut data: impl RunData) -> Option<()> {
         PollFd::new(&finish_rx, PollFlags::IN),
     ];
 
-    fn xwayland_exit_code(rx: &mut UnixStream) -> Box<ExitStatus> {
-        let mut data = [0; (usize::BITS / 8) as usize];
+    fn xwayland_exit_code(rx: &mut UnixStream) -> ExitStatus {
+        let mut data = [0; (i32::BITS / 8) as usize];
         rx.read_exact(&mut data).unwrap();
-        let data = usize::from_ne_bytes(data);
-        unsafe { Box::from_raw(data as *mut _) }
+        ExitStatus::from_raw(i32::from_ne_bytes(data))
     }
 
     let connection = match poll(&mut ready_fds, None) {
@@ -179,7 +178,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
             Ok(_) => {
                 if !fds[3].revents().is_empty() {
                     let status = xwayland_exit_code(&mut quit_rx);
-                    if *status != ExitStatus::default() {
+                    if status != ExitStatus::default() {
                         error!("Xwayland exited early with {status}");
                     }
                     return None;
@@ -246,7 +245,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
             Ok(_) => {
                 if !fds[3].revents().is_empty() {
                     let status = xwayland_exit_code(&mut quit_rx);
-                    if *status != ExitStatus::default() {
+                    if status != ExitStatus::default() {
                         error!("Xwayland exited early with {status}");
                     }
                     return None;
