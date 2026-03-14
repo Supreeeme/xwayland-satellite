@@ -1607,17 +1607,13 @@ fn override_redirect_choose_hover_window() {
     assert_eq!(&popup_data.popup().parent, win1_xdg);
 }
 
-/// Clicking on a popup that has `acquire_input_via_wm` set should focus
-/// that popup window, so that X11 clients with input fields inside popups
-/// (e.g. Unity Editor's "Add Component" search bar) receive keyboard input.
 #[test]
-fn click_focuses_popup_with_acquire_input_via_wm() {
+fn popup_click_focus() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
 
     let win_toplevel = Window::new(1);
     let (_, toplevel_id) = f.create_toplevel(&comp, win_toplevel);
-    assert_eq!(f.connection().focused_window, Some(win_toplevel));
 
     let win_popup = Window::new(2);
     let (_, popup_id) = f.create_popup(
@@ -1625,7 +1621,15 @@ fn click_focuses_popup_with_acquire_input_via_wm() {
         PopupBuilder::new(win_popup, win_toplevel, toplevel_id),
     );
 
-    // Mark the popup as wanting keyboard input via the WM.
+    f.testwl.move_pointer_to(popup_id, 5.0, 5.0);
+    f.run();
+
+    // Without acquire_input_via_wm: clicking popup keeps focus on toplevel.
+    f.testwl.click_pointer(0x110);
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(win_toplevel));
+
+    // With acquire_input_via_wm: clicking popup focuses it.
     f.satellite.set_win_hints(
         win_popup,
         super::WmHints {
@@ -1633,54 +1637,9 @@ fn click_focuses_popup_with_acquire_input_via_wm() {
             acquire_input_via_wm: true,
         },
     );
-
-    // Focus should still be on the toplevel before clicking.
-    assert_eq!(f.connection().focused_window, Some(win_toplevel));
-
-    // Move pointer onto the popup and click.
-    f.testwl.move_pointer_to(popup_id, 5.0, 5.0);
+    f.testwl.click_pointer(0x110);
     f.run();
-    f.testwl.click_pointer(0x110); // BTN_LEFT
-    f.run();
-
-    // The popup should now be focused.
-    assert_eq!(
-        f.connection().focused_window,
-        Some(win_popup),
-        "popup with acquire_input_via_wm should be focused after click"
-    );
-}
-
-/// Clicking on a popup that does NOT have `acquire_input_via_wm` should
-/// leave focus on the toplevel (the pre-existing behaviour).
-#[test]
-fn click_does_not_focus_popup_without_acquire_input_via_wm() {
-    let (mut f, comp) = TestFixture::new_with_compositor();
-    TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
-
-    let win_toplevel = Window::new(1);
-    let (_, toplevel_id) = f.create_toplevel(&comp, win_toplevel);
-
-    let win_popup = Window::new(2);
-    let (_, popup_id) = f.create_popup(
-        &comp,
-        PopupBuilder::new(win_popup, win_toplevel, toplevel_id),
-    );
-
-    // Popup does NOT have acquire_input_via_wm (default is false).
-    assert_eq!(f.connection().focused_window, Some(win_toplevel));
-
-    f.testwl.move_pointer_to(popup_id, 5.0, 5.0);
-    f.run();
-    f.testwl.click_pointer(0x110); // BTN_LEFT
-    f.run();
-
-    // Focus should remain on the toplevel.
-    assert_eq!(
-        f.connection().focused_window,
-        Some(win_toplevel),
-        "popup without acquire_input_via_wm should not steal focus"
-    );
+    assert_eq!(f.connection().focused_window, Some(win_popup));
 }
 
 #[track_caller]
