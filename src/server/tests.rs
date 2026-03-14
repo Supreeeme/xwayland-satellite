@@ -1332,7 +1332,7 @@ fn window_group_properties() {
         win,
         super::WmHints {
             window_group: Some(prop_win),
-            acquire_input_via_wm: false,
+            allow_focus_when_popup: false,
         },
     );
     f.satellite.map_window(win);
@@ -1615,7 +1615,7 @@ fn popup_no_focus_without_input_hint() {
     let win_toplevel = Window::new(1);
     let (_, toplevel_id) = f.create_toplevel(&comp, win_toplevel);
 
-    // A popup without acquire_input_via_wm should not receive focus.
+    // A popup without allow_focus_when_popup should not receive focus.
     let win_popup = Window::new(2);
     let (_, _popup_id) = f.create_popup(
         &comp,
@@ -1631,7 +1631,7 @@ fn popup_focus_on_map_with_input_hint() {
     let win_toplevel = Window::new(1);
     let (_, toplevel_id) = f.create_toplevel(&comp, win_toplevel);
 
-    // A popup with acquire_input_via_wm should receive X11 keyboard focus
+    // A popup with allow_focus_when_popup should receive X11 keyboard focus
     // at map time, matching what a real X11 WM does for windows with
     // WM_HINTS input=True.
     let win_popup = Window::new(2);
@@ -1652,7 +1652,7 @@ fn popup_focus_on_map_with_input_hint() {
         win_popup,
         super::WmHints {
             window_group: None,
-            acquire_input_via_wm: true,
+            allow_focus_when_popup: true,
         },
     );
     f.map_window(&comp, win_popup, &surface.obj, &buffer);

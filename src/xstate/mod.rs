@@ -730,7 +730,7 @@ impl XState {
             // Sometimes popup is false-positive meaning both MOTIF Decorations and WM_HINTS input indicates its a popup
             // but MOTIF has function flags that toplevel window should do
             wmhint_popup = motif_popup
-                && wm_hints.is_some_and(|h| !h.acquire_input_via_wm)
+                && wm_hints.is_some_and(|h| !h.allow_focus_when_popup)
                 && !hints.functions.as_ref().is_some_and(|f| {
                     f.intersects(
                         motif::Functions::Minimize
@@ -1149,7 +1149,7 @@ impl From<&[u32]> for WmNormalHints {
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq)]
 pub struct WmHints {
     pub window_group: Option<x::Window>,
-    pub acquire_input_via_wm: bool,
+    pub allow_focus_when_popup: bool,
 }
 
 impl From<&[u32]> for WmHints {
@@ -1162,7 +1162,7 @@ impl From<&[u32]> for WmHints {
             ret.window_group = Some(window);
         }
         if flags.contains(WmHintsFlags::Input) {
-            ret.acquire_input_via_wm = value[1] == 1;
+            ret.allow_focus_when_popup = value[1] == 1;
         }
 
         ret
