@@ -132,7 +132,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
     ];
 
     fn xwayland_exit_code(rx: &mut UnixStream) -> ExitStatus {
-        let mut data = [0; (i32::BITS / 8) as usize];
+        let mut data = [0; std::mem::size_of::<i32>()];
         rx.read_exact(&mut data).unwrap();
         ExitStatus::from_raw(i32::from_ne_bytes(data))
     }
