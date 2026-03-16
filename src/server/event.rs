@@ -691,6 +691,7 @@ impl Event for client::wl_pointer::Event {
                     decoration::handle_pointer_leave(state, parent);
                     return;
                 }
+
                 if let Some(surface) = surface
                     .data()
                     .copied()

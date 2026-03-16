@@ -452,10 +452,8 @@ impl XState {
 
                     let active_win: &[x::Window] = active_win.value();
                     if active_win[0] == e.window() {
-                        // The connection on the server state stores state.
-                        server_state
-                            .connection
-                            .focus_window(x::Window::none(), None);
+                        let restore_to = server_state.focus_restore_target();
+                        server_state.connection.focus_window(restore_to, None);
                     }
 
                     unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
@@ -655,6 +653,9 @@ impl XState {
         if let Some(decorations) = motif_hints.as_ref().and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
         }
+        if let Some(hints) = wmhints {
+            server_state.set_win_hints(window, hints);
+        }
 
         let transient_for = self
             .property_cookie_wrapper(
@@ -729,7 +730,7 @@ impl XState {
             // Sometimes popup is false-positive meaning both MOTIF Decorations and WM_HINTS input indicates its a popup
             // but MOTIF has function flags that toplevel window should do
             wmhint_popup = motif_popup
-                && wm_hints.is_some_and(|h| !h.acquire_input_via_wm)
+                && wm_hints.is_some_and(|h| !h.allow_focus_when_popup)
                 && !hints.functions.as_ref().is_some_and(|f| {
                     f.intersects(
                         motif::Functions::Minimize
@@ -1145,10 +1146,10 @@ impl From<&[u32]> for WmNormalHints {
     }
 }
 
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq)]
 pub struct WmHints {
     pub window_group: Option<x::Window>,
-    pub acquire_input_via_wm: bool,
+    pub allow_focus_when_popup: bool,
 }
 
 impl From<&[u32]> for WmHints {
@@ -1161,7 +1162,7 @@ impl From<&[u32]> for WmHints {
             ret.window_group = Some(window);
         }
         if flags.contains(WmHintsFlags::Input) {
-            ret.acquire_input_via_wm = value[1] == 1;
+            ret.allow_focus_when_popup = value[1] == 1;
         }
 
         ret
