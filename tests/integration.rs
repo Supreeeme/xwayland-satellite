@@ -102,12 +102,11 @@ impl Drop for Fixture {
         let thread = unsafe { ManuallyDrop::take(&mut self.thread) };
         // Sending anything to the quit receiver to stop the main loop. Then we guarantee a main
         // thread does not use file descriptors which outlive the Fixture's BorrowedFd
-        let return_ptr = Box::into_raw(Box::new(0_usize)) as usize;
         // If the receiver end of the pipe closed, the main thread dropped it, which means that
         // thread already terminated
         if self
             .quit_tx
-            .write_all(&return_ptr.to_ne_bytes())
+            .write_all(&0_i32.to_ne_bytes())
             .is_err_and(|e| e.kind() != std::io::ErrorKind::BrokenPipe)
         {
             panic!("could not message the main thread to terminate");
