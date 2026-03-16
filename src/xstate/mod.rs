@@ -635,6 +635,7 @@ impl XState {
         let class = self.get_wm_class(window);
         let size_hints = self.get_wm_size_hints(window);
         let motif_wm_hints = self.get_motif_wm_hints(window);
+        let wine_hwnd_style = self.get_wine_hwnd_style(window);
         let wm_hints = self.get_wm_hints(window);
         let mut title = name.resolve()?;
         if title.is_none() {
@@ -655,7 +656,7 @@ impl XState {
         if let Some(decorations) = motif_hints.as_ref().and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
         }
-
+        let wine_style = wine_hwnd_style.resolve()?;
         let transient_for = self
             .property_cookie_wrapper(
                 window,
@@ -667,8 +668,13 @@ impl XState {
             .resolve()?
             .flatten();
 
-        let is_popup =
-            self.guess_is_popup(window, motif_hints, wmhints, transient_for.is_some())?;
+        let is_popup = self.guess_is_popup(
+            window,
+            motif_hints,
+            wmhints,
+            transient_for.is_some(),
+            wine_style,
+        )?;
         server_state.set_popup(window, is_popup);
         if let Some(parent) = transient_for.and_then(|t| (!is_popup).then_some(t)) {
             server_state.set_transient_for(window, parent);
@@ -698,10 +704,16 @@ impl XState {
         motif_hints: Option<motif::Hints>,
         wm_hints: Option<WmHints>,
         has_transient_for: bool,
+        wine_style: Option<WineHwndStyle>,
     ) -> XResult<bool> {
         let mut motif_popup = false;
         let mut wmhint_popup = false;
         let mut has_skip_taskbar = None;
+        let mut is_wine_toplevel = false;
+        // Used for steam/proton games, motif hints are not enough here to determine popup vs toplevel
+        if let Some(style) = wine_style {
+            is_wine_toplevel = !style.is_popup();
+        }
 
         let attrs = self
             .connection
@@ -770,8 +782,12 @@ impl XState {
         let mut known_window_type = false;
         for ty in window_types {
             match ty {
-                x if x == self.window_atoms.normal => is_popup = override_redirect || wmhint_popup,
-                x if x == self.window_atoms.dialog => is_popup = override_redirect,
+                x if x == self.window_atoms.normal => {
+                    is_popup = !is_wine_toplevel && (override_redirect || wmhint_popup);
+                }
+                x if x == self.window_atoms.dialog => {
+                    is_popup = override_redirect || has_transient_for
+                }
                 x if x == self.window_atoms.utility => is_popup = override_redirect || motif_popup,
                 x if [
                     self.window_atoms.menu,
@@ -948,6 +964,25 @@ impl XState {
         }
     }
 
+    fn get_wine_hwnd_style(
+        &self,
+        window: x::Window,
+    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = WineHwndStyle>> {
+        let cookie =
+            self.get_property_cookie(window, self.atoms.wine_hwnd_style, x::ATOM_CARDINAL, 1);
+
+        let resolver = |reply: x::GetPropertyReply| {
+            let data: &[u32] = reply.value();
+            WineHwndStyle::from(data)
+        };
+
+        PropertyCookieWrapper {
+            connection: &self.connection,
+            cookie,
+            resolver,
+        }
+    }
+
     fn get_pid(&self, window: x::Window) -> Option<u32> {
         let Some(pid) = self
             .connection
@@ -1053,6 +1088,7 @@ xcb::atoms_struct! {
         client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
         supported => b"_NET_SUPPORTED" only_if_exists = false,
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
+        wine_hwnd_style => b"_WINE_HWND_STYLE" only_if_exists = false,
         utf8_string => b"UTF8_STRING" only_if_exists = false,
         clipboard => b"CLIPBOARD" only_if_exists = false,
         clipboard_targets => b"_clipboard_targets" only_if_exists = false,
@@ -1122,6 +1158,72 @@ pub struct WmNormalHints {
     pub max_size: Option<WinSize>,
 }
 
+bitflags! {
+    /// https://learn.microsoft.com/en-us/windows/win32/winmsg/window-styles
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    pub struct Window32Style: u32 {
+        const WS_POPUP = 0x80000000;
+        const WS_CAPTION    = 0x00C00000;
+        const WS_THICKFRAME = 0x00040000;
+    }
+}
+
+bitflags! {
+    /// https://learn.microsoft.com/en-us/windows/win32/winmsg/extended-window-styles
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    pub struct Window32StyleEx: u32 {
+        const WS_EX_APPWINDOW  = 0x00040000;
+        const WS_EX_TOOLWINDOW = 0x00000080;
+        const WS_EX_LAYERED    = 0x00080000;
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct WineHwndStyle {
+    pub style: Option<Window32Style>,
+    pub ex_style: Option<Window32StyleEx>,
+}
+
+impl From<&[u32]> for WineHwndStyle {
+    fn from(value: &[u32]) -> Self {
+        let mut ret = Self::default();
+
+        if let Some(&raw) = value.first() {
+            ret.style = Some(Window32Style::from_bits_truncate(raw));
+        }
+        if let Some(&raw) = value.get(1) {
+            ret.ex_style = Some(Window32StyleEx::from_bits_truncate(raw));
+        }
+
+        ret
+    }
+}
+
+impl WineHwndStyle {
+    pub fn is_popup(&self) -> bool {
+        if let Some(ex) = self.ex_style {
+            if ex.contains(Window32StyleEx::WS_EX_APPWINDOW) {
+                return false;
+            }
+            // Toolwindows are popups
+            if ex.contains(Window32StyleEx::WS_EX_TOOLWINDOW) {
+                return true;
+            }
+        }
+
+        match self.style {
+            Some(s) => {
+                if !s.contains(Window32Style::WS_POPUP) {
+                    return false;
+                }
+                // caption or frame it toplevel
+                !s.intersects(Window32Style::WS_CAPTION | Window32Style::WS_THICKFRAME)
+            }
+            None => false,
+        }
+    }
+}
+
 impl From<&[u32]> for WmNormalHints {
     fn from(value: &[u32]) -> Self {
         let mut ret = Self::default();
@@ -1184,6 +1286,7 @@ mod motif {
     }
 
     bitflags! {
+        #[derive(Debug)]
         pub(super) struct Functions: u32 {
             const All = 1;
             const Resize = 2;
