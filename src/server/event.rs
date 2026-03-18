@@ -404,10 +404,13 @@ impl SurfaceEvents {
                     }
                 };
 
+                let window = data.get::<&WindowData>().unwrap();
+
                 role.xdg_mut().unwrap().pending = Some(PendingSurfaceState {
+                    x: window.attrs.dims.x as i32,
+                    y: window.attrs.dims.y as i32,
                     width,
                     height,
-                    ..Default::default()
                 });
             }
             xdg_toplevel::Event::Close => {

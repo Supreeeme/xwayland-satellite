@@ -491,6 +491,15 @@ impl XState {
                     let mut list = Vec::new();
                     let mask = e.value_mask();
 
+                    server_state.handle_configure_request(
+                        e.window(),
+                        mask,
+                        e.x(),
+                        e.y(),
+                        e.width(),
+                        e.height(),
+                    );
+
                     if server_state.can_change_position(e.window()) {
                         if mask.contains(x::ConfigWindowMask::X) {
                             list.push(x::ConfigWindow::X(e.x().into()));
@@ -701,6 +710,7 @@ impl XState {
     ) -> XResult<bool> {
         let mut motif_popup = false;
         let mut wmhint_popup = false;
+        let mut motif_functions_empty = false;
         let mut has_skip_taskbar = None;
 
         let attrs = self
@@ -738,11 +748,7 @@ impl XState {
                             | motif::Functions::All,
                     )
                 });
-            // If the motif hints indicate the user shouldn't be able to do anything
-            // to the window at all, it stands to reason it's probably a popup.
-            if hints.functions.is_some_and(|f| f.is_empty()) {
-                return Ok(true);
-            }
+            motif_functions_empty = hints.functions.is_some_and(|f| f.is_empty());
         }
 
         let override_redirect = self.connection.wait_for_reply(attrs)?.override_redirect();
@@ -755,6 +761,14 @@ impl XState {
                 vec![self.window_atoms.normal]
             }
         });
+
+        let has_normal_type = window_types.contains(&self.window_atoms.normal);
+
+        // Empty MOTIF functions are a reasonable popup signal for ambiguous windows,
+        // but some normal undecorated toplevels use them for client-side chrome.
+        if motif_functions_empty && !has_normal_type {
+            return Ok(true);
+        }
 
         if log::log_enabled!(log::Level::Debug) {
             let win_types = window_types
