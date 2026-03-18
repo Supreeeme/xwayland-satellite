@@ -1,4 +1,7 @@
-use super::{InnerServerState, NoConnection, ServerState, WindowDims, selection::Clipboard};
+use super::{
+    InitialToplevelMapState, InnerServerState, NoConnection, ServerState, WindowDims,
+    selection::Clipboard,
+};
 use crate::server::selection::{Primary, SelectionType};
 use crate::xstate::{SetState, WinSize, WmName};
 use crate::{XConnection, timespec_from_millis};
@@ -8,6 +11,7 @@ use std::io::Write;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use testwl::{SendDataForMimeFn, SurfaceRole};
 use wayland_client::{
     Connection, Proxy, WEnum,
@@ -379,6 +383,45 @@ impl EarlyTestFixture {
 
         let xwls_connection = Connection::from_socket(fake_client).unwrap();
         let registry = TestObject::<WlRegistry>::from_request(
+
+            #[test]
+            fn reconfigure_toplevel_preserves_position() {
+                let (mut f, comp) = TestFixture::new_with_compositor();
+                let window = Window::new(1);
+                let (buffer, surface) = comp.create_surface();
+                let dims = WindowDims {
+                    x: 510,
+                    y: 110,
+                    width: 100,
+                    height: 100,
+                };
+
+                f.new_window(
+                    window,
+                    false,
+                    WindowData {
+                        mapped: true,
+                        dims,
+                        fullscreen: false,
+                    },
+                );
+                f.map_window(&comp, window, &surface.obj, &buffer);
+                f.run();
+                let surface_id = f.check_new_surface();
+
+                f.testwl.configure_toplevel(surface_id, 80, 120, vec![]);
+                f.run();
+
+                f.assert_window_dimensions(
+                    window,
+                    surface_id,
+                    WindowDims {
+                        width: 80,
+                        height: 120,
+                        ..dims
+                    },
+                );
+            }
             &xwls_connection.display(),
             Req::<WlDisplay>::GetRegistry {},
         );
@@ -1028,6 +1071,246 @@ fn toplevel_flow() {
     f.run();
 
     assert!(f.testwl.get_surface_data(testwl_id).is_none());
+}
+
+#[test]
+fn origin_toplevel_is_deferred_until_post_map_configure() {
+    let (mut f, compositor) = TestFixture::new_with_compositor();
+    let window = Window::new(1);
+    let (_, surface) = compositor.create_surface();
+
+    let data = WindowData {
+        mapped: true,
+        dims: WindowDims {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 50,
+        },
+        fullscreen: false,
+    };
+
+    f.new_window(window, false, data);
+    f.satellite.map_window(window);
+    f.associate_window(&compositor, window, &surface.obj);
+    f.run();
+
+    assert!(
+        f.testwl.last_created_surface_id().is_none(),
+        "origin-starting toplevel should remain deferred until a post-map configure arrives"
+    );
+
+    f.reconfigure_window(
+        window,
+        WindowDims {
+            x: 1430,
+            y: 0,
+            width: 50,
+            height: 50,
+        },
+        false,
+    );
+    f.run();
+
+    let id = f
+        .testwl
+        .last_created_surface_id()
+        .expect("Surface not created after configure");
+    let surface_data = f.testwl.get_surface_data(id).unwrap();
+    assert!(matches!(surface_data.role, Some(SurfaceRole::Toplevel(_))));
+}
+
+#[test]
+fn deferred_origin_toplevel_releases_on_same_geometry_configure() {
+    let (mut f, compositor) = TestFixture::new_with_compositor();
+    let window = Window::new(1);
+    let (_, surface) = compositor.create_surface();
+
+    let data = WindowData {
+        mapped: true,
+        dims: WindowDims {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 50,
+        },
+        fullscreen: false,
+    };
+
+    f.new_window(window, false, data);
+    f.satellite.map_window(window);
+    f.associate_window(&compositor, window, &surface.obj);
+    f.run();
+    assert!(f.testwl.last_created_surface_id().is_none());
+
+    f.reconfigure_window(
+        window,
+        WindowDims {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 50,
+        },
+        false,
+    );
+    f.run();
+
+    let id = f
+        .testwl
+        .last_created_surface_id()
+        .expect("Surface not created after same-geometry configure");
+    let surface_data = f.testwl.get_surface_data(id).unwrap();
+    assert!(matches!(surface_data.role, Some(SurfaceRole::Toplevel(_))));
+}
+
+#[test]
+fn deferred_origin_toplevel_falls_back_to_timeout_release() {
+    let (mut f, compositor) = TestFixture::new_with_compositor();
+    let window = Window::new(1);
+    let (_, surface) = compositor.create_surface();
+
+    let data = WindowData {
+        mapped: true,
+        dims: WindowDims {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 50,
+        },
+        fullscreen: false,
+    };
+
+    f.new_window(window, false, data);
+    f.satellite.map_window(window);
+    f.associate_window(&compositor, window, &surface.obj);
+    f.run();
+    assert!(f.testwl.last_created_surface_id().is_none());
+
+    let entity = f.satellite.windows[&window];
+    f.satellite
+        .world
+        .get::<&mut super::WindowData>(entity)
+        .unwrap()
+        .initial_toplevel_map_state = InitialToplevelMapState::Deferred {
+        deadline: Instant::now() - Duration::from_millis(1),
+    };
+
+    f.run();
+
+    let id = f
+        .testwl
+        .last_created_surface_id()
+        .expect("Surface not created after timeout fallback release");
+    let surface_data = f.testwl.get_surface_data(id).unwrap();
+    assert!(matches!(surface_data.role, Some(SurfaceRole::Toplevel(_))));
+}
+
+#[test]
+fn deferred_origin_toplevel_preserves_buffer_attached_before_release() {
+    let (mut f, compositor) = TestFixture::new_with_compositor();
+    let window = Window::new(1);
+    let (buffer, surface) = compositor.create_surface();
+
+    let data = WindowData {
+        mapped: true,
+        dims: WindowDims {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 50,
+        },
+        fullscreen: false,
+    };
+
+    f.new_window(window, false, data);
+    f.satellite.map_window(window);
+    f.associate_window(&compositor, window, &surface.obj);
+    f.run();
+    assert!(f.testwl.last_created_surface_id().is_none());
+
+    surface
+        .send_request(Req::<WlSurface>::Attach {
+            buffer: Some(buffer.obj.clone()),
+            x: 0,
+            y: 0,
+        })
+        .unwrap();
+    surface.send_request(Req::<WlSurface>::Commit).unwrap();
+
+    f.satellite.handle_configure_request(
+        window,
+        x::ConfigWindowMask::X
+            | x::ConfigWindowMask::Y
+            | x::ConfigWindowMask::WIDTH
+            | x::ConfigWindowMask::HEIGHT,
+        1430,
+        680,
+        50,
+        50,
+    );
+    f.reconfigure_window(
+        window,
+        WindowDims {
+            x: 1430,
+            y: 680,
+            width: 50,
+            height: 50,
+        },
+        false,
+    );
+    f.run();
+
+    let id = f
+        .testwl
+        .last_created_surface_id()
+        .expect("Surface not created after configure");
+    f.testwl.configure_toplevel(id, 50, 50, vec![]);
+    f.run();
+
+    let surface_data = f.testwl.get_surface_data(id).unwrap();
+    assert!(surface_data.buffer.is_some(), "buffer attached before release was lost");
+}
+
+#[test]
+fn pre_role_configure_request_updates_startup_position_before_association() {
+    let (mut f, compositor) = TestFixture::new_with_compositor();
+    let window = Window::new(1);
+    let (_, surface) = compositor.create_surface();
+
+    let data = WindowData {
+        mapped: true,
+        dims: WindowDims {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 50,
+        },
+        fullscreen: false,
+    };
+
+    f.new_window(window, false, data);
+    f.satellite.map_window(window);
+    f.satellite.handle_configure_request(
+        window,
+        x::ConfigWindowMask::X
+            | x::ConfigWindowMask::Y
+            | x::ConfigWindowMask::WIDTH
+            | x::ConfigWindowMask::HEIGHT,
+        1430,
+        680,
+        50,
+        50,
+    );
+
+    f.associate_window(&compositor, window, &surface.obj);
+    f.run();
+
+    let id = f
+        .testwl
+        .last_created_surface_id()
+        .expect("Surface not created after association");
+    let surface_data = f.testwl.get_surface_data(id).unwrap();
+    assert!(matches!(surface_data.role, Some(SurfaceRole::Toplevel(_))));
 }
 
 #[test]
@@ -1856,6 +2139,42 @@ fn output_offset_surface_positioning() {
     popup_dims.x = 10;
     popup_dims.y = 10;
     f.assert_window_dimensions(popup, p_id, popup_dims);
+}
+
+#[test]
+fn output_offset_preserves_explicit_startup_position_on_first_enter() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+
+    f.new_output(0, 0);
+    let (_, output) = f.new_output(500, 100);
+    f.run();
+
+    let window = Window::new(1);
+    let (buffer, surface) = comp.create_surface();
+    let dims = WindowDims {
+        x: 510,
+        y: 110,
+        width: 100,
+        height: 100,
+    };
+
+    f.new_window(
+        window,
+        false,
+        WindowData {
+            mapped: true,
+            dims,
+            fullscreen: false,
+        },
+    );
+    f.map_window(&comp, window, &surface.obj, &buffer);
+    f.run();
+    let toplevel_id = f.check_new_surface();
+
+    f.testwl.move_surface_to_output(toplevel_id, &output);
+    f.run();
+
+    assert_eq!(f.connection().window(window).dims, dims);
 }
 
 #[test]

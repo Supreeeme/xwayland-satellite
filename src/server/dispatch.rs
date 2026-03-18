@@ -92,8 +92,9 @@ impl<S: X11Selection> Dispatch<WlSurface, Entity> for InnerServerState<S> {
     ) {
         let data = state.world.entity(*entity).unwrap();
         let mut role = data.get::<&mut SurfaceRole>();
+        let waiting_for_initial_role = data.has::<x::Window>() && role.is_none();
         let xdg = role.as_ref().and_then(|role| role.xdg());
-        let configured = xdg.is_none_or(|xdg| xdg.configured);
+        let configured = !waiting_for_initial_role && xdg.is_none_or(|xdg| xdg.configured);
         let client = data.get::<&client::wl_surface::WlSurface>().unwrap();
 
         let mut cmd = CommandBuffer::new();
@@ -1578,11 +1579,8 @@ impl<S: X11Selection> Dispatch<XwaylandSurfaceV1, Entity> for InnerServerState<S
                     let win = data.get::<&x::Window>().as_deref().copied().unwrap();
                     state.windows.insert(win, *entity);
                     debug!("associate {surface_id} with {win:?} (serial {serial:?})");
-                    if data.get::<&WindowData>().unwrap().mapped
-                        && state.create_role_window(win, *entity)
-                    {
-                        state.activate_window(win);
-                    }
+                    let _ = data;
+                    state.maybe_create_mapped_window_role(win);
                 } else {
                     state.world.insert(*entity, (serial,)).unwrap();
                 }

@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
 use wayland_client::{
     Connection, EventQueue, Proxy, QueueHandle,
@@ -115,15 +115,26 @@ struct WindowOutputOffset {
     y: i32,
 }
 
+#[derive(Debug, Default)]
+enum InitialToplevelMapState {
+    #[default]
+    None,
+    Deferred { deadline: Instant },
+    Released,
+}
+
 #[derive(Debug)]
 struct WindowData {
     mapped: bool,
     attrs: WindowAttributes,
     output_offset: WindowOutputOffset,
     activation_token: Option<String>,
+    initial_toplevel_map_state: InitialToplevelMapState,
 }
 
 impl WindowData {
+    const DEFERRED_INITIAL_TOPLEVEL_TIMEOUT: Duration = Duration::from_millis(200);
+
     fn new(override_redirect: bool, dims: WindowDims, activation_token: Option<String>) -> Self {
         Self {
             mapped: false,
@@ -134,7 +145,41 @@ impl WindowData {
             },
             output_offset: WindowOutputOffset::default(),
             activation_token,
+            initial_toplevel_map_state: InitialToplevelMapState::None,
         }
+    }
+
+    fn should_defer_initial_toplevel_map(&self) -> bool {
+        !self.attrs.is_popup
+            && !self
+                .attrs
+                .decorations
+                .is_some_and(|decorations| decorations.is_serverside())
+            && self.attrs.dims.x == 0
+            && self.attrs.dims.y == 0
+            && matches!(self.initial_toplevel_map_state, InitialToplevelMapState::None)
+    }
+
+    fn defer_initial_toplevel_map(&mut self) {
+        self.initial_toplevel_map_state = InitialToplevelMapState::Deferred {
+            deadline: Instant::now() + Self::DEFERRED_INITIAL_TOPLEVEL_TIMEOUT,
+        };
+    }
+
+    fn deferred_initial_toplevel_deadline(&self) -> Option<Instant> {
+        match self.initial_toplevel_map_state {
+            InitialToplevelMapState::Deferred { deadline } => Some(deadline),
+            InitialToplevelMapState::None | InitialToplevelMapState::Released => None,
+        }
+    }
+
+    fn release_initial_toplevel_map(&mut self) -> bool {
+        if matches!(self.initial_toplevel_map_state, InitialToplevelMapState::Deferred { .. }) {
+            self.initial_toplevel_map_state = InitialToplevelMapState::Released;
+            return true;
+        }
+
+        false
     }
 
     fn update_output_offset<C: XConnection>(
@@ -149,6 +194,15 @@ impl WindowData {
         }
 
         let dims = &mut self.attrs.dims;
+
+        // A non-zero startup position is already in global X11 coordinates when the
+        // surface first enters an output. Record the output origin without shifting
+        // the window again; later output moves should still apply deltas normally.
+        if self.output_offset == WindowOutputOffset::default() && (dims.x != 0 || dims.y != 0) {
+            self.output_offset = offset;
+            return;
+        }
+
         dims.x += (offset.x - self.output_offset.x) as i16;
         dims.y += (offset.y - self.output_offset.y) as i16;
         self.output_offset = offset;
@@ -739,6 +793,7 @@ impl<C: XConnection> ServerState<C> {
 
         self.handle_selection_events();
         self.handle_activations();
+        self.release_expired_deferred_initial_toplevels();
         if let Err(e) = self.queue.flush() {
             match e {
                 wayland_client::backend::WaylandError::Io(error)
@@ -1027,18 +1082,167 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         self.world.insert(id, (SurfaceSerial(serial),)).unwrap();
     }
 
+    fn maybe_create_mapped_window_role(&mut self, window: x::Window) -> bool {
+        let Some(entity) = self.windows.get(&window).copied() else {
+            return false;
+        };
+
+        if self.world.get::<&WlSurface>(entity).is_err()
+            || self.world.get::<&SurfaceRole>(entity).is_ok()
+        {
+            return false;
+        }
+
+        let mut win = self.world.get::<&mut WindowData>(entity).unwrap();
+        if !win.mapped {
+            return false;
+        }
+
+        if win.should_defer_initial_toplevel_map() {
+            debug!(
+                "deferring initial toplevel creation for {window:?} until startup geometry settles; provisional dims {:?}",
+                win.attrs.dims
+            );
+            win.defer_initial_toplevel_map();
+            return false;
+        }
+
+        if win.deferred_initial_toplevel_deadline().is_some() {
+            return false;
+        }
+
+        drop(win);
+
+        let is_toplevel = self.create_role_window(window, entity);
+        if is_toplevel {
+            self.activate_window(window);
+        }
+
+        is_toplevel
+    }
+
+    fn release_deferred_initial_toplevel_map(&mut self, window: x::Window, reason: &str) -> bool {
+        let Some(entity) = self.windows.get(&window).copied() else {
+            return false;
+        };
+
+        let Some(mut win) = self
+            .world
+            .entity(entity)
+            .ok()
+            .map(|data| data.get::<&mut WindowData>().unwrap())
+        else {
+            return false;
+        };
+
+        let dims = win.attrs.dims;
+        if !win.release_initial_toplevel_map() {
+            return false;
+        }
+
+        debug!(
+            "releasing deferred initial toplevel creation for {window:?} after {reason}; dims={dims:?}"
+        );
+        drop(win);
+
+        if self.world.get::<&WlSurface>(entity).is_ok()
+            && self.world.get::<&SurfaceRole>(entity).is_err()
+        {
+            let is_toplevel = self.create_role_window(window, entity);
+            if is_toplevel {
+                self.activate_window(window);
+            }
+        }
+
+        true
+    }
+
+    fn release_expired_deferred_initial_toplevels(&mut self) {
+        let now = Instant::now();
+        let deferred = self
+            .world
+            .query::<(&x::Window, &WindowData)>()
+            .with::<&WlSurface>()
+            .without::<&SurfaceRole>()
+            .iter()
+            .filter_map(|(_, (window, win))| {
+                let deadline = win.deferred_initial_toplevel_deadline()?;
+                (win.mapped && deadline <= now).then_some(*window)
+            })
+            .collect::<Vec<_>>();
+
+        for window in deferred {
+            self.release_deferred_initial_toplevel_map(window, "fallback timeout");
+        }
+    }
+
     pub fn can_change_position(&self, window: x::Window) -> bool {
-        let Some(win) = self
+        let Some(entity) = self
             .windows
             .get(&window)
             .copied()
-            .and_then(|id| self.world.entity(id).ok())
-            .map(|data| data.get::<&WindowData>().unwrap())
         else {
             return true;
         };
 
-        !win.mapped || win.attrs.is_popup
+        if self.world.get::<&SurfaceRole>(entity).is_err() {
+            return true;
+        }
+
+        let Some(win) = self.world.entity(entity).ok().map(|data| data.get::<&WindowData>().unwrap()) else {
+            return true;
+        };
+
+        !win.mapped || win.attrs.is_popup || win.deferred_initial_toplevel_deadline().is_some()
+    }
+
+    pub fn handle_configure_request(
+        &mut self,
+        window: x::Window,
+        mask: x::ConfigWindowMask,
+        x: i16,
+        y: i16,
+        width: u16,
+        height: u16,
+    ) {
+        let Some(entity) = self.windows.get(&window).copied() else {
+            return;
+        };
+
+        let Some(mut win) = self
+            .world
+            .entity(entity)
+            .ok()
+            .map(|data| data.get::<&mut WindowData>().unwrap())
+        else {
+            return;
+        };
+
+        let has_role = self.world.get::<&SurfaceRole>(entity).is_ok();
+        let has_deferred_initial_map = win.deferred_initial_toplevel_deadline().is_some();
+
+        if has_role && !has_deferred_initial_map {
+            return;
+        }
+
+        if mask.contains(x::ConfigWindowMask::X) {
+            win.attrs.dims.x = x;
+        }
+        if mask.contains(x::ConfigWindowMask::Y) {
+            win.attrs.dims.y = y;
+        }
+        if mask.contains(x::ConfigWindowMask::WIDTH) {
+            win.attrs.dims.width = width;
+        }
+        if mask.contains(x::ConfigWindowMask::HEIGHT) {
+            win.attrs.dims.height = height;
+        }
+
+        drop(win);
+
+        if !has_role {
+            self.maybe_create_mapped_window_role(window);
+        }
     }
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
@@ -1059,7 +1263,12 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             width: event.width(),
             height: event.height(),
         };
-        if dims == win.attrs.dims {
+        let previous_dims = win.attrs.dims;
+        let had_deferred_initial_map = win.deferred_initial_toplevel_deadline().is_some();
+
+        if had_deferred_initial_map {
+            win.attrs.dims = dims;
+        } else if dims == previous_dims {
             return;
         } else if win.attrs.is_popup {
             win.attrs.dims = dims;
@@ -1069,6 +1278,12 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         if !win.mapped {
             win.attrs.dims = dims;
+            return;
+        }
+
+        if had_deferred_initial_map {
+            drop(win);
+            self.release_deferred_initial_toplevel_map(event.window(), "post-map configure");
             return;
         }
 
@@ -1119,6 +1334,8 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         };
 
         win.mapped = true;
+        drop(win);
+        self.maybe_create_mapped_window_role(window);
     }
 
     pub fn unmap_window(&mut self, window: x::Window) {
@@ -1142,6 +1359,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                 self.last_hovered.take();
             }
             win.mapped = false;
+            win.initial_toplevel_map_state = InitialToplevelMapState::None;
         }
 
         if let Ok(mut role) = self.world.remove_one::<SurfaceRole>(entity.unwrap()) {
