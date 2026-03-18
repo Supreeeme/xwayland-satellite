@@ -486,12 +486,19 @@ impl XState {
                     self.handle_property_change(e, server_state);
                 }
                 xcb::Event::X(x::Event::ConfigureRequest(e)) => {
-                    debug!("{:?} request: {:?}", e.window(), e.value_mask());
-
+                    let can_change_position = server_state.can_change_position(e.window());
+                    let dims = WindowDims {
+                        x: e.x(),
+                        y: e.y(),
+                        width: e.width(),
+                        height: e.height(),
+                    };
                     let mut list = Vec::new();
                     let mask = e.value_mask();
+                    let translated_move = mask.intersects(x::ConfigWindowMask::X | x::ConfigWindowMask::Y)
+                        && server_state.begin_configure_move(e.window(), dims, mask);
 
-                    if server_state.can_change_position(e.window()) {
+                    if !translated_move && can_change_position {
                         if mask.contains(x::ConfigWindowMask::X) {
                             list.push(x::ConfigWindow::X(e.x().into()));
                         }
@@ -721,6 +728,17 @@ impl XState {
         if let Some(states) = window_state.resolve()? {
             has_skip_taskbar = Some(states.contains(&self.atoms.skip_taskbar));
         }
+
+        let override_redirect = self.connection.wait_for_reply(attrs)?.override_redirect();
+        let window_types = window_types.resolve()?.unwrap_or_else(|| {
+            if !override_redirect && has_transient_for {
+                vec![self.window_atoms.dialog]
+            } else {
+                vec![self.window_atoms.normal]
+            }
+        });
+        let has_explicit_normal_type = window_types.contains(&self.window_atoms.normal);
+
         if let Some(hints) = motif_hints {
             // If MOTIF_WM_HINTS provides no decorations for client assume its a popup
             motif_popup = hints.decorations.is_some_and(|d| d.is_clientside());
@@ -738,23 +756,14 @@ impl XState {
                             | motif::Functions::All,
                     )
                 });
-            // If the motif hints indicate the user shouldn't be able to do anything
-            // to the window at all, it stands to reason it's probably a popup.
-            if hints.functions.is_some_and(|f| f.is_empty()) {
+            // Empty function hints are common on client-side decorated toplevels.
+            // Respect an explicit NORMAL window type instead of forcing such windows
+            // down the popup path, which breaks configure-request drag translation.
+            if hints.functions.is_some_and(|f| f.is_empty()) && !has_explicit_normal_type {
                 return Ok(true);
             }
         }
-
-        let override_redirect = self.connection.wait_for_reply(attrs)?.override_redirect();
         let mut is_popup = override_redirect;
-
-        let window_types = window_types.resolve()?.unwrap_or_else(|| {
-            if !override_redirect && has_transient_for {
-                vec![self.window_atoms.dialog]
-            } else {
-                vec![self.window_atoms.normal]
-            }
-        });
 
         if log::log_enabled!(log::Level::Debug) {
             let win_types = window_types
