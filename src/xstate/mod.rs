@@ -486,10 +486,16 @@ impl XState {
                     self.handle_property_change(e, server_state);
                 }
                 xcb::Event::X(x::Event::ConfigureRequest(e)) => {
-                    debug!("{:?} request: {:?}", e.window(), e.value_mask());
-
+                    let dims = WindowDims {
+                        x: e.x(),
+                        y: e.y(),
+                        width: e.width(),
+                        height: e.height(),
+                    };
                     let mut list = Vec::new();
                     let mask = e.value_mask();
+                    let translated_move = mask.intersects(x::ConfigWindowMask::X | x::ConfigWindowMask::Y)
+                        && server_state.begin_configure_move(e.window(), dims, mask);
 
                     server_state.handle_configure_request(
                         e.window(),
@@ -500,7 +506,7 @@ impl XState {
                         e.height(),
                     );
 
-                    if server_state.can_change_position(e.window()) {
+                    if !translated_move && server_state.can_change_position(e.window()) {
                         if mask.contains(x::ConfigWindowMask::X) {
                             list.push(x::ConfigWindow::X(e.x().into()));
                         }
@@ -731,6 +737,17 @@ impl XState {
         if let Some(states) = window_state.resolve()? {
             has_skip_taskbar = Some(states.contains(&self.atoms.skip_taskbar));
         }
+
+        let override_redirect = self.connection.wait_for_reply(attrs)?.override_redirect();
+        let window_types = window_types.resolve()?.unwrap_or_else(|| {
+            if !override_redirect && has_transient_for {
+                vec![self.window_atoms.dialog]
+            } else {
+                vec![self.window_atoms.normal]
+            }
+        });
+        let has_explicit_normal_type = window_types.contains(&self.window_atoms.normal);
+
         if let Some(hints) = motif_hints {
             // If MOTIF_WM_HINTS provides no decorations for client assume its a popup
             motif_popup = hints.decorations.is_some_and(|d| d.is_clientside());
@@ -750,23 +767,11 @@ impl XState {
                 });
             motif_functions_empty = hints.functions.is_some_and(|f| f.is_empty());
         }
-
-        let override_redirect = self.connection.wait_for_reply(attrs)?.override_redirect();
         let mut is_popup = override_redirect;
-
-        let window_types = window_types.resolve()?.unwrap_or_else(|| {
-            if !override_redirect && has_transient_for {
-                vec![self.window_atoms.dialog]
-            } else {
-                vec![self.window_atoms.normal]
-            }
-        });
-
-        let has_normal_type = window_types.contains(&self.window_atoms.normal);
 
         // Empty MOTIF functions are a reasonable popup signal for ambiguous windows,
         // but some normal undecorated toplevels use them for client-side chrome.
-        if motif_functions_empty && !has_normal_type {
+        if motif_functions_empty && !has_explicit_normal_type {
             return Ok(true);
         }
 

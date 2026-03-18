@@ -148,6 +148,7 @@ struct WindowData {
     output_offset_initialized: bool,
     activation_token: Option<String>,
     initial_toplevel_map_state: InitialToplevelMapState,
+    configure_move_serial: Option<u32>,
 }
 
 impl WindowData {
@@ -165,6 +166,7 @@ impl WindowData {
             output_offset_initialized: false,
             activation_token,
             initial_toplevel_map_state: InitialToplevelMapState::None,
+            configure_move_serial: None,
         }
     }
 
@@ -1389,6 +1391,82 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
+    pub fn begin_configure_move(
+        &mut self,
+        window: x::Window,
+        dims: WindowDims,
+        mask: x::ConfigWindowMask,
+    ) -> bool {
+        let should_move = {
+            let Some(data) = self
+                .windows
+                .get(&window)
+                .copied()
+                .and_then(|id| self.world.entity(id).ok())
+            else {
+                return false;
+            };
+
+            let Some(last_click_data) = data.get::<&LastClickSerial>() else {
+                return false;
+            };
+            let serial = last_click_data.1;
+
+            let Some(role) = data.get::<&SurfaceRole>() else {
+                return false;
+            };
+            if !matches!(&*role, SurfaceRole::Toplevel(Some(_))) {
+                return false;
+            }
+            drop(role);
+
+            let mut win = data.get::<&mut WindowData>().unwrap();
+            let current_dims = win.attrs.dims;
+            let requested_x = if mask.contains(x::ConfigWindowMask::X) {
+                dims.x
+            } else {
+                current_dims.x
+            };
+            let requested_y = if mask.contains(x::ConfigWindowMask::Y) {
+                dims.y
+            } else {
+                current_dims.y
+            };
+            let requested_width = if mask.contains(x::ConfigWindowMask::WIDTH) {
+                dims.width
+            } else {
+                current_dims.width
+            };
+            let requested_height = if mask.contains(x::ConfigWindowMask::HEIGHT) {
+                dims.height
+            } else {
+                current_dims.height
+            };
+            let has_position_change =
+                requested_x != current_dims.x || requested_y != current_dims.y;
+            let has_size_change =
+                requested_width != current_dims.width || requested_height != current_dims.height;
+
+            if !win.mapped || win.attrs.is_popup || !has_position_change || has_size_change {
+                return false;
+            }
+
+            if win.configure_move_serial == Some(serial) {
+                return true;
+            }
+
+            win.configure_move_serial = Some(serial);
+            true
+        };
+
+        if !should_move {
+            return false;
+        }
+
+        self.move_window(window);
+        true
+    }
+
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
         let Some((mut win, data)) = self
             .windows
@@ -1453,6 +1531,9 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                 popup.popup.reposition(&popup.positioner, 0);
             }
             SurfaceRole::Toplevel(Some(_)) => {
+                if dims.width != win.attrs.dims.width || dims.height != win.attrs.dims.height {
+                    win.configure_move_serial = None;
+                }
                 win.attrs.dims.width = dims.width;
                 win.attrs.dims.height = dims.height;
                 drop(query);
@@ -1608,12 +1689,14 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return;
         };
 
-        let Some(last_click_data) = data.get::<&LastClickSerial>() else {
+        let last_click_data = data.get::<&LastClickSerial>();
+        let role = data.get::<&SurfaceRole>();
+
+        let Some(last_click_data) = last_click_data else {
             warn!("Requested move of window {window:?} but we don't have a click serial for it");
             return;
         };
 
-        let role = data.get::<&SurfaceRole>();
         let Some(SurfaceRole::Toplevel(Some(data))) = role.as_deref() else {
             warn!("Requested move of non toplevel {window:?} ({role:?})");
             return;
@@ -1633,12 +1716,14 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return;
         };
 
-        let Some(last_click_data) = data.get::<&LastClickSerial>() else {
+        let last_click_data = data.get::<&LastClickSerial>();
+        let role = data.get::<&SurfaceRole>();
+
+        let Some(last_click_data) = last_click_data else {
             warn!("Requested resize of window {window:?} but we don't have a click serial for it");
             return;
         };
 
-        let role = data.get::<&SurfaceRole>();
         let Some(SurfaceRole::Toplevel(Some(data))) = role.as_deref() else {
             warn!("Requested resize of non toplevel {window:?} ({role:?})");
             return;
