@@ -741,6 +741,10 @@ impl TestFixture<FakeXConnection> {
             assert!(surface_data.buffer.is_some());
         }
 
+        let scale = self.satellite.current_scale;
+        let expected_width = (100.0 * scale) as u16;
+        let expected_height = (100.0 * scale) as u16;
+
         let win_data = self.connection().windows.get(&window).map(|d| &d.dims);
         assert!(
             matches!(
@@ -748,9 +752,9 @@ impl TestFixture<FakeXConnection> {
                 Some(&super::WindowDims {
                     x: 0,
                     y: 0,
-                    width: 100,
-                    height: 100
-                })
+                    width,
+                    height
+                }) if width == expected_width && height == expected_height
             ),
             "Incorrect window geometry: {win_data:?}"
         );
