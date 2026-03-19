@@ -1139,7 +1139,6 @@ impl WindowRoleHeuristics {
 
         let mut motif_no_decor = false;
         let mut wmhint_popup = false;
-        let mut forced_size = false;
         if let Some(hints) = self.motif_wm_hints {
             motif_no_decor = hints.decorations.is_some_and(|d| d.is_clientside());
             // WMHINTS is considered popup only if client is not decorated && client does not
@@ -1165,12 +1164,11 @@ impl WindowRoleHeuristics {
                 return WindowRole::Popup;
             }
         }
-        if let Some(hints) = self.wm_normal_hints {
-            forced_size = hints
-                .min_size
-                .zip(hints.max_size)
-                .is_some_and(|(min, max)| min == max);
-        }
+        let forced_size = self.wm_normal_hints.is_some_and(|h| {
+            h.min_size
+                .zip(h.max_size)
+                .is_some_and(|(min, max)| min == max)
+        });
 
         let mut window_types = self.window_types.clone();
         if self.window_types.is_empty() {
