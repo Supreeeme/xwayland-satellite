@@ -223,6 +223,17 @@ impl Fixture {
         window: x::Window,
         surface: testwl::SurfaceId,
     ) {
+        self.configure_and_verify_new_toplevel_with_size(connection, window, surface, 100, 100);
+    }
+
+    fn configure_and_verify_new_toplevel_with_size(
+        &mut self,
+        connection: &mut Connection,
+        window: x::Window,
+        surface: testwl::SurfaceId,
+        width: u16,
+        height: u16,
+    ) {
         let data = self.testwl.get_surface_data(surface).unwrap();
         assert!(
             matches!(data.role, Some(testwl::SurfaceRole::Toplevel(_))),
@@ -240,8 +251,8 @@ impl Fixture {
 
         assert_eq!(geometry.x(), 0);
         assert_eq!(geometry.y(), 0);
-        assert_eq!(geometry.width(), 100);
-        assert_eq!(geometry.height(), 100);
+        assert_eq!(geometry.width(), width);
+        assert_eq!(geometry.height(), height);
     }
 
     #[track_caller]
@@ -250,13 +261,24 @@ impl Fixture {
         connection: &mut Connection,
         window: x::Window,
     ) -> testwl::SurfaceId {
+        self.map_as_toplevel_with_size(connection, window, 100, 100)
+    }
+
+    #[track_caller]
+    fn map_as_toplevel_with_size(
+        &mut self,
+        connection: &mut Connection,
+        window: x::Window,
+        width: u16,
+        height: u16,
+    ) -> testwl::SurfaceId {
         connection.map_window(window);
         self.wait_and_dispatch();
         let surface = self
             .testwl
             .last_created_surface_id()
             .expect("No surface created");
-        self.configure_and_verify_new_toplevel(connection, window, surface);
+        self.configure_and_verify_new_toplevel_with_size(connection, window, surface, width, height);
         surface
     }
 
@@ -1884,7 +1906,7 @@ fn forced_1x_scale_consistent_x11_size() {
 
     let mut conn = Connection::new(&f.display);
     let window = conn.new_window(conn.root, 0, 0, 200, 200, false);
-    let surface = f.map_as_toplevel(&mut conn, window);
+    let surface = f.map_as_toplevel_with_size(&mut conn, window, 200, 200);
     f.testwl.move_surface_to_output(surface, &output);
     f.testwl.move_pointer_to(surface, 30.0, 40.0);
     f.wait_and_dispatch();
