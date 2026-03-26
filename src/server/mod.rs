@@ -689,10 +689,9 @@ impl<C: XConnection> ServerState<C> {
 
                     drop(surface_query);
                     for surface in surfaces {
-                        update_surface_viewport(
-                            &self.world,
-                            self.world.query_one(surface).unwrap(),
-                        );
+                        if let Ok(query) = self.world.query_one(surface) {
+                            update_surface_viewport(&self.world, query);
+                        }
                     }
                 }
             }

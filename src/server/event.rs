@@ -470,7 +470,9 @@ pub(super) fn update_surface_viewport(
         &WlSurface,
     )>,
 ) {
-    let (window_data, viewport, scale_factor, mut role, surface) = surface_query.get().unwrap();
+    let Some((window_data, viewport, scale_factor, mut role, surface)) = surface_query.get() else {
+        return;
+    };
     let dims = &window_data.attrs.dims;
     let size_hints = &window_data.attrs.size_hints;
 

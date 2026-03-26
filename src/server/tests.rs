@@ -1785,6 +1785,25 @@ fn remove_all_outputs() {
 }
 
 #[test]
+fn surface_destroy_during_output_removal() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+
+    let (_, output) = f.new_output(0, 0);
+    f.run();
+
+    let window = Window::new(1);
+    let (surface, toplevel_id) = f.create_toplevel(&comp, window);
+    f.testwl.move_surface_to_output(toplevel_id, &output);
+    f.run();
+
+    surface.send_request(Req::<WlSurface>::Destroy).unwrap();
+    f.run();
+
+    f.remove_output(output);
+    f.run();
+}
+
+#[test]
 fn output_offset_surface_positioning() {
     let (mut f, comp) = TestFixture::new_with_compositor();
 
