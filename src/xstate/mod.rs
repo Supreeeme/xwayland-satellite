@@ -1183,7 +1183,7 @@ impl WindowRoleHeuristics {
             match ty {
                 x if x == window_atoms.normal => return WindowRole::new_basic(wmhint_popup),
                 x if x == window_atoms.dialog => {
-                    return WindowRole::new_basic(self.has_transient_for);
+                    return WindowRole::new_basic(self.has_transient_for && motif_no_decor);
                 }
                 x if x == window_atoms.utility => {
                     return WindowRole::new_basic(motif_no_decor && forced_size);

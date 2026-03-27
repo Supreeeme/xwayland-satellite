@@ -552,7 +552,7 @@ mod wrh {
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/280
-    // _NET_WM_WINDOW_TYPE_DIALOG is a pop-up if it has a window it is transient for
+    // _NET_WM_WINDOW_TYPE_DIALOG is a pop-up if it has a TRANSIENT_FOR window and no Motif decor
     #[test]
     fn clip_studio_paint_menu() {
         let win_types = WindowTypes::new();
@@ -601,6 +601,28 @@ mod wrh {
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
+    }
+
+    // https://github.com/Supreeeme/xwayland-satellite/pull/390
+    // With Motif decorations, even a dialog with TRANSIENT_FOR is better treated as a top-level
+    #[test]
+    fn krita_color_picker() {
+        let win_types = WindowTypes::new();
+        let wm_hints = WmHints::new().input_model(true).group_leader(0x400009);
+        let wm_normal_hints = WmNormalHints::new()
+            .user_pos(794, 234)
+            .user_size(505, 490)
+            .min_size(371, 356)
+            .win_gravity(Gravity::Static);
+        let win = WindowRoleHeuristics {
+            has_transient_for: true,
+            motif_wm_hints: Some(motif::Hints::from([0x3, 0x26, 0x1e, 0x0, 0x0].as_slice())),
+            window_types: vec![win_types.dialog, win_types.normal],
+            wm_hints: Some(wm_hints.into()),
+            wm_normal_hints: Some(wm_normal_hints.into()),
+            ..Default::default()
+        };
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
     }
 
     #[test]
