@@ -11,7 +11,7 @@ use crate::xstate::{Decorations, MoveResizeDirection, WindowDims, WmHints, WmNam
 use crate::{X11Selection, XConnection, timespec_from_millis};
 use clientside::MyWorld;
 use decoration::{DecorationsData, DecorationsDataSatellite};
-use hecs::Entity;
+use hecs::{Entity, World};
 use log::{debug, error, warn};
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::fs::Timespec;
@@ -97,16 +97,33 @@ where
     u32::from(wenum).try_into().unwrap()
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct WindowAttributes {
     is_popup: bool,
     dims: WindowDims,
     size_hints: Option<WmNormalHints>,
+    hints_x11_scale: f64,
     title: Option<WmName>,
     class: Option<String>,
     group: Option<x::Window>,
     decorations: Option<Decorations>,
     transient_for: Option<x::Window>,
+}
+
+impl Default for WindowAttributes {
+    fn default() -> Self {
+        Self {
+            is_popup: false,
+            dims: WindowDims::default(),
+            size_hints: None,
+            hints_x11_scale: 1.0,
+            title: None,
+            class: None,
+            group: None,
+            decorations: None,
+            transient_for: None,
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
@@ -252,6 +269,40 @@ impl WindowData {
         ) {
             debug!(target: "output_offset", "set {:?} offset to {:?}", window, self.output_offset);
         }
+    }
+}
+
+pub(in crate::server) fn max_available_output_scale(world: &World) -> f64 {
+    world
+        .query::<(&WlOutput, &OutputScaleFactor)>()
+        .iter()
+        .map(|(entity, (_, scale))| {
+            world
+                .get::<&OutputDimensions>(entity)
+                .map(|dimensions| dimensions.constraint_scale(scale.get()))
+                .unwrap_or_else(|_| scale.get().max(1.0))
+        })
+        .fold(1.0, f64::max)
+        .max(1.0)
+}
+
+fn apply_toplevel_size_hints(
+    toplevel: &XdgToplevel,
+    hints: &WmNormalHints,
+    hints_x11_scale: f64,
+    decorations_height: i32,
+) {
+    let divisor = hints_x11_scale.max(1.0);
+    if let Some(min_size) = &hints.min_size {
+        let min_width = (min_size.width as f64 / divisor) as i32;
+        let min_height = (min_size.height as f64 / divisor) as i32 + decorations_height;
+        toplevel.set_min_size(min_width, min_height);
+    }
+
+    if let Some(max_size) = &hints.max_size {
+        let max_width = (max_size.width as f64 / divisor) as i32;
+        let max_height = (max_size.height as f64 / divisor) as i32 + decorations_height;
+        toplevel.set_max_size(max_width, max_height);
     }
 }
 
@@ -561,6 +612,7 @@ pub struct InnerServerState<S: X11Selection> {
     global_offset_updated: bool,
     updated_outputs: Vec<Entity>,
     new_scale: Option<f64>,
+    pub published_x11_scale: f64,
 }
 
 impl<S: X11Selection> ServerState<NoConnection<S>> {
@@ -669,6 +721,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             global_offset_updated: false,
             updated_outputs: Vec::new(),
             new_scale: None,
+            published_x11_scale: 1.0,
             decoration_manager,
             world,
         };
@@ -709,17 +762,7 @@ impl<C: XConnection> ServerState<C> {
         self.handle_clientside_events();
     }
 
-    pub fn handle_clientside_events(&mut self) {
-        self.handle_globals();
-
-        for (target, event) in self.world.read_events() {
-            if !self.world.contains(target) {
-                warn!("could not handle clientside event: stale object");
-                continue;
-            }
-            event.handle(target, self);
-        }
-
+    pub fn flush_pending_x11_configures(&mut self) {
         let query = self.world.query_mut::<(&x::Window, &PendingSurfaceState)>();
         let iter = query
             .into_iter()
@@ -730,6 +773,108 @@ impl<C: XConnection> ServerState<C> {
             self.world
                 .remove_one::<PendingSurfaceState>(entity)
                 .unwrap();
+        }
+    }
+
+    pub fn republish_xwayland_outputs_for_x11_scale(&mut self) {
+        let outputs = self
+            .world
+            .query::<&WlOutput>()
+            .iter()
+            .map(|(entity, _)| entity)
+            .collect::<Vec<_>>();
+
+        for output in outputs {
+            event::republish_xwayland_output_for_x11_scale(
+                output,
+                &self.global_output_offset,
+                &self.world,
+                self.published_x11_scale,
+            );
+        }
+    }
+
+    fn apply_global_surface_scale(&mut self, new_scale: f64) {
+        let new_scale = new_scale.max(1.0);
+        let surfaces = self
+            .world
+            .query::<(&WindowData, &SurfaceScaleFactor)>()
+            .iter()
+            .map(|(entity, _)| entity)
+            .collect::<Vec<_>>();
+
+        for entity in surfaces {
+            let pending = {
+                let Ok(mut query) = self.world.query_one::<(
+                    &mut WindowData,
+                    &mut SurfaceScaleFactor,
+                    Option<&SurfaceRole>,
+                )>(entity)
+                else {
+                    continue;
+                };
+                let Some((window_data, scale, role)) = query.get() else {
+                    continue;
+                };
+                let old_scale = scale.0.max(1.0);
+                if (old_scale - new_scale).abs() <= 0.01 {
+                    None
+                } else {
+                    let logical_width = (f64::from(window_data.attrs.dims.width) / old_scale)
+                        .ceil()
+                        .max(1.0) as i32;
+                    let logical_height = (f64::from(window_data.attrs.dims.height) / old_scale)
+                        .ceil()
+                        .max(1.0) as i32;
+                    scale.0 = new_scale;
+
+                    let is_mapped_toplevel = window_data.mapped
+                        && role
+                            .is_some_and(|role| matches!(role, SurfaceRole::Toplevel(Some(_))));
+                    if is_mapped_toplevel {
+                        let width = ((logical_width as f64) * new_scale)
+                            .ceil()
+                            .clamp(1.0, f64::from(u16::MAX))
+                            as i32;
+                        let height = ((logical_height as f64) * new_scale)
+                            .ceil()
+                            .clamp(1.0, f64::from(u16::MAX))
+                            as i32;
+                        window_data.attrs.dims.width = width as u16;
+                        window_data.attrs.dims.height = height as u16;
+                        Some(PendingSurfaceState {
+                            x: i32::from(window_data.attrs.dims.x),
+                            y: i32::from(window_data.attrs.dims.y),
+                            width,
+                            height,
+                        })
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            if let Some(pending) = pending {
+                if let Ok(mut current_pending) = self.world.get::<&mut PendingSurfaceState>(entity) {
+                    *current_pending = pending;
+                } else {
+                    self.world.insert_one(entity, pending).unwrap();
+                }
+            }
+
+            update_surface_viewport(&self.world, self.world.query_one(entity).unwrap());
+        }
+    }
+
+    pub fn handle_clientside_events(&mut self) {
+        self.handle_globals();
+
+        for (target, event) in self.world.read_events() {
+            if !self.world.contains(target) {
+                warn!("could not handle clientside event: stale object");
+                continue;
+            }
+            event.handle(target, self);
         }
 
         if self.global_output_offset.x.owner.is_none()
@@ -744,6 +889,7 @@ impl<C: XConnection> ServerState<C> {
                 "updated global output offset: {}x{}",
                 self.global_output_offset.x.value, self.global_output_offset.y.value
             );
+            let x11_scale = self.published_x11_scale;
             let state = &self.inner;
             for (e, _) in state.world.query::<&WlOutput>().iter() {
                 event::update_global_output_offset(
@@ -751,61 +897,20 @@ impl<C: XConnection> ServerState<C> {
                     &state.global_output_offset,
                     &state.world,
                     &mut self.connection,
+                    x11_scale,
                 );
             }
             self.global_offset_updated = false;
         }
 
         if !self.updated_outputs.is_empty() {
-            for output in std::mem::take(&mut self.updated_outputs).iter() {
-                let Ok(output_scale) = self.world.get::<&OutputScaleFactor>(*output) else {
-                    continue;
-                };
-                if matches!(*output_scale, OutputScaleFactor::Output(..)) {
-                    let mut surface_query = self
-                        .world
-                        .query::<(&OnOutput, &mut SurfaceScaleFactor)>()
-                        .with::<(&WindowData, &WlSurface)>();
-
-                    let mut surfaces = vec![];
-                    for (surface, (OnOutput(s_output), surface_scale)) in surface_query.iter() {
-                        if s_output == output {
-                            surface_scale.0 = output_scale.get();
-                            surfaces.push(surface);
-                        }
-                    }
-
-                    drop(surface_query);
-                    for surface in surfaces {
-                        update_surface_viewport(
-                            &self.world,
-                            self.world.query_one(surface).unwrap(),
-                        );
-                    }
-                }
-            }
-
-            let mut mixed_scale = false;
-            let mut scale;
-
-            let mut outputs = self.world.query_mut::<&OutputScaleFactor>().into_iter();
-            if let Some((_, output_scale)) = outputs.next() {
-                scale = output_scale.get();
-
-                for (_, output_scale) in outputs {
-                    if output_scale.get() != scale {
-                        mixed_scale = true;
-                        scale = scale.min(output_scale.get());
-                    }
-                }
-
-                if mixed_scale {
-                    warn!(
-                        "Mixed output scales detected, choosing to give apps the smallest detected scale ({scale}x)"
-                    );
-                }
-
-                debug!("Using new scale {scale}");
+            self.updated_outputs.clear();
+            let scale = max_available_output_scale(&self.world);
+            self.apply_global_surface_scale(scale);
+            if self
+                .new_scale
+                .is_none_or(|queued| (queued - scale).abs() > 0.01)
+            {
                 self.new_scale = Some(scale);
             }
         }
@@ -1057,26 +1162,31 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         if win.attrs.size_hints.is_none_or(|h| h != hints) {
             debug!("setting {window:?} hints {hints:?}");
-            let mut query = data.query::<(&SurfaceRole, &SurfaceScaleFactor)>();
-            if let Some((SurfaceRole::Toplevel(Some(data)), scale_factor)) = query.get() {
-                let decorations_height = if data.decoration.satellite.is_some() {
-                    DecorationsDataSatellite::TITLEBAR_HEIGHT
-                } else {
-                    0
-                };
-                if let Some(min_size) = &hints.min_size {
-                    data.toplevel.set_min_size(
-                        (min_size.width as f64 / scale_factor.0) as i32,
-                        (min_size.height as f64 / scale_factor.0) as i32 + decorations_height,
-                    );
-                }
-                if let Some(max_size) = &hints.max_size {
-                    data.toplevel.set_max_size(
-                        (max_size.width as f64 / scale_factor.0) as i32,
-                        (max_size.height as f64 / scale_factor.0) as i32 + decorations_height,
-                    );
+            let mut query = data.query::<&SurfaceRole>();
+            if let Some(SurfaceRole::Toplevel(Some(data))) = query.get() {
+                let decorations_height = data
+                    .decoration
+                    .satellite
+                    .as_ref()
+                    .map_or(0, |_| DecorationsDataSatellite::TITLEBAR_HEIGHT);
+                apply_toplevel_size_hints(
+                    &data.toplevel,
+                    &hints,
+                    self.published_x11_scale,
+                    decorations_height,
+                );
+
+                if let Some(surface) = data
+                    .xdg
+                    .surface
+                    .data()
+                    .copied()
+                    .and_then(|entity| self.world.get::<&client::wl_surface::WlSurface>(entity).ok())
+                {
+                    surface.commit();
                 }
             }
+            win.attrs.hints_x11_scale = self.published_x11_scale;
             win.attrs.size_hints = Some(hints);
         }
     }
@@ -1563,7 +1673,9 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     }
 
     pub fn new_global_scale(&mut self) -> Option<f64> {
-        self.new_scale.take()
+        self.new_scale
+            .take()
+            .filter(|scale| (scale - self.published_x11_scale).abs() > 0.01)
     }
 
     fn handle_activations(&mut self) {
@@ -1674,14 +1786,6 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         );
 
         let toplevel = xdg.get_toplevel(&self.qh, entity);
-        if let Some(hints) = &window.attrs.size_hints {
-            if let Some(min) = &hints.min_size {
-                toplevel.set_min_size(min.width, min.height);
-            }
-            if let Some(max) = &hints.max_size {
-                toplevel.set_max_size(max.width, max.height);
-            }
-        }
 
         let group = window.attrs.group.and_then(|win| {
             let id = self.windows.get(&win).copied()?;
@@ -1774,6 +1878,19 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         drop(surface);
         if let Some(mut b) = buf.flatten() {
             b.run_on(&mut self.world);
+        }
+
+        if let Some(hints) = &self.world.get::<&WindowData>(entity).unwrap().attrs.size_hints {
+            let decorations_height = sat_decoration
+                .as_ref()
+                .map_or(0, |_| DecorationsDataSatellite::TITLEBAR_HEIGHT);
+            let hints_x11_scale = self
+                .world
+                .get::<&WindowData>(entity)
+                .unwrap()
+                .attrs
+                .hints_x11_scale;
+            apply_toplevel_size_hints(&toplevel, hints, hints_x11_scale, decorations_height);
         }
 
         ToplevelData {

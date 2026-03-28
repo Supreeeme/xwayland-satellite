@@ -224,6 +224,7 @@ impl<S: X11Selection>
                 let server = data_init.init(id, entity);
                 debug!("new surface ({})", server.id());
                 let viewport = state.viewporter.get_viewport(&client, &state.qh, ());
+                let initial_scale = state.published_x11_scale.max(1.0);
                 let fractional = state
                     .fractional_scale
                     .as_ref()
@@ -235,7 +236,7 @@ impl<S: X11Selection>
                         client,
                         server,
                         viewport,
-                        scale: SurfaceScaleFactor(1.0),
+                        scale: SurfaceScaleFactor(initial_scale),
                     },
                 );
                 if let Some(f) = fractional {

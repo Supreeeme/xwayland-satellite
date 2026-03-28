@@ -227,6 +227,16 @@ pub fn main(mut data: impl RunData) -> Option<()> {
 
         display.dispatch_clients(&mut *server_state).unwrap();
         server_state.run();
+
+        if let Some(scale) = server_state.new_global_scale() {
+            server_state.published_x11_scale = scale;
+            server_state.republish_xwayland_outputs_for_x11_scale();
+            display.flush_clients().unwrap();
+            xstate.update_global_scale(scale);
+        }
+
+        server_state.flush_pending_x11_configures();
+
         display.flush_clients().unwrap();
 
         if let Some(sel) = server_state.new_selection::<Clipboard>() {
@@ -235,10 +245,6 @@ pub fn main(mut data: impl RunData) -> Option<()> {
 
         if let Some(sel) = server_state.new_selection::<Primary>() {
             xstate.set_primary_selection(sel);
-        }
-
-        if let Some(scale) = server_state.new_global_scale() {
-            xstate.update_global_scale(scale);
         }
 
         match poll(&mut fds, None) {
