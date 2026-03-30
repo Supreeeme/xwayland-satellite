@@ -51,12 +51,16 @@ use wayland_server::protocol::{
 #[derive(Copy, Clone)]
 pub(super) struct SurfaceScaleFactor(pub f64);
 
+#[derive(Copy, Clone)]
+pub(super) struct PreferredSurfaceScaleFactor(pub f64);
+
 #[derive(hecs::Bundle)]
 pub(super) struct SurfaceBundle {
     pub client: client::wl_surface::WlSurface,
     pub server: WlSurface,
     pub viewport: WpViewport,
     pub scale: SurfaceScaleFactor,
+    pub preferred_scale: PreferredSurfaceScaleFactor,
 }
 
 pub(super) fn effective_preferred_surface_scale(preferred_scale: f64) -> f64 {
@@ -108,7 +112,12 @@ impl Event for SurfaceEvents {
             SurfaceEvents::Toplevel(event) => Self::toplevel_event(event, target, state),
             SurfaceEvents::Popup(event) => Self::popup_event(event, target, state),
             SurfaceEvents::FractionalScale(event) => match event {
-                wp_fractional_scale_v1::Event::PreferredScale { .. } => {}
+                wp_fractional_scale_v1::Event::PreferredScale { scale } => {
+                    let preferred_scale = effective_preferred_surface_scale(scale as f64 / 120.0);
+                    if let Ok(mut preferred) = state.world.get::<&mut PreferredSurfaceScaleFactor>(target) {
+                        preferred.0 = preferred_scale;
+                    }
+                }
                 _ => unreachable!(),
             },
             SurfaceEvents::DecorationEvent(event) => {
@@ -173,6 +182,155 @@ impl Event for SurfaceEvents {
 }
 
 impl SurfaceEvents {
+    fn refresh_surface_constraints<S: X11Selection>(
+        state: &InnerServerState<S>,
+        target: Entity,
+    ) {
+        if let Ok(surface_query) = state.world.query_one::<(
+            &WindowData,
+            &WpViewport,
+            &SurfaceScaleFactor,
+            Option<&OnOutput>,
+            Option<&PreferredSurfaceScaleFactor>,
+            Option<&mut SurfaceRole>,
+            &WlSurface,
+        )>(target)
+        {
+            update_surface_viewport(&state.world, surface_query);
+
+            if let Ok(surface) = state.world.get::<&client::wl_surface::WlSurface>(target) {
+                // xdg_toplevel constraint updates are applied on the next surface commit.
+                // Commit immediately when output/scale changes so the compositor sees the
+                // updated min/max size before the first snapped configure.
+                surface.commit();
+            }
+        }
+    }
+
+    fn select_toplevel_output<S: X11Selection>(
+        state: &InnerServerState<S>,
+        data: &hecs::EntityRef<'_>,
+        x: i32,
+        y: i32,
+    ) -> Option<Entity> {
+        let on_output = data.get::<&OnOutput>().as_deref().copied();
+
+        let mut best_output = None;
+        let mut best_contains = false;
+        let mut best_on_output = false;
+        let mut best_distance = i64::MAX;
+
+        for (entity, (_, dimensions)) in state.world.query::<(&WlOutput, &OutputDimensions)>().iter() {
+            let output_x = dimensions.x - state.global_output_offset.x.value;
+            let output_y = dimensions.y - state.global_output_offset.y.value;
+            let (output_width, output_height) = dimensions.effective_logical_size();
+            let output_right = output_x + output_width;
+            let output_bottom = output_y + output_height;
+
+            let contains = x >= output_x && x < output_right && y >= output_y && y < output_bottom;
+            let on_output_match = on_output.is_some_and(|current| current.0 == entity);
+
+            let dx = if x < output_x {
+                i64::from(output_x - x)
+            } else if x >= output_right {
+                i64::from(x - (output_right - 1))
+            } else {
+                0
+            };
+            let dy = if y < output_y {
+                i64::from(output_y - y)
+            } else if y >= output_bottom {
+                i64::from(y - (output_bottom - 1))
+            } else {
+                0
+            };
+            let distance = dx * dx + dy * dy;
+
+            let should_replace = if best_output.is_none() {
+                true
+            } else if contains != best_contains {
+                contains
+            } else if on_output_match != best_on_output {
+                on_output_match
+            } else if distance < best_distance {
+                true
+            } else {
+                false
+            };
+
+            if should_replace {
+                best_output = Some(entity);
+                best_contains = contains;
+                best_on_output = on_output_match;
+                best_distance = distance;
+            }
+        }
+
+        best_output
+    }
+
+    fn toplevel_is_output_constrained(states: &[u8]) -> bool {
+        states.iter().any(|state| {
+            *state == u32::from(xdg_toplevel::State::Maximized) as u8
+                || *state == u32::from(xdg_toplevel::State::TiledLeft) as u8
+                || *state == u32::from(xdg_toplevel::State::TiledRight) as u8
+                || *state == u32::from(xdg_toplevel::State::TiledTop) as u8
+                || *state == u32::from(xdg_toplevel::State::TiledBottom) as u8
+                || *state == u32::from(xdg_toplevel::State::Fullscreen) as u8
+        })
+    }
+
+    fn clamp_toplevel_configure_position<S: X11Selection>(
+        state: &InnerServerState<S>,
+        data: &hecs::EntityRef<'_>,
+        width: i32,
+        height: i32,
+        states: &[u8],
+        x: i32,
+        y: i32,
+    ) -> (i32, i32) {
+        let is_tiled_or_maximized = Self::toplevel_is_output_constrained(states);
+
+        if !is_tiled_or_maximized {
+            return (x, y);
+        }
+
+        let Some(on_output) = Self::select_toplevel_output(state, data, x, y).map(OnOutput) else {
+            return (x, y);
+        };
+        let Ok(output) = state.world.entity(on_output.0) else {
+            return (x, y);
+        };
+        let Some(dimensions) = output.get::<&OutputDimensions>() else {
+            return (x, y);
+        };
+
+        let output_x = dimensions.x - state.global_output_offset.x.value;
+        let output_y = dimensions.y - state.global_output_offset.y.value;
+        let (output_width, output_height) = dimensions.effective_logical_size();
+        let output_right = output_x + output_width;
+        let output_bottom = output_y + output_height;
+
+        let mut clamped_x = x;
+        let mut clamped_y = y;
+
+        if width > 0 {
+            let max_x = output_right - width;
+            if max_x >= output_x && (x < output_x || x + width > output_right) {
+                clamped_x = x.clamp(output_x, max_x);
+            }
+        }
+
+        if height > 0 {
+            let max_y = output_bottom - height;
+            if max_y >= output_y && (y < output_y || y + height > output_bottom) {
+                clamped_y = y.clamp(output_y, max_y);
+            }
+        }
+
+        (clamped_x, clamped_y)
+    }
+
     fn surface_event(
         event: client::wl_surface::Event,
         target: Entity,
@@ -181,6 +339,7 @@ impl SurfaceEvents {
         use client::wl_surface::Event;
         let connection = &mut state.connection;
         let state = &mut state.inner;
+        let refresh_constraints = matches!(&event, Event::Enter { .. });
 
         let data = state.world.entity(target).unwrap();
         let surface = data.get::<&WlSurface>().unwrap();
@@ -197,7 +356,7 @@ impl SurfaceEvents {
 
                 surface.enter(&output);
                 let on_output = OnOutput(output_entity);
-                    let previous_output = data.get::<&OnOutput>().as_deref().copied();
+                let previous_output = data.get::<&OnOutput>().as_deref().copied();
 
                 debug!("{} entered {}", surface.id(), output.id());
 
@@ -234,12 +393,21 @@ impl SurfaceEvents {
                     cmd.remove_one::<OnOutput>(target);
                 }
             }
-            Event::PreferredBufferScale { .. } => {}
+            Event::PreferredBufferScale { factor } => {
+                if let Some(mut scale) = data.get::<&mut PreferredSurfaceScaleFactor>() {
+                    scale.0 = effective_preferred_surface_scale(factor as f64);
+                }
+            }
             other => warn!("unhandled surface request: {other:?}"),
         }
 
         drop(surface);
+        let _ = data;
         cmd.run_on(&mut state.world);
+
+        if refresh_constraints {
+            Self::refresh_surface_constraints(state, target);
+        }
     }
 
     fn xdg_event<C: XConnection>(
@@ -272,8 +440,13 @@ impl SurfaceEvents {
             let (scale_factor, window, window_data, role) = query.get().unwrap();
 
             let window = *window;
-            let x = (pending.x.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.x;
-            let y = (pending.y.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.y;
+            let (x, y) = match &*role {
+                SurfaceRole::Toplevel(..) => (pending.x, pending.y),
+                SurfaceRole::Popup(..) => (
+                    (pending.x.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.x,
+                    (pending.y.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.y,
+                ),
+            };
             let width = if pending.width > 0 {
                 (pending.width as f64 * scale_factor.0) as u16
             } else {
@@ -381,10 +554,19 @@ impl SurfaceEvents {
                 };
 
                 let window = data.get::<&WindowData>().unwrap();
+                let (x, y) = Self::clamp_toplevel_configure_position(
+                    &state.inner,
+                    &data,
+                    width,
+                    height,
+                    &states,
+                    window.attrs.dims.x as i32,
+                    window.attrs.dims.y as i32,
+                );
 
                 role.xdg_mut().unwrap().pending = Some(PendingSurfaceState {
-                    x: window.attrs.dims.x as i32,
-                    y: window.attrs.dims.y as i32,
+                    x,
+                    y,
                     width,
                     height,
                 });
@@ -445,11 +627,17 @@ pub(super) fn update_surface_viewport(
         &WindowData,
         &WpViewport,
         &SurfaceScaleFactor,
+        Option<&OnOutput>,
+        Option<&PreferredSurfaceScaleFactor>,
         Option<&mut SurfaceRole>,
         &WlSurface,
     )>,
 ) {
-    let (window_data, viewport, scale_factor, mut role, surface) = surface_query.get().unwrap();
+    let Some((window_data, viewport, scale_factor, _on_output, _preferred_scale, mut role, surface)) =
+        surface_query.get()
+    else {
+        return;
+    };
     let dims = &window_data.attrs.dims;
     let size_hints = &window_data.attrs.size_hints;
 

@@ -382,51 +382,11 @@ impl EarlyTestFixture {
             display.handle(),
             Some(client_s),
             xwls_server,
-            false,
         );
         let testwl = thread.join().unwrap();
 
         let xwls_connection = Connection::from_socket(fake_client).unwrap();
         let registry = TestObject::<WlRegistry>::from_request(
-
-            #[test]
-            fn reconfigure_toplevel_preserves_position() {
-                let (mut f, comp) = TestFixture::new_with_compositor();
-                let window = Window::new(1);
-                let (buffer, surface) = comp.create_surface();
-                let dims = WindowDims {
-                    x: 510,
-                    y: 110,
-                    width: 100,
-                    height: 100,
-                };
-
-                f.new_window(
-                    window,
-                    false,
-                    WindowData {
-                        mapped: true,
-                        dims,
-                        fullscreen: false,
-                    },
-                );
-                f.map_window(&comp, window, &surface.obj, &buffer);
-                f.run();
-                let surface_id = f.check_new_surface();
-
-                f.testwl.configure_toplevel(surface_id, 80, 120, vec![]);
-                f.run();
-
-                f.assert_window_dimensions(
-                    window,
-                    surface_id,
-                    WindowDims {
-                        width: 80,
-                        height: 120,
-                        ..dims
-                    },
-                );
-            }
             &xwls_connection.display(),
             Req::<WlDisplay>::GetRegistry {},
         );
@@ -1316,6 +1276,35 @@ fn pre_role_configure_request_updates_startup_position_before_association() {
         .expect("Surface not created after association");
     let surface_data = f.testwl.get_surface_data(id).unwrap();
     assert!(matches!(surface_data.role, Some(SurfaceRole::Toplevel(_))));
+}
+
+#[test]
+fn mapped_toplevel_pure_move_configure_request_does_not_forward_position() {
+    let (mut f, compositor) = TestFixture::new_with_compositor();
+    let window = Window::new(1);
+
+    f.create_toplevel(&compositor, window);
+
+    assert!(!f.satellite.should_forward_configure_position(
+        window,
+        x::ConfigWindowMask::X | x::ConfigWindowMask::Y,
+    ));
+}
+
+#[test]
+fn mapped_toplevel_move_and_resize_configure_request_forwards_position() {
+    let (mut f, compositor) = TestFixture::new_with_compositor();
+    let window = Window::new(1);
+
+    f.create_toplevel(&compositor, window);
+
+    assert!(f.satellite.should_forward_configure_position(
+        window,
+        x::ConfigWindowMask::X
+            | x::ConfigWindowMask::Y
+            | x::ConfigWindowMask::WIDTH
+            | x::ConfigWindowMask::HEIGHT,
+    ));
 }
 
 #[test]
@@ -2226,6 +2215,246 @@ fn output_offset_preserves_explicit_position_across_output_enters() {
 }
 
 #[test]
+fn output_offset_toplevel_configure_preserves_global_position() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+
+    f.new_output(0, 0);
+    let (_, output_right) = f.new_output(1440, 0);
+    f.run();
+
+    let window = Window::new(1);
+    let (buffer, surface) = comp.create_surface();
+    let dims = WindowDims {
+        x: 1430,
+        y: 680,
+        width: 980,
+        height: 800,
+    };
+
+    f.new_window(
+        window,
+        false,
+        WindowData {
+            mapped: true,
+            dims,
+            fullscreen: false,
+        },
+    );
+    f.map_window(&comp, window, &surface.obj, &buffer);
+    f.run();
+    let toplevel_id = f.check_new_surface();
+
+    f.testwl.move_surface_to_output(toplevel_id, &output_right);
+    f.run();
+    assert_eq!(f.connection().window(window).dims, dims);
+
+    f.testwl.configure_toplevel(toplevel_id, 750, 2560, vec![]);
+    f.run();
+
+    f.assert_window_dimensions(
+        window,
+        toplevel_id,
+        WindowDims {
+            x: 1430,
+            y: 680,
+            width: 750,
+            height: 2560,
+        },
+    );
+}
+
+#[test]
+fn tiled_toplevel_configure_uses_xdg_logical_size_for_clamp() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let xdg = f.enable_xdg_output();
+
+    let (output_obj, output) = f.new_output(0, 0);
+    f.run();
+    let _xdg_output = f.create_xdg_output(&xdg, output_obj.obj.clone());
+    f.testwl.resize_xdg_output(&output, 1440, 2560);
+    f.run();
+    f.run();
+
+    let window = Window::new(11);
+    let (buffer, surface) = comp.create_surface();
+    let dims = WindowDims {
+        x: 1430,
+        y: 680,
+        width: 980,
+        height: 800,
+    };
+
+    f.new_window(
+        window,
+        false,
+        WindowData {
+            mapped: true,
+            dims,
+            fullscreen: false,
+        },
+    );
+    f.map_window(&comp, window, &surface.obj, &buffer);
+    f.run();
+    let toplevel_id = f.check_new_surface();
+
+    f.testwl.move_surface_to_output(toplevel_id, &output);
+    f.run();
+
+    f.testwl.configure_toplevel(
+        toplevel_id,
+        750,
+        2560,
+        vec![
+            xdg_toplevel::State::TiledRight,
+            xdg_toplevel::State::TiledTop,
+            xdg_toplevel::State::TiledBottom,
+        ],
+    );
+    f.run();
+
+    f.assert_window_dimensions(
+        window,
+        toplevel_id,
+        WindowDims {
+            x: 690,
+            y: 0,
+            width: 750,
+            height: 2560,
+        },
+    );
+}
+
+#[test]
+fn tiled_toplevel_configure_clamps_position_to_current_output() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+
+    let (_, output_left) = f.new_output(0, 0);
+    f.new_output(1000, 0);
+    f.run();
+
+    let window = Window::new(1);
+    let (buffer, surface) = comp.create_surface();
+    let dims = WindowDims {
+        x: 990,
+        y: 10,
+        width: 980,
+        height: 800,
+    };
+
+    f.new_window(
+        window,
+        false,
+        WindowData {
+            mapped: true,
+            dims,
+            fullscreen: false,
+        },
+    );
+    f.map_window(&comp, window, &surface.obj, &buffer);
+    f.run();
+    let toplevel_id = f.check_new_surface();
+
+    f.testwl.move_surface_to_output(toplevel_id, &output_left);
+    f.run();
+    assert_eq!(f.connection().window(window).dims, dims);
+
+    f.testwl.configure_toplevel(
+        toplevel_id,
+        500,
+        1000,
+        vec![
+            xdg_toplevel::State::TiledRight,
+            xdg_toplevel::State::TiledTop,
+            xdg_toplevel::State::TiledBottom,
+        ],
+    );
+    f.run();
+
+    f.assert_window_dimensions(
+        window,
+        toplevel_id,
+        WindowDims {
+            x: 500,
+            y: 0,
+            width: 500,
+            height: 1000,
+        },
+    );
+}
+
+#[test]
+fn tiled_toplevel_configure_uses_preferred_scale_output_when_on_output_is_stale() {
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let comp = f.compositor();
+    let xdg = f.enable_xdg_output();
+
+    let (left_output_obj, output_left) = f.new_output(0, 0);
+    let _left_xdg = f.create_xdg_output(&xdg, left_output_obj.obj.clone());
+    f.testwl.resize_xdg_output(&output_left, 666, 1000);
+
+    let (_, output_right) = f.new_output(1000, 0);
+    f.run();
+    f.run();
+
+    let window = Window::new(99);
+    let (buffer, surface) = comp.create_surface();
+    let dims = WindowDims {
+        x: 650,
+        y: 0,
+        width: 980,
+        height: 800,
+    };
+
+    f.new_window(
+        window,
+        false,
+        WindowData {
+            mapped: true,
+            dims,
+            fullscreen: false,
+        },
+    );
+    f.map_window(&comp, window, &surface.obj, &buffer);
+    f.run();
+    let toplevel_id = f.check_new_surface();
+
+    let surface_data = f.testwl.get_surface_data(toplevel_id).expect("No surface data");
+    let fractional = surface_data
+        .fractional
+        .as_ref()
+        .expect("No fractional scale for surface");
+    fractional.preferred_scale(180);
+
+    f.testwl.move_surface_to_output(toplevel_id, &output_right);
+    f.run();
+
+    f.testwl.configure_toplevel(
+        toplevel_id,
+        333,
+        1000,
+        vec![
+            xdg_toplevel::State::TiledRight,
+            xdg_toplevel::State::TiledTop,
+            xdg_toplevel::State::TiledBottom,
+        ],
+    );
+    f.run();
+
+    f.assert_window_dimensions(
+        window,
+        toplevel_id,
+        WindowDims {
+            x: 333,
+            y: 0,
+            width: 333,
+            height: 1000,
+        },
+    );
+}
+
+#[test]
 fn output_offset_xdg_override() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     f.new_output(0, 0);
@@ -2892,6 +3121,192 @@ fn toplevel_size_limits_scaled() {
     let toplevel = data.toplevel();
     assert_eq!(toplevel.min_size, Some(testwl::Vec2 { x: 20, y: 45 }));
     assert_eq!(toplevel.max_size, Some(testwl::Vec2 { x: 100, y: 125 }));
+}
+
+#[test]
+fn toplevel_size_limits_use_output_logical_scale() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let xdg = f.enable_xdg_output();
+
+    let (output_obj, output) = f.new_output(0, 0);
+    output.scale(2);
+    output.done();
+    f.run();
+
+    let _xdg_output = f.create_xdg_output(&xdg, output_obj.obj.clone());
+    f.testwl.resize_xdg_output(&output, 1440, 2560);
+    f.run();
+    f.run();
+
+    let window = Window::new(9);
+    let (buffer, surface) = comp.create_surface();
+    let data = WindowData {
+        mapped: true,
+        dims: WindowDims {
+            width: 50,
+            height: 50,
+            ..Default::default()
+        },
+        fullscreen: false,
+    };
+    f.new_window(window, false, data);
+    f.satellite.set_size_hints(
+        window,
+        super::WmNormalHints {
+            min_size: Some(WinSize {
+                width: 750,
+                height: 450,
+            }),
+            max_size: None,
+        },
+    );
+
+    f.map_window(&comp, window, &surface.obj, &buffer);
+    f.run();
+
+    let id = f.check_new_surface();
+    f.testwl.configure_toplevel(id, 50, 50, vec![]);
+    f.run();
+
+    f.testwl.move_surface_to_output(id, &output);
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let toplevel = data.toplevel();
+    assert_eq!(toplevel.min_size, Some(testwl::Vec2 { x: 500, y: 300 }));
+}
+
+#[test]
+fn toplevel_size_limits_prefer_fractional_scale_when_on_output_is_stale() {
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let comp = f.compositor();
+    let xdg = f.enable_xdg_output();
+
+    let (_, output_right) = f.new_output(1440, 0);
+    let (left_output_obj, output_left) = f.new_output(0, 0);
+    output_left.scale(2);
+    output_left.done();
+    f.run();
+
+    let _xdg_output = f.create_xdg_output(&xdg, left_output_obj.obj.clone());
+    f.testwl.resize_xdg_output(&output_left, 1440, 2560);
+    f.run();
+    f.run();
+
+    let window = Window::new(10);
+    let (buffer, surface) = comp.create_surface();
+    let data = WindowData {
+        mapped: true,
+        dims: WindowDims {
+            x: 1430,
+            y: 680,
+            width: 980,
+            height: 800,
+        },
+        fullscreen: false,
+    };
+    f.new_window(window, false, data);
+    f.map_window(&comp, window, &surface.obj, &buffer);
+    f.run();
+
+    let id = f.check_new_surface();
+    f.testwl.move_surface_to_output(id, &output_right);
+    f.run();
+
+    f.testwl
+        .get_surface_data(id)
+        .unwrap()
+        .fractional
+        .as_ref()
+        .expect("No fractional scale for surface")
+        .preferred_scale(180);
+    f.run();
+
+    f.satellite.set_size_hints(
+        window,
+        super::WmNormalHints {
+            min_size: Some(WinSize {
+                width: 750,
+                height: 450,
+            }),
+            max_size: None,
+        },
+    );
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let toplevel = data.toplevel();
+    assert_eq!(toplevel.min_size, Some(testwl::Vec2 { x: 500, y: 300 }));
+}
+
+#[test]
+fn toplevel_size_limits_refresh_when_preferred_scale_arrives_after_hints() {
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let comp = f.compositor();
+    let xdg = f.enable_xdg_output();
+
+    let (_, output_right) = f.new_output(1440, 0);
+    let (left_output_obj, output_left) = f.new_output(0, 0);
+    output_left.scale(2);
+    output_left.done();
+    f.run();
+
+    let _xdg_output = f.create_xdg_output(&xdg, left_output_obj.obj.clone());
+    f.testwl.resize_xdg_output(&output_left, 1440, 2560);
+    f.run();
+    f.run();
+
+    let window = Window::new(12);
+    let (buffer, surface) = comp.create_surface();
+    let data = WindowData {
+        mapped: true,
+        dims: WindowDims {
+            x: 1430,
+            y: 680,
+            width: 980,
+            height: 800,
+        },
+        fullscreen: false,
+    };
+    f.new_window(window, false, data);
+    f.satellite.set_size_hints(
+        window,
+        super::WmNormalHints {
+            min_size: Some(WinSize {
+                width: 750,
+                height: 450,
+            }),
+            max_size: None,
+        },
+    );
+
+    f.map_window(&comp, window, &surface.obj, &buffer);
+    f.run();
+
+    let id = f.check_new_surface();
+    f.testwl.move_surface_to_output(id, &output_right);
+    f.run();
+
+    let fractional = {
+        let surface_data = f.testwl.get_surface_data(id).unwrap();
+        assert_eq!(surface_data.toplevel().min_size, Some(testwl::Vec2 { x: 750, y: 450 }));
+        surface_data
+            .fractional
+            .as_ref()
+            .expect("No fractional scale for surface")
+            .clone()
+    };
+
+    fractional.preferred_scale(180);
+    f.run();
+
+    let surface_data = f.testwl.get_surface_data(id).unwrap();
+    let toplevel = surface_data.toplevel();
+    assert_eq!(toplevel.min_size, Some(testwl::Vec2 { x: 500, y: 300 }));
 }
 
 #[test]

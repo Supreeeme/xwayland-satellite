@@ -496,7 +496,6 @@ impl XState {
                     let mask = e.value_mask();
                     let translated_move = mask.intersects(x::ConfigWindowMask::X | x::ConfigWindowMask::Y)
                         && server_state.begin_configure_move(e.window(), dims, mask);
-
                     server_state.handle_configure_request(
                         e.window(),
                         mask,
@@ -506,7 +505,10 @@ impl XState {
                         e.height(),
                     );
 
-                    if !translated_move && server_state.can_change_position(e.window()) {
+                    let can_change_position =
+                        server_state.should_forward_configure_position(e.window(), mask);
+
+                    if !translated_move && can_change_position {
                         if mask.contains(x::ConfigWindowMask::X) {
                             list.push(x::ConfigWindow::X(e.x().into()));
                         }
@@ -774,7 +776,6 @@ impl XState {
         if motif_functions_empty && !has_explicit_normal_type {
             return Ok(true);
         }
-
         if log::log_enabled!(log::Level::Debug) {
             let win_types = window_types
                 .iter()

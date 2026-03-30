@@ -907,6 +907,16 @@ impl Server {
         self.display.flush_clients().unwrap();
     }
 
+    pub fn resize_xdg_output(&mut self, output: &WlOutput, width: i32, height: i32) {
+        let xdg = self.state.outputs[output]
+            .xdg
+            .as_ref()
+            .expect("Output doesn't have an xdg output");
+        xdg.logical_size(width, height);
+        xdg.done();
+        self.display.flush_clients().unwrap();
+    }
+
     pub fn enable_fractional_scale(&mut self) {
         self.dh
             .create_global::<State, WpFractionalScaleManagerV1, _>(1, ());

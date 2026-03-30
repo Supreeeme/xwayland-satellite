@@ -213,6 +213,13 @@ impl WindowData {
         };
     }
 
+    fn has_deferred_initial_toplevel_map(&self) -> bool {
+        matches!(
+            self.initial_toplevel_map_state,
+            InitialToplevelMapState::Deferred { .. }
+        )
+    }
+
     fn deferred_initial_toplevel_deadline(&self) -> Option<Instant> {
         match self.initial_toplevel_map_state {
             InitialToplevelMapState::Deferred { deadline } => Some(deadline),
@@ -1253,12 +1260,16 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return false;
         }
 
-        if win.deferred_initial_toplevel_deadline().is_some() {
+        if win.has_deferred_initial_toplevel_map() {
             return false;
         }
 
         drop(win);
 
+        self.create_role_window_and_activate(window, entity)
+    }
+
+    fn create_role_window_and_activate(&mut self, window: x::Window, entity: Entity) -> bool {
         let is_toplevel = self.create_role_window(window, entity);
         if is_toplevel {
             self.activate_window(window);
@@ -1294,10 +1305,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         if self.world.get::<&WlSurface>(entity).is_ok()
             && self.world.get::<&SurfaceRole>(entity).is_err()
         {
-            let is_toplevel = self.create_role_window(window, entity);
-            if is_toplevel {
-                self.activate_window(window);
-            }
+            self.create_role_window_and_activate(window, entity);
         }
 
         true
@@ -1322,24 +1330,37 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    pub fn can_change_position(&self, window: x::Window) -> bool {
-        let Some(entity) = self
-            .windows
-            .get(&window)
-            .copied()
-        else {
+    pub(crate) fn should_forward_configure_position(
+        &self,
+        window: x::Window,
+        mask: x::ConfigWindowMask,
+    ) -> bool {
+        let Some(entity) = self.windows.get(&window).copied() else {
+            return true;
+        };
+        let Ok(data) = self.world.entity(entity) else {
+            return true;
+        };
+        let Some(win) = data.get::<&WindowData>() else {
             return true;
         };
 
-        if self.world.get::<&SurfaceRole>(entity).is_err() {
+        if !win.mapped
+            || win.attrs.is_popup
+            || win.has_deferred_initial_toplevel_map()
+            || self.world.get::<&SurfaceRole>(entity).is_err()
+        {
             return true;
         }
 
-        let Some(win) = self.world.entity(entity).ok().map(|data| data.get::<&WindowData>().unwrap()) else {
-            return true;
-        };
+        if !mask.intersects(x::ConfigWindowMask::WIDTH | x::ConfigWindowMask::HEIGHT) {
+            return false;
+        }
 
-        !win.mapped || win.attrs.is_popup || win.deferred_initial_toplevel_deadline().is_some()
+        match data.get::<&SurfaceRole>() {
+            Some(role) => matches!(&*role, SurfaceRole::Toplevel(Some(_))),
+            None => true,
+        }
     }
 
     pub fn handle_configure_request(
@@ -1365,7 +1386,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         };
 
         let has_role = self.world.get::<&SurfaceRole>(entity).is_ok();
-        let has_deferred_initial_map = win.deferred_initial_toplevel_deadline().is_some();
+        let has_deferred_initial_map = win.has_deferred_initial_toplevel_map();
 
         if has_role && !has_deferred_initial_map {
             return;
@@ -1486,7 +1507,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             height: event.height(),
         };
         let previous_dims = win.attrs.dims;
-        let had_deferred_initial_map = win.deferred_initial_toplevel_deadline().is_some();
+        let had_deferred_initial_map = win.has_deferred_initial_toplevel_map();
 
         if had_deferred_initial_map {
             win.attrs.dims = dims;
@@ -1538,7 +1559,10 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                 win.attrs.dims.height = dims.height;
                 drop(query);
                 drop(win);
-                update_surface_viewport(&self.world, self.world.query_one(data.entity()).unwrap());
+                update_surface_viewport(
+                    &self.world,
+                    self.world.query_one(data.entity()).unwrap(),
+                );
             }
             other => warn!("Non popup ({other:?}) being reconfigured, behavior may be off."),
         }
