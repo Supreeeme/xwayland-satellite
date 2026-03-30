@@ -128,6 +128,7 @@ struct WindowData {
     mapped: bool,
     attrs: WindowAttributes,
     output_offset: WindowOutputOffset,
+    output_offset_initialized: bool,
     activation_token: Option<String>,
     initial_toplevel_map_state: InitialToplevelMapState,
 }
@@ -144,9 +145,36 @@ impl WindowData {
                 ..Default::default()
             },
             output_offset: WindowOutputOffset::default(),
+            output_offset_initialized: false,
             activation_token,
             initial_toplevel_map_state: InitialToplevelMapState::None,
         }
+    }
+
+    fn has_output_offset(&self) -> bool {
+        self.output_offset_initialized
+    }
+
+    fn is_popup(&self) -> bool {
+        self.attrs.is_popup
+    }
+
+    fn record_output_offset(&mut self, offset: WindowOutputOffset) {
+        self.output_offset = offset;
+        self.output_offset_initialized = true;
+    }
+
+    fn update_output_offset_on_enter<C: XConnection>(
+        &mut self,
+        window: x::Window,
+        offset: WindowOutputOffset,
+        connection: &mut C,
+    ) {
+        if !self.is_popup() && self.has_output_offset() {
+            return;
+        }
+
+        self.update_output_offset(window, offset, connection);
     }
 
     fn should_defer_initial_toplevel_map(&self) -> bool {
@@ -189,31 +217,37 @@ impl WindowData {
         connection: &mut C,
     ) {
         log::trace!(target: "output_offset", "offset: {offset:?}");
-        if offset == self.output_offset {
+        if self.output_offset_initialized && offset == self.output_offset {
             return;
         }
 
-        let dims = &mut self.attrs.dims;
+        let previous_offset = self.output_offset;
 
         // A non-zero startup position is already in global X11 coordinates when the
         // surface first enters an output. Record the output origin without shifting
         // the window again; later output moves should still apply deltas normally.
-        if self.output_offset == WindowOutputOffset::default() && (dims.x != 0 || dims.y != 0) {
-            self.output_offset = offset;
+        if !self.output_offset_initialized
+            && (self.attrs.dims.x != 0 || self.attrs.dims.y != 0)
+        {
+            self.record_output_offset(offset);
             return;
         }
 
-        dims.x += (offset.x - self.output_offset.x) as i16;
-        dims.y += (offset.y - self.output_offset.y) as i16;
-        self.output_offset = offset;
+        self.attrs.dims.x += (offset.x - previous_offset.x) as i16;
+        self.attrs.dims.y += (offset.y - previous_offset.y) as i16;
+        let new_x = self.attrs.dims.x as i32;
+        let new_y = self.attrs.dims.y as i32;
+        let width = self.attrs.dims.width as _;
+        let height = self.attrs.dims.height as _;
+        self.record_output_offset(offset);
 
         if connection.set_window_dims(
             window,
             PendingSurfaceState {
-                x: dims.x as i32,
-                y: dims.y as i32,
-                width: self.attrs.dims.width as _,
-                height: self.attrs.dims.height as _,
+                x: new_x,
+                y: new_y,
+                width,
+                height,
             },
         ) {
             debug!(target: "output_offset", "set {:?} offset to {:?}", window, self.output_offset);

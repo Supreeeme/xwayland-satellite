@@ -2178,6 +2178,49 @@ fn output_offset_preserves_explicit_startup_position_on_first_enter() {
 }
 
 #[test]
+fn output_offset_preserves_explicit_position_across_output_enters() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+
+    let (_, output_left) = f.new_output(0, 0);
+    let (_, output_right) = f.new_output(500, 100);
+    f.run();
+
+    let window = Window::new(1);
+    let (buffer, surface) = comp.create_surface();
+    let dims = WindowDims {
+        x: 510,
+        y: 110,
+        width: 100,
+        height: 100,
+    };
+
+    f.new_window(
+        window,
+        false,
+        WindowData {
+            mapped: true,
+            dims,
+            fullscreen: false,
+        },
+    );
+    f.map_window(&comp, window, &surface.obj, &buffer);
+    f.run();
+    let toplevel_id = f.check_new_surface();
+
+    f.testwl.move_surface_to_output(toplevel_id, &output_right);
+    f.run();
+    assert_eq!(f.connection().window(window).dims, dims);
+
+    f.testwl.move_surface_to_output(toplevel_id, &output_left);
+    f.run();
+    assert_eq!(f.connection().window(window).dims, dims);
+
+    f.testwl.move_surface_to_output(toplevel_id, &output_right);
+    f.run();
+    assert_eq!(f.connection().window(window).dims, dims);
+}
+
+#[test]
 fn output_offset_xdg_override() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     f.new_output(0, 0);

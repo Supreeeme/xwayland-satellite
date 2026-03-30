@@ -207,6 +207,7 @@ impl SurfaceEvents {
 
                 surface.enter(&output);
                 let on_output = OnOutput(output_entity);
+                    let previous_output = data.get::<&OnOutput>().as_deref().copied();
 
                 debug!("{} entered {}", surface.id(), output.id());
 
@@ -215,15 +216,14 @@ impl SurfaceEvents {
                     let Some(dimensions) = output_data.get::<&OutputDimensions>() else {
                         return;
                     };
-                    win_data.update_output_offset(
-                        *window,
-                        WindowOutputOffset {
-                            x: dimensions.x - state.global_output_offset.x.value,
-                            y: dimensions.y - state.global_output_offset.y.value,
-                        },
-                        connection,
-                    );
-                    if state.last_focused_toplevel == Some(*window) {
+                    let offset = WindowOutputOffset {
+                        x: dimensions.x - state.global_output_offset.x.value,
+                        y: dimensions.y - state.global_output_offset.y.value,
+                    };
+
+                    win_data.update_output_offset_on_enter(*window, offset, connection);
+
+                    if previous_output.is_none() && state.last_focused_toplevel == Some(*window) {
                         let output = get_output_name(Some(&on_output), &state.world);
                         debug!("focused window changed outputs - resetting primary output");
                         connection.focus_window(*window, output);
