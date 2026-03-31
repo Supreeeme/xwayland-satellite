@@ -651,6 +651,9 @@ impl XState {
             server_state.set_size_hints(window, hints);
         }
         let wmhints = wm_hints.resolve()?;
+        if let Some(hints) = wmhints {
+            server_state.set_win_hints(window, hints);
+        }
         let motif_hints = motif_wm_hints.resolve()?;
         if let Some(decorations) = motif_hints.as_ref().and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
@@ -1107,6 +1110,7 @@ bitflags! {
     pub struct WmHintsFlags: u32 {
         const Input = 1;
         const WindowGroup = 64;
+        const UrgencyHint = 256;
     }
 }
 
@@ -1145,10 +1149,11 @@ impl From<&[u32]> for WmNormalHints {
     }
 }
 
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Default, Debug, PartialEq, Eq)]
 pub struct WmHints {
     pub window_group: Option<x::Window>,
     pub acquire_input_via_wm: bool,
+    pub urgent: bool,
 }
 
 impl From<&[u32]> for WmHints {
@@ -1162,6 +1167,9 @@ impl From<&[u32]> for WmHints {
         }
         if flags.contains(WmHintsFlags::Input) {
             ret.acquire_input_via_wm = value[1] == 1;
+        }
+        if flags.contains(WmHintsFlags::UrgencyHint) {
+            ret.urgent = true;
         }
 
         ret

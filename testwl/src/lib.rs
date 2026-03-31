@@ -286,6 +286,7 @@ struct State {
     xdg_activation: Option<XdgActivationV1>,
     valid_tokens: HashSet<String>,
     token_counter: u32,
+    last_activation_request: Option<SurfaceId>,
 }
 
 impl Default for State {
@@ -318,6 +319,7 @@ impl Default for State {
             xdg_activation: None,
             valid_tokens: HashSet::new(),
             token_counter: 0,
+            last_activation_request: None,
         }
     }
 }
@@ -624,6 +626,11 @@ impl Server {
     #[track_caller]
     pub fn get_focused(&self) -> Option<SurfaceId> {
         self.state.get_focused()
+    }
+
+    #[track_caller]
+    pub fn last_activation_request(&self) -> Option<SurfaceId> {
+        self.state.last_activation_request
     }
 
     #[track_caller]
@@ -2124,8 +2131,9 @@ impl Dispatch<XdgActivationV1, ()> for State {
                 data_init.init(id, Mutex::new(ActivationTokenData::default()));
             }
             xdg_activation_v1::Request::Activate { token, surface } => {
+                let surface_id = SurfaceId(surface.id().protocol_id());
+                state.last_activation_request = Some(surface_id);
                 if state.valid_tokens.remove(&token) {
-                    let surface_id = SurfaceId(surface.id().protocol_id());
                     state.focus_toplevel(surface_id);
                 }
             }

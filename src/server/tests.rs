@@ -1339,6 +1339,7 @@ fn window_group_properties() {
         super::WmHints {
             window_group: Some(prop_win),
             acquire_input_via_wm: false,
+            urgent: false,
         },
     );
     f.satellite.map_window(win);
