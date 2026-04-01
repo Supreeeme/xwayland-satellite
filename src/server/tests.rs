@@ -218,6 +218,16 @@ impl super::XConnection for FakeXConnection {
     }
 
     #[track_caller]
+    fn set_maximized(&mut self, window: xcb::x::Window, _maximized: bool) {
+        let _ = self.window_mut(window);
+    }
+
+    #[track_caller]
+    fn set_minimized(&mut self, window: xcb::x::Window, _minimized: bool) {
+        let _ = self.window_mut(window);
+    }
+
+    #[track_caller]
     fn set_window_dims(&mut self, window: Window, state: super::PendingSurfaceState) -> bool {
         self.window_mut(window).dims = WindowDims {
             x: state.x as _,
@@ -1546,6 +1556,112 @@ fn fullscreen() {
             .states
             .contains(&xdg_toplevel::State::Fullscreen)
     );
+}
+
+#[test]
+fn maximized() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let win = Window::new(1);
+    let (buffer, surface) = comp.create_surface();
+    f.new_window(
+        win,
+        false,
+        WindowData {
+            mapped: true,
+            dims: WindowDims {
+                x: 0,
+                y: 0,
+                width: 50,
+                height: 50,
+            },
+            fullscreen: false,
+        },
+    );
+    f.map_window(&comp, win, &surface.obj, &buffer);
+    f.run();
+    let id = f
+        .testwl
+        .created_surfaces()
+        .iter()
+        .rev()
+        .find_map(|surface_id| {
+            let data = f.testwl.get_surface_data(*surface_id)?;
+            matches!(data.role, Some(testwl::SurfaceRole::Toplevel(_))).then_some(*surface_id)
+        })
+        .expect("No toplevel surface created");
+
+    f.satellite.set_maximized(win, SetState::Add);
+    f.run();
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    assert!(
+        data.toplevel()
+            .states
+            .contains(&xdg_toplevel::State::Maximized)
+    );
+
+    f.satellite.set_maximized(win, SetState::Remove);
+    f.run();
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    assert!(
+        !data
+            .toplevel()
+            .states
+            .contains(&xdg_toplevel::State::Maximized)
+    );
+
+    f.satellite.set_maximized(win, SetState::Toggle);
+    f.run();
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    assert!(
+        data.toplevel()
+            .states
+            .contains(&xdg_toplevel::State::Maximized)
+    );
+}
+
+#[test]
+fn minimized() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let win = Window::new(1);
+    let (buffer, surface) = comp.create_surface();
+    f.new_window(
+        win,
+        false,
+        WindowData {
+            mapped: true,
+            dims: WindowDims {
+                x: 0,
+                y: 0,
+                width: 50,
+                height: 50,
+            },
+            fullscreen: false,
+        },
+    );
+    f.map_window(&comp, win, &surface.obj, &buffer);
+    f.run();
+    let id = f
+        .testwl
+        .created_surfaces()
+        .iter()
+        .rev()
+        .find_map(|surface_id| {
+            let data = f.testwl.get_surface_data(*surface_id)?;
+            matches!(data.role, Some(testwl::SurfaceRole::Toplevel(_))).then_some(*surface_id)
+        })
+        .expect("No toplevel surface created");
+
+    f.satellite.set_minimized(win);
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    assert!(data.toplevel().minimized);
 }
 
 #[test]

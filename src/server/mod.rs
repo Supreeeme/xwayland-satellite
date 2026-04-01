@@ -376,6 +376,8 @@ struct ToplevelData {
     toplevel: XdgToplevel,
     xdg: XdgSurfaceData,
     fullscreen: bool,
+    maximized: bool,
+    minimized: bool,
     decoration: decoration::DecorationsData,
 }
 
@@ -569,6 +571,12 @@ impl<S: X11Selection> XConnection for NoConnection<S> {
     }
     fn set_fullscreen(&mut self, _: x::Window, _: bool) {
         debug!("could not toggle fullscreen without XWayland initialized");
+    }
+    fn set_maximized(&mut self, _: x::Window, _: bool) {
+        debug!("could not toggle maximized state without XWayland initialized");
+    }
+    fn set_minimized(&mut self, _: x::Window, _: bool) {
+        debug!("could not toggle minimized state without XWayland initialized");
     }
     fn set_window_dims(&mut self, _: x::Window, _: crate::server::PendingSurfaceState) -> bool {
         debug!("could not set window dimensions without XWayland initialized");
@@ -1651,6 +1659,66 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
+    pub fn set_maximized(&mut self, window: x::Window, state: super::xstate::SetState) {
+        let Some(data) = self
+            .windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+        else {
+            warn!("Tried to set unknown window {window:?} maximized");
+            return;
+        };
+
+        let Some(role) = data.get::<&SurfaceRole>() else {
+            warn!("Tried to set window without role maximized: {window:?}");
+            return;
+        };
+
+        let SurfaceRole::Toplevel(Some(toplevel)) = &*role else {
+            warn!("Tried to set an unmapped toplevel or non toplevel maximized: {window:?}");
+            return;
+        };
+
+        use crate::xstate::SetState;
+        match state {
+            SetState::Add => toplevel.toplevel.set_maximized(),
+            SetState::Remove => toplevel.toplevel.unset_maximized(),
+            SetState::Toggle => {
+                if toplevel.maximized {
+                    toplevel.toplevel.unset_maximized()
+                } else {
+                    toplevel.toplevel.set_maximized()
+                }
+            }
+        }
+    }
+
+    pub fn set_minimized(&mut self, window: x::Window) {
+        let Some(data) = self
+            .windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+        else {
+            warn!("Tried to minimize unknown window {window:?}");
+            return;
+        };
+
+        let Some(mut role) = data.get::<&mut SurfaceRole>() else {
+            warn!("Tried to minimize window without role: {window:?}");
+            return;
+        };
+
+        let SurfaceRole::Toplevel(Some(toplevel)) = &mut *role else {
+            warn!("Tried to minimize an unmapped toplevel or non toplevel: {window:?}");
+            return;
+        };
+
+        toplevel.minimized = true;
+        toplevel.toplevel.set_minimized();
+    }
+
     pub fn set_transient_for(&mut self, window: x::Window, parent: x::Window) {
         let Some(mut win) = self
             .windows
@@ -2010,6 +2078,8 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             },
             toplevel,
             fullscreen: false,
+            maximized: false,
+            minimized: false,
             decoration: DecorationsData {
                 wl: wl_decoration,
                 satellite: sat_decoration,

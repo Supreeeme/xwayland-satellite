@@ -39,9 +39,11 @@ pub struct DecorationsDataSatellite {
     viewport: WpViewport,
     scale: f32,
     pixmap: Pixmap,
-    x_data: DecorationsBox,
+    buttons: DecorationsButtons,
     title: Option<String>,
     title_rect: Rect,
+    width: i32,
+    maximized: bool,
     should_draw: bool,
     remove_buffer: bool,
 }
@@ -97,11 +99,13 @@ impl DecorationsDataSatellite {
                 subsurface,
                 pool: pool_entity,
                 viewport,
-                x_data: DecorationsBox::default(),
+                buttons: DecorationsButtons::default(),
                 pixmap: Pixmap::new(1, 1).unwrap(),
                 scale: 1.0,
                 title: title.map(str::to_string),
                 title_rect: Rect::from_ltrb(0.0, 0.0, 0.0, 0.0).unwrap(),
+                width: 0,
+                maximized: false,
                 should_draw: true,
                 remove_buffer: false,
             }
@@ -153,17 +157,18 @@ impl DecorationsDataSatellite {
             return;
         }
 
+        self.width = width;
         self.scale = parent_scale_factor;
         let mut drawn_width = (width as f32 * self.scale).ceil() as i32;
         let drawn_height = (Self::TITLEBAR_HEIGHT as f32 * self.scale).ceil() as i32;
+        let buttons_width = drawn_height * 3;
 
-        let x = x_pixmap(drawn_height as u32, self.scale, self.x_data.hovered);
-        if x.width() > drawn_width as u32 {
-            drawn_width = x.width() as i32;
+        if buttons_width > drawn_width {
+            drawn_width = buttons_width;
         }
 
         let title = self.title.as_ref().and_then(|t| {
-            let width = (drawn_width as u32).saturating_sub(x.width());
+            let width = (drawn_width as u32).saturating_sub(buttons_width as u32);
             if width > 0 {
                 title_pixmap(t, width, drawn_height as u32, self.scale)
             } else {
@@ -188,48 +193,58 @@ impl DecorationsDataSatellite {
                 Rect::from_xywh(0.0, 0.0, title.width() as f32, title.height() as f32).unwrap();
         }
 
+        self.buttons
+            .layout(width as f32, Self::TITLEBAR_HEIGHT as f32);
+
+        let close = button_pixmap(
+            DecorationButtonKind::Close,
+            drawn_height as u32,
+            self.scale,
+            self.buttons.close.hovered,
+            self.maximized,
+        );
+        let maximize = button_pixmap(
+            DecorationButtonKind::Maximize,
+            drawn_height as u32,
+            self.scale,
+            self.buttons.maximize.hovered,
+            self.maximized,
+        );
+        let minimize = button_pixmap(
+            DecorationButtonKind::Minimize,
+            drawn_height as u32,
+            self.scale,
+            self.buttons.minimize.hovered,
+            self.maximized,
+        );
+
         bar.draw_pixmap(
-            (bar.width() - x.width()) as i32,
+            (bar.width() - close.width()) as i32,
             0,
-            x.as_ref(),
+            close.as_ref(),
             &Default::default(),
             Transform::identity(),
             None,
         );
-        self.x_data = DecorationsBox {
-            rect: Rect::from_ltrb(
-                width as f32 - Self::TITLEBAR_HEIGHT as f32,
-                0.0,
-                width as f32,
-                Self::TITLEBAR_HEIGHT as f32,
-            )
-            .unwrap(),
-            hovered: false,
-        };
+        bar.draw_pixmap(
+            (bar.width() - close.width() - maximize.width()) as i32,
+            0,
+            maximize.as_ref(),
+            &Default::default(),
+            Transform::identity(),
+            None,
+        );
+        bar.draw_pixmap(
+            (bar.width() - close.width() - maximize.width() - minimize.width()) as i32,
+            0,
+            minimize.as_ref(),
+            &Default::default(),
+            Transform::identity(),
+            None,
+        );
 
         self.pixmap = bar;
         self.viewport.set_destination(width, Self::TITLEBAR_HEIGHT);
-        self.update_buffer(world);
-    }
-
-    fn redraw_x_pixmap(&mut self, world: &World) {
-        let x = x_pixmap(self.pixmap.height(), self.scale, self.x_data.hovered);
-
-        self.pixmap.draw_pixmap(
-            (self.pixmap.width() - x.width()) as i32,
-            0,
-            x.as_ref(),
-            &Default::default(),
-            Transform::identity(),
-            None,
-        );
-
-        self.surface.damage_buffer(
-            (self.pixmap.width() - x.width()) as i32,
-            0,
-            x.width() as i32,
-            x.height() as i32,
-        );
         self.update_buffer(world);
     }
 
@@ -242,7 +257,9 @@ impl DecorationsDataSatellite {
         // Don't draw title if there's not enough space
         let title_pixmap = title_pixmap(
             title,
-            self.pixmap.width() - self.x_data.rect.width() as u32,
+            self.pixmap
+                .width()
+                .saturating_sub(self.buttons.total_width_pixels(self.pixmap.height())),
             self.pixmap.height(),
             self.scale,
         );
@@ -287,53 +304,158 @@ impl DecorationsDataSatellite {
         }
     }
 
+    pub fn set_maximized(&mut self, world: &World, maximized: bool) {
+        if self.maximized == maximized {
+            return;
+        }
+
+        self.maximized = maximized;
+        if self.width > 0 && self.should_draw {
+            self.draw_decorations(world, self.width, self.scale);
+        }
+    }
+
     fn handle_motion(&mut self, world: &World, x: f64, y: f64) {
-        if self.x_data.check_hovered(x as f32, y as f32) {
-            self.redraw_x_pixmap(world);
+        if self.buttons.check_hovered(x as f32, y as f32) {
+            self.draw_decorations(world, self.width, self.scale);
         }
     }
 
     fn handle_leave(&mut self, world: &World) {
-        if self.x_data.hovered {
-            self.x_data.hovered = false;
-            self.redraw_x_pixmap(world);
+        if self.buttons.clear_hovered() {
+            self.draw_decorations(world, self.width, self.scale);
         }
     }
 
-    /// Returns true if the toplevel should be closed
-    fn handle_click(&self, toplevel: &XdgToplevel, seat: &WlSeat, serial: u32) -> bool {
-        if self.x_data.hovered {
-            true
-        } else {
-            toplevel._move(seat, serial);
-            false
+    fn handle_click(
+        &self,
+        toplevel: &XdgToplevel,
+        seat: &WlSeat,
+        serial: u32,
+    ) -> DecorationAction {
+        match self.buttons.hovered_action(self.maximized) {
+            Some(DecorationAction::Close) => DecorationAction::Close,
+            Some(DecorationAction::ToggleMaximized) => DecorationAction::ToggleMaximized,
+            Some(DecorationAction::Minimize) => DecorationAction::Minimize,
+            _ => {
+                toplevel._move(seat, serial);
+                DecorationAction::Move
+            }
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecorationButtonKind {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecorationAction {
+    Move,
+    Minimize,
+    ToggleMaximized,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct DecorationsBox {
     rect: Rect,
     hovered: bool,
+    kind: DecorationButtonKind,
 }
 
-impl Default for DecorationsBox {
+#[derive(Debug)]
+struct DecorationsButtons {
+    minimize: DecorationsBox,
+    maximize: DecorationsBox,
+    close: DecorationsBox,
+}
+
+impl Default for DecorationsButtons {
     fn default() -> Self {
         Self {
-            rect: Rect::from_xywh(0.0, 0.0, 0.0, 0.0).unwrap(),
-            hovered: false,
+            minimize: DecorationsBox::new(DecorationButtonKind::Minimize),
+            maximize: DecorationsBox::new(DecorationButtonKind::Maximize),
+            close: DecorationsBox::new(DecorationButtonKind::Close),
         }
     }
 }
 
 impl DecorationsBox {
-    /// Returns true if hover state changed.
-    fn check_hovered(&mut self, x: f32, y: f32) -> bool {
-        let old_hovered = self.hovered;
-        self.hovered = (self.rect.left()..=self.rect.right()).contains(&x)
-            && (self.rect.top()..=self.rect.bottom()).contains(&y);
+    fn new(kind: DecorationButtonKind) -> Self {
+        Self {
+            rect: Rect::from_xywh(0.0, 0.0, 0.0, 0.0).unwrap(),
+            hovered: false,
+            kind,
+        }
+    }
 
-        old_hovered != self.hovered
+    fn contains(&self, x: f32, y: f32) -> bool {
+        (self.rect.left()..=self.rect.right()).contains(&x)
+            && (self.rect.top()..=self.rect.bottom()).contains(&y)
+    }
+}
+
+impl DecorationsButtons {
+    fn total_width_pixels(&self, button_height: u32) -> u32 {
+        button_height.saturating_mul(3)
+    }
+
+    fn layout(&mut self, width: f32, button_width: f32) {
+        let start = (width - button_width * 3.0).max(0.0);
+        self.minimize.rect = Rect::from_xywh(start, 0.0, button_width, button_width).unwrap();
+        self.maximize.rect =
+            Rect::from_xywh(start + button_width, 0.0, button_width, button_width).unwrap();
+        self.close.rect =
+            Rect::from_xywh(start + button_width * 2.0, 0.0, button_width, button_width).unwrap();
+    }
+
+    fn check_hovered(&mut self, x: f32, y: f32) -> bool {
+        let hovered = if self.close.contains(x, y) {
+            Some(DecorationButtonKind::Close)
+        } else if self.maximize.contains(x, y) {
+            Some(DecorationButtonKind::Maximize)
+        } else if self.minimize.contains(x, y) {
+            Some(DecorationButtonKind::Minimize)
+        } else {
+            None
+        };
+
+        let mut changed = false;
+        for button in [&mut self.minimize, &mut self.maximize, &mut self.close] {
+            let next = hovered == Some(button.kind);
+            if button.hovered != next {
+                button.hovered = next;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn clear_hovered(&mut self) -> bool {
+        let mut changed = false;
+        for button in [&mut self.minimize, &mut self.maximize, &mut self.close] {
+            if button.hovered {
+                button.hovered = false;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn hovered_action(&self, _maximized: bool) -> Option<DecorationAction> {
+        if self.close.hovered {
+            Some(DecorationAction::Close)
+        } else if self.maximize.hovered {
+            Some(DecorationAction::ToggleMaximized)
+        } else if self.minimize.hovered {
+            Some(DecorationAction::Minimize)
+        } else {
+            None
+        }
     }
 }
 
@@ -347,34 +469,100 @@ fn draw_pixmap_to_buffer(pixmap: &Pixmap, buffer: &mut [u8]) {
     }
 }
 
-fn x_pixmap(bar_height: u32, scale: f32, hovered: bool) -> Pixmap {
-    let mut x = Pixmap::new(bar_height, bar_height).unwrap();
+fn button_pixmap(
+    kind: DecorationButtonKind,
+    bar_height: u32,
+    scale: f32,
+    hovered: bool,
+    maximized: bool,
+) -> Pixmap {
+    let mut button = Pixmap::new(bar_height, bar_height).unwrap();
     if hovered {
-        x.fill(Color::from_rgba(1.0, 0.0, 0.0, 0.8).unwrap());
+        let bg = match kind {
+            DecorationButtonKind::Close => Color::from_rgba(1.0, 0.0, 0.0, 0.8).unwrap(),
+            _ => Color::from_rgba(0.85, 0.85, 0.85, 1.0).unwrap(),
+        };
+        button.fill(bg);
     } else {
-        x.fill(Color::WHITE);
+        button.fill(Color::WHITE);
     }
-    let size = x.width() as f32;
+    let size = button.width() as f32;
     let margin = 8.4 * scale;
+    let mut paint = Paint::default();
+    paint.set_color(Color::BLACK);
 
-    let mut line = PathBuilder::new();
-    line.move_to(margin, margin);
-    line.line_to(size - margin, size - margin);
-    line.move_to(size - margin, margin);
-    line.line_to(margin, size - margin);
-    let line = line.finish().unwrap();
-    x.stroke_path(
-        &line,
-        &Default::default(),
-        &Stroke {
-            width: scale + 0.5,
-            ..Default::default()
-        },
-        Default::default(),
-        None,
-    );
+    match kind {
+        DecorationButtonKind::Close => {
+            let mut line = PathBuilder::new();
+            line.move_to(margin, margin);
+            line.line_to(size - margin, size - margin);
+            line.move_to(size - margin, margin);
+            line.line_to(margin, size - margin);
+            let line = line.finish().unwrap();
+            button.stroke_path(
+                &line,
+                &paint,
+                &Stroke {
+                    width: scale + 0.5,
+                    ..Default::default()
+                },
+                Default::default(),
+                None,
+            );
+        }
+        DecorationButtonKind::Minimize => {
+            let y = size - margin * 1.25;
+            let mut line = PathBuilder::new();
+            line.move_to(margin, y);
+            line.line_to(size - margin, y);
+            let line = line.finish().unwrap();
+            button.stroke_path(
+                &line,
+                &paint,
+                &Stroke {
+                    width: scale + 0.75,
+                    ..Default::default()
+                },
+                Default::default(),
+                None,
+            );
+        }
+        DecorationButtonKind::Maximize => {
+            let inset = margin + scale;
+            let mut path = PathBuilder::new();
+            if maximized {
+                path.move_to(inset + 3.0 * scale, inset);
+                path.line_to(size - inset, inset);
+                path.line_to(size - inset, size - inset - 3.0 * scale);
+                path.line_to(inset + 3.0 * scale, size - inset - 3.0 * scale);
+                path.close();
+                path.move_to(inset, inset + 3.0 * scale);
+                path.line_to(size - inset - 3.0 * scale, inset + 3.0 * scale);
+                path.line_to(size - inset - 3.0 * scale, size - inset);
+                path.line_to(inset, size - inset);
+                path.close();
+            } else {
+                path.move_to(inset, inset);
+                path.line_to(size - inset, inset);
+                path.line_to(size - inset, size - inset);
+                path.line_to(inset, size - inset);
+                path.close();
+            }
+            let path = path.finish().unwrap();
+            button.stroke_path(
+                &path,
+                &paint,
+                &Stroke {
+                    width: scale + 0.5,
+                    ..Default::default()
+                },
+                Default::default(),
+                None,
+            );
+        }
+    }
 
-    x
+    button
 }
 
 fn title_pixmap(title: &str, max_width: u32, height: u32, scale: f32) -> Option<Pixmap> {
@@ -505,15 +693,24 @@ pub fn handle_pointer_click(
         unreachable!()
     };
 
-    if toplevel
+    let action = toplevel
         .decoration
         .satellite
         .as_mut()
         .unwrap()
-        .handle_click(&toplevel.toplevel, seat, serial)
-    {
-        let window = *state.world.get::<&x::Window>(parent).unwrap();
-        drop(role);
-        state.close_x_window(window);
+        .handle_click(&toplevel.toplevel, seat, serial);
+    let window = *state.world.get::<&x::Window>(parent).unwrap();
+    drop(role);
+
+    match action {
+        DecorationAction::Close => state.close_x_window(window),
+        DecorationAction::ToggleMaximized => {
+            state.set_maximized(window, crate::xstate::SetState::Toggle)
+        }
+        DecorationAction::Minimize => {
+            state.set_minimized(window);
+            state.connection.set_minimized(window, true);
+        }
+        DecorationAction::Move => {}
     }
 }

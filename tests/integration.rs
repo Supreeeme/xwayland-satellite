@@ -18,7 +18,7 @@ use wayland_server::Resource;
 use wayland_server::protocol::{wl_output, wl_pointer};
 use xcb::{Xid, x};
 use xwayland_satellite as xwls;
-use xwayland_satellite::xstate::{MoveResizeDirection, WmSizeHintsFlags, WmState};
+use xwayland_satellite::xstate::{MoveResizeDirection, SetState, WmSizeHintsFlags, WmState};
 use xwls::timespec_from_millis;
 
 #[derive(Default)]
@@ -254,8 +254,14 @@ impl Fixture {
         self.wait_and_dispatch();
         let surface = self
             .testwl
-            .last_created_surface_id()
-            .expect("No surface created");
+            .created_surfaces()
+            .iter()
+            .rev()
+            .find_map(|surface_id| {
+                let data = self.testwl.get_surface_data(*surface_id)?;
+                matches!(data.role, Some(testwl::SurfaceRole::Toplevel(_))).then_some(*surface_id)
+            })
+            .expect("No toplevel surface created");
         self.configure_and_verify_new_toplevel(connection, window, surface);
         surface
     }
@@ -327,7 +333,11 @@ xcb::atoms_struct! {
         wm_protocols => b"WM_PROTOCOLS",
         net_active_window => b"_NET_ACTIVE_WINDOW",
         wm_delete_window => b"WM_DELETE_WINDOW",
+        wm_change_state => b"WM_CHANGE_STATE",
         net_wm_state => b"_NET_WM_STATE",
+        wm_state_hidden => b"_NET_WM_STATE_HIDDEN",
+        wm_state_maximized_vert => b"_NET_WM_STATE_MAXIMIZED_VERT",
+        wm_state_maximized_horz => b"_NET_WM_STATE_MAXIMIZED_HORZ",
         skip_taskbar => b"_NET_WM_STATE_SKIP_TASKBAR",
         transient_for => b"WM_TRANSIENT_FOR",
         clipboard => b"CLIPBOARD",
@@ -979,6 +989,86 @@ fn activation_x11_to_x11() {
     f.wait_and_dispatch();
 
     assert_eq!(f.testwl.get_focused(), Some(surface1));
+}
+
+#[test]
+fn minimize_client_message() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, window);
+
+    connection.send_client_message(&x::ClientMessageEvent::new(
+        window,
+        connection.atoms.wm_change_state,
+        x::ClientMessageData::Data32([WmState::Iconic as u32, 0, 0, 0, 0]),
+    ));
+    f.wait_and_dispatch();
+
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert!(data.toplevel().minimized);
+
+    let reply = connection.get_reply(&x::GetProperty {
+        delete: false,
+        window,
+        property: connection.atoms.wm_state,
+        r#type: connection.atoms.wm_state,
+        long_offset: 0,
+        long_length: 2,
+    });
+    assert_eq!(reply.value::<u32>().first().copied(), Some(WmState::Iconic as u32));
+
+    let reply = connection.get_reply(&x::GetProperty {
+        delete: false,
+        window,
+        property: connection.atoms.net_wm_state,
+        r#type: x::ATOM_ATOM,
+        long_offset: 0,
+        long_length: 8,
+    });
+    assert!(reply.value::<x::Atom>().contains(&connection.atoms.wm_state_hidden));
+}
+
+#[test]
+fn maximize_client_message() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, window);
+
+    connection.send_client_message(&x::ClientMessageEvent::new(
+        window,
+        connection.atoms.net_wm_state,
+        x::ClientMessageData::Data32([
+            SetState::Add as u32,
+            connection.atoms.wm_state_maximized_vert.resource_id(),
+            connection.atoms.wm_state_maximized_horz.resource_id(),
+            0,
+            0,
+        ]),
+    ));
+    f.wait_and_dispatch();
+
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert!(
+        data.toplevel()
+            .states
+            .contains(&xdg_toplevel::State::Maximized)
+    );
+
+    let reply = connection.get_reply(&x::GetProperty {
+        delete: false,
+        window,
+        property: connection.atoms.net_wm_state,
+        r#type: x::ATOM_ATOM,
+        long_offset: 0,
+        long_length: 8,
+    });
+    let states = reply.value::<x::Atom>();
+    assert!(states.contains(&connection.atoms.wm_state_maximized_vert));
+    assert!(states.contains(&connection.atoms.wm_state_maximized_horz));
 }
 
 #[test]

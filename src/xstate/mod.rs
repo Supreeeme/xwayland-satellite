@@ -302,6 +302,9 @@ impl XState {
                 self.atoms.motif_wm_hints,
                 self.atoms.net_wm_state,
                 self.atoms.wm_fullscreen,
+                self.atoms.wm_maximized_vert,
+                self.atoms.wm_maximized_horz,
+                self.atoms.wm_hidden,
                 self.atoms.moveresize,
             ],
         );
@@ -586,6 +589,35 @@ impl XState {
                         }
                         _ => {}
                     }
+                }
+
+                let has_vert = [prop1, prop2].contains(&self.atoms.wm_maximized_vert);
+                let has_horz = [prop1, prop2].contains(&self.atoms.wm_maximized_horz);
+                if has_vert || has_horz {
+                    if has_vert && has_horz {
+                        server_state.set_maximized(e.window(), action);
+                    } else {
+                        warn!(
+                            "ignoring partial maximize request for {:?}: vert={} horz={}",
+                            e.window(),
+                            has_vert,
+                            has_horz
+                        );
+                    }
+                }
+            }
+            x if x == self.atoms.wm_change_state => {
+                let x::ClientMessageData::Data32(data) = e.data() else {
+                    unreachable!();
+                };
+
+                match WmState::try_from(data[0]) {
+                    Ok(WmState::Iconic) => {
+                        server_state.set_minimized(e.window());
+                        server_state.connection.set_minimized(e.window(), true);
+                    }
+                    Ok(other) => warn!("unsupported WM_CHANGE_STATE {:?} for {:?}", other, e.window()),
+                    Err(_) => warn!("unknown WM_CHANGE_STATE {} for {:?}", data[0], e.window()),
                 }
             }
             x if x == self.atoms.active_win => {
@@ -1061,6 +1093,7 @@ xcb::atoms_struct! {
         wm_delete_window => b"WM_DELETE_WINDOW" only_if_exists = false,
         wm_transient_for => b"WM_TRANSIENT_FOR" only_if_exists = false,
         wm_state => b"WM_STATE" only_if_exists = false,
+        wm_change_state => b"WM_CHANGE_STATE" only_if_exists = false,
         wm_s0 => b"WM_S0" only_if_exists = false,
         net_wm_cm_s0 => b"_NET_WM_CM_S0" only_if_exists = false,
         wm_check => b"_NET_SUPPORTING_WM_CHECK" only_if_exists = false,
@@ -1068,6 +1101,9 @@ xcb::atoms_struct! {
         wm_pid => b"_NET_WM_PID" only_if_exists = false,
         net_wm_state => b"_NET_WM_STATE" only_if_exists = false,
         wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
+        wm_maximized_vert => b"_NET_WM_STATE_MAXIMIZED_VERT" only_if_exists = false,
+        wm_maximized_horz => b"_NET_WM_STATE_MAXIMIZED_HORZ" only_if_exists = false,
+        wm_hidden => b"_NET_WM_STATE_HIDDEN" only_if_exists = false,
         skip_taskbar => b"_NET_WM_STATE_SKIP_TASKBAR" only_if_exists = false,
         active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
@@ -1308,6 +1344,14 @@ pub struct RealConnection {
     connection: Rc<xcb::Connection>,
     outputs: HashMap<String, xcb::randr::Output>,
     primary_output: xcb::randr::Output,
+    reflected_states: HashMap<x::Window, ReflectedWindowState>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ReflectedWindowState {
+    fullscreen: bool,
+    maximized: bool,
+    minimized: bool,
 }
 
 impl RealConnection {
@@ -1317,6 +1361,7 @@ impl RealConnection {
             connection,
             outputs: Default::default(),
             primary_output: Xid::none(),
+            reflected_states: Default::default(),
         }
     }
 
@@ -1363,6 +1408,50 @@ impl RealConnection {
     fn root_window(&self) -> x::Window {
         self.connection.get_setup().roots().next().unwrap().root()
     }
+
+    fn sync_reflected_window_state(&mut self, window: x::Window) {
+        if window == x::Window::none() {
+            return;
+        }
+
+        let state = self.reflected_states.get(&window).copied().unwrap_or_default();
+        let mut net_wm_state = Vec::with_capacity(4);
+        if state.fullscreen {
+            net_wm_state.push(self.atoms.wm_fullscreen);
+        }
+        if state.maximized {
+            net_wm_state.push(self.atoms.wm_maximized_vert);
+            net_wm_state.push(self.atoms.wm_maximized_horz);
+        }
+        if state.minimized {
+            net_wm_state.push(self.atoms.wm_hidden);
+        }
+
+        if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty::<x::Atom> {
+            mode: x::PropMode::Replace,
+            window,
+            property: self.atoms.net_wm_state,
+            r#type: x::ATOM_ATOM,
+            data: &net_wm_state,
+        }) {
+            warn!("Failed to sync _NET_WM_STATE on {window:?} ({e})");
+        }
+
+        let wm_state = if state.minimized {
+            WmState::Iconic
+        } else {
+            WmState::Normal
+        };
+        if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty {
+            mode: x::PropMode::Replace,
+            window,
+            property: self.atoms.wm_state,
+            r#type: self.atoms.wm_state,
+            data: &[wm_state as u32, x::Window::none().resource_id()],
+        }) {
+            warn!("Failed to sync WM_STATE on {window:?} ({e})");
+        }
+    }
 }
 
 impl XConnection for RealConnection {
@@ -1389,24 +1478,22 @@ impl XConnection for RealConnection {
     }
 
     fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool) {
-        let data = if fullscreen {
-            std::slice::from_ref(&self.atoms.wm_fullscreen)
-        } else {
-            &[]
-        };
+        self.reflected_states.entry(window).or_default().fullscreen = fullscreen;
+        self.sync_reflected_window_state(window);
+    }
 
-        if let Err(e) = self
-            .connection
-            .send_and_check_request(&x::ChangeProperty::<x::Atom> {
-                mode: x::PropMode::Replace,
-                window,
-                property: self.atoms.net_wm_state,
-                r#type: x::ATOM_ATOM,
-                data,
-            })
-        {
-            warn!("Failed to set fullscreen state on {window:?} ({e})");
+    fn set_maximized(&mut self, window: x::Window, maximized: bool) {
+        let state = self.reflected_states.entry(window).or_default();
+        state.maximized = maximized;
+        if maximized {
+            state.minimized = false;
         }
+        self.sync_reflected_window_state(window);
+    }
+
+    fn set_minimized(&mut self, window: x::Window, minimized: bool) {
+        self.reflected_states.entry(window).or_default().minimized = minimized;
+        self.sync_reflected_window_state(window);
     }
 
     fn focus_window(&mut self, window: x::Window, output_name: Option<String>) {
@@ -1428,14 +1515,9 @@ impl XConnection for RealConnection {
         }) {
             debug!("ChangeProperty failed ({window:?}: {e:?})");
         }
-        if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty {
-            mode: x::PropMode::Replace,
-            window,
-            property: self.atoms.wm_state,
-            r#type: self.atoms.wm_state,
-            data: &[WmState::Normal as u32, 0],
-        }) {
-            debug!("ChangeProperty failed ({window:?}: {e:?})");
+        if window != x::Window::none() {
+            self.reflected_states.entry(window).or_default().minimized = false;
+            self.sync_reflected_window_state(window);
         }
 
         if let Some(name) = output_name {

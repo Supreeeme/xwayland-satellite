@@ -540,8 +540,15 @@ impl SurfaceEvents {
                 let mut role = data.get::<&mut SurfaceRole>().unwrap();
                 if let SurfaceRole::Toplevel(Some(toplevel)) = &mut *role {
                     let prev_fs = toplevel.fullscreen;
+                    let prev_maximized = toplevel.maximized;
+                    let prev_minimized = toplevel.minimized;
                     toplevel.fullscreen =
                         states.contains(&(u32::from(xdg_toplevel::State::Fullscreen) as u8));
+                    toplevel.maximized =
+                        states.contains(&(u32::from(xdg_toplevel::State::Maximized) as u8));
+                    if prev_minimized {
+                        toplevel.minimized = false;
+                    }
                     if toplevel.fullscreen != prev_fs {
                         state.connection.set_fullscreen(
                             *data.get::<&x::Window>().unwrap(),
@@ -550,6 +557,18 @@ impl SurfaceEvents {
                         if let Some(decorations) = toplevel.decoration.satellite.as_mut() {
                             decorations.handle_fullscreen(toplevel.fullscreen);
                         }
+                    }
+                    if toplevel.maximized != prev_maximized {
+                        state.connection.set_maximized(
+                            *data.get::<&x::Window>().unwrap(),
+                            toplevel.maximized,
+                        );
+                        if let Some(decorations) = toplevel.decoration.satellite.as_mut() {
+                            decorations.set_maximized(&state.world, toplevel.maximized);
+                        }
+                    }
+                    if prev_minimized {
+                        state.connection.set_minimized(*data.get::<&x::Window>().unwrap(), false);
                     }
                 };
 
