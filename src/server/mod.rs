@@ -8,7 +8,7 @@ mod tests;
 
 use self::event::*;
 use crate::xstate::{Decorations, MoveResizeDirection, WindowDims, WmHints, WmName, WmNormalHints};
-use crate::{X11Selection, XConnection, timespec_from_millis};
+use crate::{ToplevelCapabilities, X11Selection, XConnection, timespec_from_millis};
 use clientside::MyWorld;
 use decoration::{DecorationsData, DecorationsDataSatellite};
 use hecs::{Entity, World};
@@ -378,6 +378,7 @@ struct ToplevelData {
     fullscreen: bool,
     maximized: bool,
     minimized: bool,
+    capabilities: ToplevelCapabilities,
     decoration: decoration::DecorationsData,
 }
 
@@ -577,6 +578,9 @@ impl<S: X11Selection> XConnection for NoConnection<S> {
     }
     fn set_minimized(&mut self, _: x::Window, _: bool) {
         debug!("could not toggle minimized state without XWayland initialized");
+    }
+    fn set_allowed_actions(&mut self, _: x::Window, _: ToplevelCapabilities) {
+        debug!("could not set allowed actions without XWayland initialized");
     }
     fn set_window_dims(&mut self, _: x::Window, _: crate::server::PendingSurfaceState) -> bool {
         debug!("could not set window dimensions without XWayland initialized");
@@ -2080,6 +2084,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             fullscreen: false,
             maximized: false,
             minimized: false,
+            capabilities: ToplevelCapabilities::all(),
             decoration: DecorationsData {
                 wl: wl_decoration,
                 satellite: sat_decoration,

@@ -4,7 +4,7 @@ mod selection;
 use selection::{Selection, SelectionState};
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
 
-use crate::XConnection;
+use crate::{ToplevelCapabilities, XConnection};
 use bitflags::bitflags;
 use log::{debug, trace, warn};
 use std::collections::HashMap;
@@ -301,6 +301,13 @@ impl XState {
                 self.atoms.active_win,
                 self.atoms.motif_wm_hints,
                 self.atoms.net_wm_state,
+                self.atoms.net_wm_allowed_actions,
+                self.atoms.wm_action_move,
+                self.atoms.wm_action_resize,
+                self.atoms.wm_action_minimize,
+                self.atoms.wm_action_maximize,
+                self.atoms.wm_action_fullscreen,
+                self.atoms.wm_action_close,
                 self.atoms.wm_fullscreen,
                 self.atoms.wm_maximized_vert,
                 self.atoms.wm_maximized_horz,
@@ -1100,6 +1107,13 @@ xcb::atoms_struct! {
         net_wm_name => b"_NET_WM_NAME" only_if_exists = false,
         wm_pid => b"_NET_WM_PID" only_if_exists = false,
         net_wm_state => b"_NET_WM_STATE" only_if_exists = false,
+        net_wm_allowed_actions => b"_NET_WM_ALLOWED_ACTIONS" only_if_exists = false,
+        wm_action_move => b"_NET_WM_ACTION_MOVE" only_if_exists = false,
+        wm_action_resize => b"_NET_WM_ACTION_RESIZE" only_if_exists = false,
+        wm_action_minimize => b"_NET_WM_ACTION_MINIMIZE" only_if_exists = false,
+        wm_action_maximize => b"_NET_WM_ACTION_MAXIMIZE" only_if_exists = false,
+        wm_action_fullscreen => b"_NET_WM_ACTION_FULLSCREEN" only_if_exists = false,
+        wm_action_close => b"_NET_WM_ACTION_CLOSE" only_if_exists = false,
         wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
         wm_maximized_vert => b"_NET_WM_STATE_MAXIMIZED_VERT" only_if_exists = false,
         wm_maximized_horz => b"_NET_WM_STATE_MAXIMIZED_HORZ" only_if_exists = false,
@@ -1347,11 +1361,23 @@ pub struct RealConnection {
     reflected_states: HashMap<x::Window, ReflectedWindowState>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct ReflectedWindowState {
     fullscreen: bool,
     maximized: bool,
     minimized: bool,
+    allowed_actions: ToplevelCapabilities,
+}
+
+impl Default for ReflectedWindowState {
+    fn default() -> Self {
+        Self {
+            fullscreen: false,
+            maximized: false,
+            minimized: false,
+            allowed_actions: ToplevelCapabilities::all(),
+        }
+    }
 }
 
 impl RealConnection {
@@ -1451,6 +1477,30 @@ impl RealConnection {
         }) {
             warn!("Failed to sync WM_STATE on {window:?} ({e})");
         }
+
+        let mut allowed_actions = vec![
+            self.atoms.wm_action_move,
+            self.atoms.wm_action_resize,
+            self.atoms.wm_action_close,
+        ];
+        if state.allowed_actions.contains(ToplevelCapabilities::MINIMIZE) {
+            allowed_actions.push(self.atoms.wm_action_minimize);
+        }
+        if state.allowed_actions.contains(ToplevelCapabilities::MAXIMIZE) {
+            allowed_actions.push(self.atoms.wm_action_maximize);
+        }
+        if state.allowed_actions.contains(ToplevelCapabilities::FULLSCREEN) {
+            allowed_actions.push(self.atoms.wm_action_fullscreen);
+        }
+        if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty::<x::Atom> {
+            mode: x::PropMode::Replace,
+            window,
+            property: self.atoms.net_wm_allowed_actions,
+            r#type: x::ATOM_ATOM,
+            data: &allowed_actions,
+        }) {
+            warn!("Failed to sync _NET_WM_ALLOWED_ACTIONS on {window:?} ({e})");
+        }
     }
 }
 
@@ -1493,6 +1543,11 @@ impl XConnection for RealConnection {
 
     fn set_minimized(&mut self, window: x::Window, minimized: bool) {
         self.reflected_states.entry(window).or_default().minimized = minimized;
+        self.sync_reflected_window_state(window);
+    }
+
+    fn set_allowed_actions(&mut self, window: x::Window, capabilities: ToplevelCapabilities) {
+        self.reflected_states.entry(window).or_default().allowed_actions = capabilities;
         self.sync_reflected_window_state(window);
     }
 

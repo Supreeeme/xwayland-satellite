@@ -4,7 +4,7 @@ use super::{
 };
 use crate::server::selection::{Primary, SelectionType};
 use crate::xstate::{SetState, WinSize, WmName};
-use crate::{XConnection, timespec_from_millis};
+use crate::{ToplevelCapabilities, XConnection, timespec_from_millis};
 use rustix::event::{PollFd, PollFlags, poll};
 use std::collections::HashMap;
 use std::io::Write;
@@ -224,6 +224,11 @@ impl super::XConnection for FakeXConnection {
 
     #[track_caller]
     fn set_minimized(&mut self, window: xcb::x::Window, _minimized: bool) {
+        let _ = self.window_mut(window);
+    }
+
+    #[track_caller]
+    fn set_allowed_actions(&mut self, window: xcb::x::Window, _capabilities: ToplevelCapabilities) {
         let _ = self.window_mut(window);
     }
 

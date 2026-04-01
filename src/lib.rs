@@ -1,6 +1,7 @@
 mod server;
 pub mod xstate;
 
+use bitflags::bitflags;
 use crate::server::{NoConnection, PendingSurfaceState, ServerState};
 use crate::xstate::{RealConnection, XState};
 use log::{error, info};
@@ -14,6 +15,16 @@ use std::process::{Command, ExitStatus, Stdio};
 use wayland_server::{Display, ListeningSocket};
 use xcb::x;
 
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct ToplevelCapabilities: u8 {
+        const WINDOW_MENU = 1 << 0;
+        const MAXIMIZE = 1 << 1;
+        const FULLSCREEN = 1 << 2;
+        const MINIMIZE = 1 << 3;
+    }
+}
+
 pub trait XConnection: Sized + 'static {
     type X11Selection: X11Selection;
 
@@ -21,6 +32,7 @@ pub trait XConnection: Sized + 'static {
     fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool);
     fn set_maximized(&mut self, window: x::Window, maximized: bool);
     fn set_minimized(&mut self, window: x::Window, minimized: bool);
+    fn set_allowed_actions(&mut self, window: x::Window, capabilities: ToplevelCapabilities);
     fn focus_window(&mut self, window: x::Window, output_name: Option<String>);
     fn close_window(&mut self, window: x::Window);
     fn unmap_window(&mut self, window: x::Window);

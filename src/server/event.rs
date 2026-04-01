@@ -1,6 +1,7 @@
 use super::clientside::LateInitObjectKey;
 use super::decoration::DecorationMarker;
 use super::*;
+use crate::ToplevelCapabilities;
 use hecs::{CommandBuffer, World};
 use log::{debug, error, trace, warn};
 use macros::simple_event_shunt;
@@ -182,6 +183,25 @@ impl Event for SurfaceEvents {
 }
 
 impl SurfaceEvents {
+    fn parse_toplevel_capabilities(capabilities: &[u8]) -> ToplevelCapabilities {
+        let mut parsed = ToplevelCapabilities::empty();
+
+        if capabilities.contains(&(u32::from(xdg_toplevel::WmCapabilities::WindowMenu) as u8)) {
+            parsed |= ToplevelCapabilities::WINDOW_MENU;
+        }
+        if capabilities.contains(&(u32::from(xdg_toplevel::WmCapabilities::Maximize) as u8)) {
+            parsed |= ToplevelCapabilities::MAXIMIZE;
+        }
+        if capabilities.contains(&(u32::from(xdg_toplevel::WmCapabilities::Fullscreen) as u8)) {
+            parsed |= ToplevelCapabilities::FULLSCREEN;
+        }
+        if capabilities.contains(&(u32::from(xdg_toplevel::WmCapabilities::Minimize) as u8)) {
+            parsed |= ToplevelCapabilities::MINIMIZE;
+        }
+
+        parsed
+    }
+
     fn refresh_surface_constraints<S: X11Selection>(
         state: &InnerServerState<S>,
         target: Entity,
@@ -594,8 +614,20 @@ impl SurfaceEvents {
                 let window = *data.get::<&x::Window>().unwrap();
                 state.close_x_window(window);
             }
-            // TODO: support capabilities (minimize, maximize, etc)
-            xdg_toplevel::Event::WmCapabilities { .. } => {}
+            xdg_toplevel::Event::WmCapabilities { capabilities } => {
+                let window = *data.get::<&x::Window>().unwrap();
+                let mut role = data.get::<&mut SurfaceRole>().unwrap();
+                if let SurfaceRole::Toplevel(Some(toplevel)) = &mut *role {
+                    let parsed = Self::parse_toplevel_capabilities(&capabilities);
+                    if toplevel.capabilities != parsed {
+                        toplevel.capabilities = parsed;
+                        state.connection.set_allowed_actions(window, parsed);
+                        if let Some(decorations) = toplevel.decoration.satellite.as_mut() {
+                            decorations.set_capabilities(&state.world, parsed);
+                        }
+                    }
+                }
+            }
             xdg_toplevel::Event::ConfigureBounds { .. } => {}
             ref other => warn!("unhandled xdgtoplevel event: {other:?}"),
         }

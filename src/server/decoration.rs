@@ -1,5 +1,5 @@
 use crate::server::{InnerServerState, ServerState, SurfaceRole};
-use crate::{X11Selection, XConnection};
+use crate::{ToplevelCapabilities, X11Selection, XConnection};
 
 use ab_glyph::{Font, FontRef, Glyph, PxScaleFont, ScaleFont};
 use hecs::{CommandBuffer, Entity, World};
@@ -44,6 +44,7 @@ pub struct DecorationsDataSatellite {
     title_rect: Rect,
     width: i32,
     maximized: bool,
+    capabilities: ToplevelCapabilities,
     should_draw: bool,
     remove_buffer: bool,
 }
@@ -106,6 +107,7 @@ impl DecorationsDataSatellite {
                 title_rect: Rect::from_ltrb(0.0, 0.0, 0.0, 0.0).unwrap(),
                 width: 0,
                 maximized: false,
+                capabilities: ToplevelCapabilities::all(),
                 should_draw: true,
                 remove_buffer: false,
             }
@@ -161,7 +163,9 @@ impl DecorationsDataSatellite {
         self.scale = parent_scale_factor;
         let mut drawn_width = (width as f32 * self.scale).ceil() as i32;
         let drawn_height = (Self::TITLEBAR_HEIGHT as f32 * self.scale).ceil() as i32;
-        let buttons_width = drawn_height * 3;
+        let buttons_width = self
+            .buttons
+            .total_width_pixels(drawn_height as u32, self.capabilities) as i32;
 
         if buttons_width > drawn_width {
             drawn_width = buttons_width;
@@ -194,54 +198,25 @@ impl DecorationsDataSatellite {
         }
 
         self.buttons
-            .layout(width as f32, Self::TITLEBAR_HEIGHT as f32);
+            .layout(width as f32, Self::TITLEBAR_HEIGHT as f32, self.capabilities);
 
-        let close = button_pixmap(
-            DecorationButtonKind::Close,
-            drawn_height as u32,
-            self.scale,
-            self.buttons.close.hovered,
-            self.maximized,
-        );
-        let maximize = button_pixmap(
-            DecorationButtonKind::Maximize,
-            drawn_height as u32,
-            self.scale,
-            self.buttons.maximize.hovered,
-            self.maximized,
-        );
-        let minimize = button_pixmap(
-            DecorationButtonKind::Minimize,
-            drawn_height as u32,
-            self.scale,
-            self.buttons.minimize.hovered,
-            self.maximized,
-        );
-
-        bar.draw_pixmap(
-            (bar.width() - close.width()) as i32,
-            0,
-            close.as_ref(),
-            &Default::default(),
-            Transform::identity(),
-            None,
-        );
-        bar.draw_pixmap(
-            (bar.width() - close.width() - maximize.width()) as i32,
-            0,
-            maximize.as_ref(),
-            &Default::default(),
-            Transform::identity(),
-            None,
-        );
-        bar.draw_pixmap(
-            (bar.width() - close.width() - maximize.width() - minimize.width()) as i32,
-            0,
-            minimize.as_ref(),
-            &Default::default(),
-            Transform::identity(),
-            None,
-        );
+        for button in self.buttons.visible_buttons(self.capabilities) {
+            let pixmap = button_pixmap(
+                button.kind,
+                drawn_height as u32,
+                self.scale,
+                button.hovered,
+                self.maximized,
+            );
+            bar.draw_pixmap(
+                (button.rect.left() * self.scale).round() as i32,
+                0,
+                pixmap.as_ref(),
+                &Default::default(),
+                Transform::identity(),
+                None,
+            );
+        }
 
         self.pixmap = bar;
         self.viewport.set_destination(width, Self::TITLEBAR_HEIGHT);
@@ -259,7 +234,10 @@ impl DecorationsDataSatellite {
             title,
             self.pixmap
                 .width()
-                .saturating_sub(self.buttons.total_width_pixels(self.pixmap.height())),
+                .saturating_sub(
+                    self.buttons
+                        .total_width_pixels(self.pixmap.height(), self.capabilities),
+                ),
             self.pixmap.height(),
             self.scale,
         );
@@ -315,8 +293,22 @@ impl DecorationsDataSatellite {
         }
     }
 
+    pub fn set_capabilities(&mut self, world: &World, capabilities: ToplevelCapabilities) {
+        if self.capabilities == capabilities {
+            return;
+        }
+
+        self.capabilities = capabilities;
+        if self.width > 0 && self.should_draw {
+            self.draw_decorations(world, self.width, self.scale);
+        }
+    }
+
     fn handle_motion(&mut self, world: &World, x: f64, y: f64) {
-        if self.buttons.check_hovered(x as f32, y as f32) {
+        if self
+            .buttons
+            .check_hovered(x as f32, y as f32, self.capabilities)
+        {
             self.draw_decorations(world, self.width, self.scale);
         }
     }
@@ -333,7 +325,10 @@ impl DecorationsDataSatellite {
         seat: &WlSeat,
         serial: u32,
     ) -> DecorationAction {
-        match self.buttons.hovered_action(self.maximized) {
+        match self
+            .buttons
+            .hovered_action(self.maximized, self.capabilities)
+        {
             Some(DecorationAction::Close) => DecorationAction::Close,
             Some(DecorationAction::ToggleMaximized) => DecorationAction::ToggleMaximized,
             Some(DecorationAction::Minimize) => DecorationAction::Minimize,
@@ -400,25 +395,73 @@ impl DecorationsBox {
 }
 
 impl DecorationsButtons {
-    fn total_width_pixels(&self, button_height: u32) -> u32 {
-        button_height.saturating_mul(3)
+    fn total_width_pixels(&self, button_height: u32, capabilities: ToplevelCapabilities) -> u32 {
+        button_height.saturating_mul(self.visible_button_count(capabilities))
     }
 
-    fn layout(&mut self, width: f32, button_width: f32) {
-        let start = (width - button_width * 3.0).max(0.0);
-        self.minimize.rect = Rect::from_xywh(start, 0.0, button_width, button_width).unwrap();
-        self.maximize.rect =
-            Rect::from_xywh(start + button_width, 0.0, button_width, button_width).unwrap();
+    fn visible_button_count(&self, capabilities: ToplevelCapabilities) -> u32 {
+        let mut count = 1;
+        if capabilities.contains(ToplevelCapabilities::MAXIMIZE) {
+            count += 1;
+        }
+        if capabilities.contains(ToplevelCapabilities::MINIMIZE) {
+            count += 1;
+        }
+        count
+    }
+
+    fn visible_buttons(&self, capabilities: ToplevelCapabilities) -> Vec<&DecorationsBox> {
+        let mut buttons = Vec::with_capacity(self.visible_button_count(capabilities) as usize);
+        if capabilities.contains(ToplevelCapabilities::MINIMIZE) {
+            buttons.push(&self.minimize);
+        }
+        if capabilities.contains(ToplevelCapabilities::MAXIMIZE) {
+            buttons.push(&self.maximize);
+        }
+        buttons.push(&self.close);
+        buttons
+    }
+
+    fn layout(&mut self, width: f32, button_width: f32, capabilities: ToplevelCapabilities) {
+        let count = self.visible_button_count(capabilities) as f32;
+        let start = (width - button_width * count).max(0.0);
+        let mut index = 0.0;
+
+        self.minimize.rect = if capabilities.contains(ToplevelCapabilities::MINIMIZE) {
+            let rect =
+                Rect::from_xywh(start + button_width * index, 0.0, button_width, button_width)
+                    .unwrap();
+            index += 1.0;
+            rect
+        } else {
+            Rect::from_xywh(0.0, 0.0, 0.0, 0.0).unwrap()
+        };
+
+        self.maximize.rect = if capabilities.contains(ToplevelCapabilities::MAXIMIZE) {
+            let rect =
+                Rect::from_xywh(start + button_width * index, 0.0, button_width, button_width)
+                    .unwrap();
+            index += 1.0;
+            rect
+        } else {
+            Rect::from_xywh(0.0, 0.0, 0.0, 0.0).unwrap()
+        };
+
         self.close.rect =
-            Rect::from_xywh(start + button_width * 2.0, 0.0, button_width, button_width).unwrap();
+            Rect::from_xywh(start + button_width * index, 0.0, button_width, button_width)
+                .unwrap();
     }
 
-    fn check_hovered(&mut self, x: f32, y: f32) -> bool {
+    fn check_hovered(&mut self, x: f32, y: f32, capabilities: ToplevelCapabilities) -> bool {
         let hovered = if self.close.contains(x, y) {
             Some(DecorationButtonKind::Close)
-        } else if self.maximize.contains(x, y) {
+        } else if capabilities.contains(ToplevelCapabilities::MAXIMIZE)
+            && self.maximize.contains(x, y)
+        {
             Some(DecorationButtonKind::Maximize)
-        } else if self.minimize.contains(x, y) {
+        } else if capabilities.contains(ToplevelCapabilities::MINIMIZE)
+            && self.minimize.contains(x, y)
+        {
             Some(DecorationButtonKind::Minimize)
         } else {
             None
@@ -446,12 +489,16 @@ impl DecorationsButtons {
         changed
     }
 
-    fn hovered_action(&self, _maximized: bool) -> Option<DecorationAction> {
+    fn hovered_action(
+        &self,
+        _maximized: bool,
+        capabilities: ToplevelCapabilities,
+    ) -> Option<DecorationAction> {
         if self.close.hovered {
             Some(DecorationAction::Close)
-        } else if self.maximize.hovered {
+        } else if capabilities.contains(ToplevelCapabilities::MAXIMIZE) && self.maximize.hovered {
             Some(DecorationAction::ToggleMaximized)
-        } else if self.minimize.hovered {
+        } else if capabilities.contains(ToplevelCapabilities::MINIMIZE) && self.minimize.hovered {
             Some(DecorationAction::Minimize)
         } else {
             None
