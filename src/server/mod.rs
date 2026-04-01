@@ -951,6 +951,36 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         };
 
         self.world.get::<&mut WindowData>(id).unwrap().attrs.group = hints.window_group;
+
+        if hints.urgent {
+            self.request_attention(window);
+        }
+    }
+
+    pub fn request_attention(&mut self, window: x::Window) {
+        let Some(activation_state) = self.activation_state.as_ref() else {
+            return;
+        };
+
+        let app_id = self
+            .windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+            .and_then(|e| e.get::<&WindowData>())
+            .and_then(|d| d.attrs.class.clone());
+
+        activation_state.request_token_with_data(
+            &self.qh,
+            clientside::ActivationData::new(
+                window,
+                smithay_client_toolkit::activation::RequestData {
+                    app_id,
+                    seat_and_serial: None,
+                    surface: None,
+                },
+            ),
+        );
     }
 
     pub fn set_size_hints(&mut self, window: x::Window, hints: WmNormalHints) {

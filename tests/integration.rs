@@ -982,6 +982,34 @@ fn activation_x11_to_x11() {
 }
 
 #[test]
+fn urgency_hint_requests_attention() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window1 = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface1 = f.map_as_toplevel(&mut connection, window1);
+    let window2 = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface2 = f.map_as_toplevel(&mut connection, window2);
+
+    f.testwl.focus_toplevel(surface2);
+    std::thread::sleep(Duration::from_millis(10));
+
+    // Set WM_HINTS with urgency bit (256) on window1
+    connection.set_property(
+        window1,
+        connection.atoms.wm_hints,
+        connection.atoms.wm_hints,
+        &[256_u32, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
+    f.wait_and_dispatch();
+
+    // Focus must not change: urgency is "wants attention", not a focus request
+    assert_eq!(f.testwl.get_focused(), Some(surface2));
+    // An xdg_activation_v1 Activate request must have been sent for surface1
+    assert_eq!(f.testwl.last_activation_request(), Some(surface1));
+}
+
+#[test]
 fn quick_delete() {
     let mut f = Fixture::new();
     let connection = Connection::new(&f.display);
