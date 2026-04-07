@@ -26,10 +26,16 @@ Some (most?) Java applications may present themselves as a blank screen by defau
 cargo build
 # release build
 cargo build --release
+```
 
-# run - will also build if not already built
+## Running
+```
+# will also build if not already built
 cargo run # --release
 ```
+If `satellite` is integrated into your compositor, the compositor's integration will take precedence over other instances of `satellite`, even if its `satellite` is not currently running. To test the latest commit and/or patches, kill all running `satellite`, then either disable the integration, configure it to launch your executable, or install your build to where the integration looks for it. In all but the last case, you will need to restart the compositor for the changes to take effect.
+
+The `RUST_LOG` environment variable can be set to `debug` to output higher levels of logging. If built without the `--release` flag, the debug logs will be enabled by default.
 
 ## Systemd support
 xwayland-satellite can be built with systemd support - simply add `-F systemd` to your build command - i.e. `cargo build --release -F systemd`.

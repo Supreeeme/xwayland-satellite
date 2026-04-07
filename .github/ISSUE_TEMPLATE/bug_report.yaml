@@ -20,8 +20,7 @@ body:
     id: problem
     attributes:
       label: Describe the issue.
-      value: |
-        **Please attach a log if applicable.**
+      description: Provide a debug log file. If integrated with your compositor, the logs will be at `$XDG_STATE_HOME/xwayland-satellite`. See the README to learn how to set the logs to `debug` verbosity.
     validations:
       required: true
   - type: textarea
@@ -30,7 +29,8 @@ body:
       label: Steps to reproduce
   - type: checkboxes
     attributes:
-      label: Please confirm you have reproduced this on the latest commit.
+      label: Confirm you have reproduced this on the latest commit and provided `satellite` logs.
+      description: See the README to learn how to run your build of `satellite`.
       options:
         - label: I have reproduced this on the latest commit
           required: true
