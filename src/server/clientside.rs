@@ -30,6 +30,10 @@ use wayland_client::{
 };
 use wayland_protocols::{
     wp::{
+        cursor_shape::v1::client::{
+            wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
+            wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
+        },
         fractional_scale::v1::client::{
             wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
             wp_fractional_scale_v1::WpFractionalScaleV1,
@@ -185,6 +189,8 @@ delegate_noop!(MyWorld: XdgPositioner);
 delegate_noop!(MyWorld: WlShmPool);
 delegate_noop!(MyWorld: WpViewporter);
 delegate_noop!(MyWorld: WpViewport);
+delegate_noop!(MyWorld: WpCursorShapeManagerV1);
+delegate_noop!(MyWorld: WpCursorShapeDeviceV1);
 delegate_noop!(MyWorld: ZxdgOutputManagerV1);
 delegate_noop!(MyWorld: ZwpPointerConstraintsV1);
 delegate_noop!(MyWorld: ZwpTabletManagerV2);

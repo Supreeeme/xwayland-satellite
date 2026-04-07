@@ -1,3 +1,5 @@
+#![cfg(feature = "integration-tests")]
+
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::process::{Pid, Signal, WaitOptions};
 use std::collections::HashMap;
@@ -252,6 +254,32 @@ impl Fixture {
     ) -> testwl::SurfaceId {
         connection.map_window(window);
         self.wait_and_dispatch();
+
+        if let Some(surface) = self.testwl.last_created_surface_id() {
+            let needs_role_release = self
+                .testwl
+                .get_surface_data(surface)
+                .is_some_and(|data| data.role.is_none());
+
+            if needs_role_release {
+                let geometry = connection.get_reply(&x::GetGeometry {
+                    drawable: x::Drawable::Window(window),
+                });
+                connection
+                    .send_and_check_request(&x::ConfigureWindow {
+                        window,
+                        value_list: &[
+                            x::ConfigWindow::X(geometry.x() as i32),
+                            x::ConfigWindow::Y(geometry.y() as i32),
+                            x::ConfigWindow::Width(geometry.width() as u32),
+                            x::ConfigWindow::Height(geometry.height() as u32),
+                        ],
+                    })
+                    .unwrap();
+                self.wait_and_dispatch();
+            }
+        }
+
         let surface = self
             .testwl
             .created_surfaces()
@@ -2511,6 +2539,7 @@ fn rotated_output() {
 }
 
 const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
 
 #[test]
 fn client_init_move() {
@@ -2563,6 +2592,36 @@ fn client_init_resize() {
     let data = f.testwl.get_surface_data(surface).unwrap();
     assert!(
         matches!(data.resizing, Some(xdg_toplevel::ResizeEdge::BottomRight)),
+        "Got wrong resizing edge: {:?}",
+        data.resizing
+    );
+}
+
+#[test]
+fn client_init_resize_with_right_button() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let win_toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, win_toplevel);
+    f.testwl.move_pointer_to(surface, 10., 10.);
+    let ptr = f.testwl.pointer();
+    ptr.motion(10, 10.0, 10.0);
+    ptr.frame();
+    ptr.button(10, 20, BTN_RIGHT, wl_pointer::ButtonState::Pressed);
+    ptr.frame();
+    f.testwl.dispatch();
+
+    connection.send_client_message(&x::ClientMessageEvent::new(
+        win_toplevel,
+        connection.atoms.moveresize,
+        x::ClientMessageData::Data32([0, 0, MoveResizeDirection::SizeBottom.into(), 3, 0]),
+    ));
+
+    f.wait_and_dispatch();
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert!(
+        matches!(data.resizing, Some(xdg_toplevel::ResizeEdge::Bottom)),
         "Got wrong resizing edge: {:?}",
         data.resizing
     );

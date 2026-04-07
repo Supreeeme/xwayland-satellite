@@ -1,4 +1,5 @@
-use crate::server::{InnerServerState, ServerState, SurfaceRole};
+use crate::server::clientside::MyWorld;
+use crate::server::{InnerServerState, ServerState, SurfaceRole, WindowData};
 use crate::{ToplevelCapabilities, X11Selection, XConnection};
 
 use ab_glyph::{Font, FontRef, Glyph, PxScaleFont, ScaleFont};
@@ -11,14 +12,48 @@ use std::sync::LazyLock;
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Stroke, Transform};
 use tiny_skia::{ColorU8, Rect};
 use wayland_client::Proxy;
+use wayland_client::QueueHandle;
+use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::protocol::wl_shm;
 use wayland_client::protocol::wl_subsurface::WlSubsurface;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1;
-use wayland_protocols::xdg::shell::client::xdg_toplevel::XdgToplevel;
+use wayland_protocols::xdg::shell::client::xdg_toplevel::{self};
 use xcb::x;
+
+pub const RESIZE_HANDLE_SIZE: i32 = 12;
+
+pub fn resize_edge_for_rect(
+    width: i32,
+    height: i32,
+    x: f64,
+    y: f64,
+    allow_top: bool,
+    allow_bottom: bool,
+) -> Option<xdg_toplevel::ResizeEdge> {
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+
+    let left = x <= f64::from(RESIZE_HANDLE_SIZE);
+    let right = x >= f64::from(width - RESIZE_HANDLE_SIZE);
+    let top = allow_top && y <= f64::from(RESIZE_HANDLE_SIZE);
+    let bottom = allow_bottom && y >= f64::from(height - RESIZE_HANDLE_SIZE);
+
+    match (left, right, top, bottom) {
+        (true, false, true, false) => Some(xdg_toplevel::ResizeEdge::TopLeft),
+        (false, false, true, false) => Some(xdg_toplevel::ResizeEdge::Top),
+        (false, true, true, false) => Some(xdg_toplevel::ResizeEdge::TopRight),
+        (false, true, false, false) => Some(xdg_toplevel::ResizeEdge::Right),
+        (false, true, false, true) => Some(xdg_toplevel::ResizeEdge::BottomRight),
+        (false, false, false, true) => Some(xdg_toplevel::ResizeEdge::Bottom),
+        (true, false, false, true) => Some(xdg_toplevel::ResizeEdge::BottomLeft),
+        (true, false, false, false) => Some(xdg_toplevel::ResizeEdge::Left),
+        _ => None,
+    }
+}
 
 #[derive(Debug)]
 pub struct DecorationsData {
@@ -33,6 +68,8 @@ pub struct DecorationMarker {
 
 #[derive(Debug)]
 pub struct DecorationsDataSatellite {
+    compositor: WlCompositor,
+    qh: QueueHandle<MyWorld>,
     surface: WlSurface,
     subsurface: WlSubsurface,
     pool: Entity,
@@ -43,8 +80,13 @@ pub struct DecorationsDataSatellite {
     title: Option<String>,
     title_rect: Rect,
     width: i32,
+    height: i32,
     maximized: bool,
+    resizable: bool,
+    resize_input_enabled: bool,
+    draw_titlebar: bool,
     capabilities: ToplevelCapabilities,
+    hovered_resize_edge: Option<xdg_toplevel::ResizeEdge>,
     should_draw: bool,
     remove_buffer: bool,
 }
@@ -60,10 +102,119 @@ impl Drop for DecorationsDataSatellite {
 impl DecorationsDataSatellite {
     pub const TITLEBAR_HEIGHT: i32 = 25;
 
+    fn titlebar_height_for(draw_titlebar: bool) -> i32 {
+        if draw_titlebar {
+            Self::TITLEBAR_HEIGHT
+        } else {
+            0
+        }
+    }
+
+    fn frame_border_for(maximized: bool, resizable: bool) -> i32 {
+        if !maximized && resizable {
+            RESIZE_HANDLE_SIZE
+        } else {
+            0
+        }
+    }
+
+    fn frame_width_for(width: i32, maximized: bool, resizable: bool) -> i32 {
+        width + Self::frame_border_for(maximized, resizable) * 2
+    }
+
+    fn frame_height_for(height: i32, maximized: bool, resizable: bool, draw_titlebar: bool) -> i32 {
+        Self::titlebar_height_for(draw_titlebar)
+            + height
+            + Self::frame_border_for(maximized, resizable) * 2
+    }
+
+    fn titlebar_offset_for(maximized: bool, resizable: bool) -> i32 {
+        Self::frame_border_for(maximized, resizable)
+    }
+
+    fn frame_border(&self) -> i32 {
+        Self::frame_border_for(self.maximized, self.resizable)
+    }
+
+    fn frame_width(&self) -> i32 {
+        Self::frame_width_for(self.width, self.maximized, self.resizable)
+    }
+
+    fn frame_height(&self) -> i32 {
+        Self::frame_height_for(
+            self.height,
+            self.maximized,
+            self.resizable,
+            self.draw_titlebar,
+        )
+    }
+
+    pub(crate) fn titlebar_height(&self) -> i32 {
+        Self::titlebar_height_for(self.draw_titlebar)
+    }
+
+    pub(crate) fn window_geometry_for(
+        width: i32,
+        height: i32,
+        maximized: bool,
+        resizable: bool,
+        draw_titlebar: bool,
+    ) -> (i32, i32, i32, i32) {
+        let border = Self::frame_border_for(maximized, resizable);
+        let titlebar_height = Self::titlebar_height_for(draw_titlebar);
+        (
+            -border,
+            -(titlebar_height + border),
+            Self::frame_width_for(width, maximized, resizable),
+            Self::frame_height_for(height, maximized, resizable, draw_titlebar),
+        )
+    }
+
+    pub(crate) fn content_size_for_window_geometry(
+        width: i32,
+        height: i32,
+        maximized: bool,
+        resizable: bool,
+        draw_titlebar: bool,
+    ) -> (i32, i32) {
+        let border = Self::frame_border_for(maximized, resizable);
+        let titlebar_height = Self::titlebar_height_for(draw_titlebar);
+        (
+            (width - border * 2).max(1),
+            (height - (titlebar_height + border * 2)).max(1),
+        )
+    }
+
+    fn update_input_region(&self) {
+        let frame_width = self.frame_width();
+        let frame_height = self.frame_height();
+        if frame_width <= 0 || frame_height <= 0 {
+            self.surface.set_input_region(None);
+            return;
+        }
+
+        let border = self.frame_border();
+        let titlebar_offset = Self::titlebar_offset_for(self.maximized, self.resizable);
+        let titlebar_height = self.titlebar_height();
+        let region = self.compositor.create_region(&self.qh, ());
+        if border > 0 && self.resize_input_enabled {
+            region.add(0, 0, frame_width, border);
+            region.add(0, titlebar_offset, border, frame_height - border);
+            region.add(frame_width - border, titlebar_offset, border, frame_height - border);
+            region.add(0, frame_height - border, frame_width, border);
+        }
+        if titlebar_height > 0 {
+            region.add(titlebar_offset, titlebar_offset, self.width, titlebar_height);
+        }
+        self.surface.set_input_region(Some(&region));
+        region.destroy();
+    }
+
     pub fn try_new(
         state: &InnerServerState<impl X11Selection>,
         parent: &WlSurface,
         title: Option<&str>,
+        draw_titlebar: bool,
     ) -> Option<(Box<Self>, Option<CommandBuffer>)> {
         let mut new_pool = None;
         let mut query = state.world.query::<&SlotPool>();
@@ -91,11 +242,17 @@ impl DecorationsDataSatellite {
                 .subcompositor
                 .get_subsurface(&surface, parent, &state.qh, ())
         };
-        subsurface.set_position(0, -Self::TITLEBAR_HEIGHT);
+        let (resizable, resize_input_enabled) =
+            parent_resize_state(&state.world, parent.data().copied().unwrap());
+        let border = Self::frame_border_for(false, resizable);
+        let titlebar_height = Self::titlebar_height_for(draw_titlebar);
+        subsurface.set_position(-border, -(titlebar_height + border));
         let viewport = state.viewporter.get_viewport(&surface, &state.qh, ());
 
         Some((
             Self {
+                compositor: state.compositor.clone(),
+                qh: state.qh.clone(),
                 surface,
                 subsurface,
                 pool: pool_entity,
@@ -106,8 +263,13 @@ impl DecorationsDataSatellite {
                 title: title.map(str::to_string),
                 title_rect: Rect::from_ltrb(0.0, 0.0, 0.0, 0.0).unwrap(),
                 width: 0,
+                height: 0,
                 maximized: false,
+                resizable,
+                resize_input_enabled,
+                draw_titlebar,
                 capabilities: ToplevelCapabilities::all(),
+                hovered_resize_edge: None,
                 should_draw: true,
                 remove_buffer: false,
             }
@@ -130,7 +292,7 @@ impl DecorationsDataSatellite {
             self.pixmap.width() as i32,
             self.pixmap.height() as i32,
             self.pixmap.width() as i32 * 4,
-            wl_shm::Format::Xrgb8888,
+            wl_shm::Format::Argb8888,
         ) {
             Ok(b) => b,
             Err(err) => {
@@ -149,7 +311,13 @@ impl DecorationsDataSatellite {
         width > 0 && self.should_draw
     }
 
-    pub fn draw_decorations(&mut self, world: &World, width: i32, parent_scale_factor: f32) {
+    pub fn draw_decorations(
+        &mut self,
+        world: &World,
+        width: i32,
+        height: i32,
+        parent_scale_factor: f32,
+    ) {
         if !self.will_draw_decorations(width) {
             if self.remove_buffer {
                 self.surface.attach(None, 0, 0);
@@ -160,119 +328,111 @@ impl DecorationsDataSatellite {
         }
 
         self.width = width;
+        self.height = height;
         self.scale = parent_scale_factor;
-        let mut drawn_width = (width as f32 * self.scale).ceil() as i32;
-        let drawn_height = (Self::TITLEBAR_HEIGHT as f32 * self.scale).ceil() as i32;
-        let buttons_width = self
-            .buttons
-            .total_width_pixels(drawn_height as u32, self.capabilities) as i32;
+        let titlebar_height = self.titlebar_height();
+        let frame_border = Self::frame_border_for(self.maximized, self.resizable);
+        let titlebar_offset = Self::titlebar_offset_for(self.maximized, self.resizable);
+        let drawn_titlebar_offset = (titlebar_offset as f32 * self.scale).ceil() as i32;
+        let drawn_width = (width as f32 * self.scale).ceil() as i32;
+        let drawn_titlebar_height = (titlebar_height as f32 * self.scale).ceil() as i32;
+        let frame_width = Self::frame_width_for(width, self.maximized, self.resizable);
+        let frame_height =
+            Self::frame_height_for(height, self.maximized, self.resizable, self.draw_titlebar);
+        let drawn_frame_width = (frame_width as f32 * self.scale).ceil() as i32;
+        let drawn_frame_height = (frame_height as f32 * self.scale).ceil() as i32;
+        self.subsurface
+            .set_position(-frame_border, -(titlebar_height + frame_border));
+        let buttons_width = if self.draw_titlebar {
+            self.buttons
+                .total_width_pixels(drawn_titlebar_height as u32, self.capabilities) as i32
+        } else {
+            0
+        };
 
-        if buttons_width > drawn_width {
-            drawn_width = buttons_width;
-        }
-
-        let title = self.title.as_ref().and_then(|t| {
+        let title = self.draw_titlebar.then(|| self.title.as_ref()).flatten().and_then(|t| {
             let width = (drawn_width as u32).saturating_sub(buttons_width as u32);
             if width > 0 {
-                title_pixmap(t, width, drawn_height as u32, self.scale)
+                title_pixmap(t, width, drawn_titlebar_height as u32, self.scale)
             } else {
                 None
             }
         });
 
-        // Draw the bar and its components
-        let mut bar = Pixmap::new(drawn_width as u32, drawn_height as u32).unwrap();
-        bar.fill(Color::WHITE);
+        let mut bar = Pixmap::new(drawn_frame_width as u32, drawn_frame_height as u32).unwrap();
+        bar.fill(Color::from_rgba(0.0, 0.0, 0.0, 0.0).unwrap());
+
+        if self.draw_titlebar {
+            let mut paint = Paint::default();
+            paint.set_color(Color::WHITE);
+            let titlebar_rect = Rect::from_xywh(
+                drawn_titlebar_offset as f32,
+                drawn_titlebar_offset as f32,
+                drawn_width as f32,
+                drawn_titlebar_height as f32,
+            )
+            .unwrap();
+            bar.fill_rect(titlebar_rect, &paint, Transform::identity(), None);
+        }
 
         if let Some(title) = title {
             bar.draw_pixmap(
-                0,
-                0,
+                drawn_titlebar_offset,
+                drawn_titlebar_offset,
                 title.as_ref(),
                 &Default::default(),
                 Transform::identity(),
                 None,
             );
-            self.title_rect =
-                Rect::from_xywh(0.0, 0.0, title.width() as f32, title.height() as f32).unwrap();
+            self.title_rect = Rect::from_xywh(
+                drawn_titlebar_offset as f32,
+                drawn_titlebar_offset as f32,
+                title.width() as f32,
+                title.height() as f32,
+            )
+            .unwrap();
+        } else {
+            self.title_rect = Rect::from_ltrb(0.0, 0.0, 0.0, 0.0).unwrap();
         }
 
-        self.buttons
-            .layout(width as f32, Self::TITLEBAR_HEIGHT as f32, self.capabilities);
+        if self.draw_titlebar {
+            self.buttons
+                .layout(width as f32, titlebar_height as f32, self.capabilities);
 
-        for button in self.buttons.visible_buttons(self.capabilities) {
-            let pixmap = button_pixmap(
-                button.kind,
-                drawn_height as u32,
-                self.scale,
-                button.hovered,
-                self.maximized,
-            );
-            bar.draw_pixmap(
-                (button.rect.left() * self.scale).round() as i32,
-                0,
-                pixmap.as_ref(),
-                &Default::default(),
-                Transform::identity(),
-                None,
-            );
+            self.buttons.for_each_visible_button(self.capabilities, |button| {
+                let pixmap = button_pixmap(
+                    button.kind,
+                    drawn_titlebar_height as u32,
+                    self.scale,
+                    button.hovered,
+                    self.maximized,
+                );
+                bar.draw_pixmap(
+                    drawn_titlebar_offset + (button.rect.left() * self.scale).round() as i32,
+                    drawn_titlebar_offset,
+                    pixmap.as_ref(),
+                    &Default::default(),
+                    Transform::identity(),
+                    None,
+                );
+            });
+        } else {
+            self.buttons.clear_hovered();
         }
 
         self.pixmap = bar;
-        self.viewport.set_destination(width, Self::TITLEBAR_HEIGHT);
+        self.viewport.set_destination(frame_width, frame_height);
+        self.update_input_region();
         self.update_buffer(world);
     }
 
     pub fn set_title(&mut self, world: &World, title: &str) {
         self.title = Some(title.to_string());
-        if !self.should_draw {
+        if !self.should_draw || self.width <= 0 {
             return;
         }
 
-        // Don't draw title if there's not enough space
-        let title_pixmap = title_pixmap(
-            title,
-            self.pixmap
-                .width()
-                .saturating_sub(
-                    self.buttons
-                        .total_width_pixels(self.pixmap.height(), self.capabilities),
-                ),
-            self.pixmap.height(),
-            self.scale,
-        );
-
-        let new_title_rect = title_pixmap
-            .as_ref()
-            .map(|p| Rect::from_xywh(0.0, 0.0, p.width() as f32, p.height() as f32).unwrap())
-            .unwrap_or_else(|| Rect::from_ltrb(0.0, 0.0, 0.0, 0.0).unwrap());
-
-        let last_title_rect = std::mem::replace(&mut self.title_rect, new_title_rect);
-
-        // Clear last title with white
-        let mut paint = Paint::default();
-        paint.set_color(Color::WHITE);
-        self.pixmap
-            .fill_rect(last_title_rect, &paint, Transform::identity(), None);
-
-        if let Some(p) = title_pixmap.as_ref() {
-            self.pixmap.draw_pixmap(
-                0,
-                0,
-                p.as_ref(),
-                &Default::default(),
-                Transform::identity(),
-                None,
-            );
-        }
-
-        let damaged_width = last_title_rect
-            .width()
-            .max(title_pixmap.map(|p| p.width() as f32).unwrap_or(0.0));
-
-        self.surface
-            .damage_buffer(0, 0, damaged_width as i32, last_title_rect.height() as i32);
-        self.update_buffer(world);
+        self.draw_decorations(world, self.width, self.height, self.scale);
     }
 
     pub fn handle_fullscreen(&mut self, fullscreen: bool) {
@@ -289,7 +449,7 @@ impl DecorationsDataSatellite {
 
         self.maximized = maximized;
         if self.width > 0 && self.should_draw {
-            self.draw_decorations(world, self.width, self.scale);
+            self.draw_decorations(world, self.width, self.height, self.scale);
         }
     }
 
@@ -300,31 +460,85 @@ impl DecorationsDataSatellite {
 
         self.capabilities = capabilities;
         if self.width > 0 && self.should_draw {
-            self.draw_decorations(world, self.width, self.scale);
+            self.draw_decorations(world, self.width, self.height, self.scale);
         }
     }
 
-    fn handle_motion(&mut self, world: &World, x: f64, y: f64) {
-        if self
-            .buttons
-            .check_hovered(x as f32, y as f32, self.capabilities)
-        {
-            self.draw_decorations(world, self.width, self.scale);
-        }
+    pub(crate) fn is_maximized(&self) -> bool {
+        self.maximized
     }
 
-    fn handle_leave(&mut self, world: &World) {
-        if self.buttons.clear_hovered() {
-            self.draw_decorations(world, self.width, self.scale);
-        }
+    pub(crate) fn is_resizable(&self) -> bool {
+        self.resizable
     }
 
-    fn handle_click(
-        &self,
-        toplevel: &XdgToplevel,
-        seat: &WlSeat,
-        serial: u32,
-    ) -> DecorationAction {
+    pub(crate) fn draws_titlebar(&self) -> bool {
+        self.draw_titlebar
+    }
+
+    pub(crate) fn set_resizable(&mut self, resizable: bool) {
+        self.resizable = resizable;
+    }
+
+    pub(crate) fn set_resize_input_enabled(&mut self, enabled: bool) {
+        if self.resize_input_enabled == enabled {
+            return;
+        }
+
+        self.resize_input_enabled = enabled;
+        self.update_input_region();
+    }
+    fn handle_motion(
+        &mut self,
+        world: &World,
+        x: f64,
+        y: f64,
+        resizable: bool,
+    ) -> Option<xdg_toplevel::ResizeEdge> {
+        let titlebar_offset = f64::from(self.frame_border());
+        let titlebar_height = f64::from(self.titlebar_height());
+        let titlebar_x = x - titlebar_offset;
+        let titlebar_y = y - titlebar_offset;
+        let in_titlebar = self.draw_titlebar
+            && titlebar_x >= 0.0
+            && titlebar_x <= f64::from(self.width)
+            && titlebar_y >= 0.0
+            && titlebar_y <= titlebar_height;
+        let buttons_changed = if in_titlebar {
+            self.buttons
+                .check_hovered(titlebar_x as f32, titlebar_y as f32, self.capabilities)
+        } else {
+            self.buttons.clear_hovered()
+        };
+        let hovered_button = if in_titlebar {
+            self.buttons.hovered_action(self.maximized, self.capabilities)
+        } else {
+            None
+        };
+        let next_resize_edge = if hovered_button.is_none() && resizable {
+            resize_edge_for_rect(self.frame_width(), self.frame_height(), x, y, true, true)
+        } else {
+            None
+        };
+        let resize_changed = self.hovered_resize_edge != next_resize_edge;
+        self.hovered_resize_edge = next_resize_edge;
+
+        if buttons_changed {
+            self.draw_decorations(world, self.width, self.height, self.scale);
+        }
+
+        if resize_changed {
+            return self.hovered_resize_edge;
+        }
+
+        self.hovered_resize_edge
+    }
+
+    fn handle_click(&self) -> DecorationAction {
+        if let Some(edge) = self.hovered_resize_edge {
+            return DecorationAction::Resize(edge);
+        }
+
         match self
             .buttons
             .hovered_action(self.maximized, self.capabilities)
@@ -332,10 +546,7 @@ impl DecorationsDataSatellite {
             Some(DecorationAction::Close) => DecorationAction::Close,
             Some(DecorationAction::ToggleMaximized) => DecorationAction::ToggleMaximized,
             Some(DecorationAction::Minimize) => DecorationAction::Minimize,
-            _ => {
-                toplevel._move(seat, serial);
-                DecorationAction::Move
-            }
+            _ => DecorationAction::Move,
         }
     }
 }
@@ -350,6 +561,7 @@ enum DecorationButtonKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DecorationAction {
     Move,
+    Resize(xdg_toplevel::ResizeEdge),
     Minimize,
     ToggleMaximized,
     Close,
@@ -410,16 +622,18 @@ impl DecorationsButtons {
         count
     }
 
-    fn visible_buttons(&self, capabilities: ToplevelCapabilities) -> Vec<&DecorationsBox> {
-        let mut buttons = Vec::with_capacity(self.visible_button_count(capabilities) as usize);
+    fn for_each_visible_button(
+        &self,
+        capabilities: ToplevelCapabilities,
+        mut visitor: impl FnMut(&DecorationsBox),
+    ) {
         if capabilities.contains(ToplevelCapabilities::MINIMIZE) {
-            buttons.push(&self.minimize);
+            visitor(&self.minimize);
         }
         if capabilities.contains(ToplevelCapabilities::MAXIMIZE) {
-            buttons.push(&self.maximize);
+            visitor(&self.maximize);
         }
-        buttons.push(&self.close);
-        buttons
+        visitor(&self.close);
     }
 
     fn layout(&mut self, width: f32, button_width: f32, capabilities: ToplevelCapabilities) {
@@ -506,7 +720,7 @@ impl DecorationsButtons {
     }
 }
 
-fn draw_pixmap_to_buffer(pixmap: &Pixmap, buffer: &mut [u8]) {
+pub(crate) fn draw_pixmap_to_buffer(pixmap: &Pixmap, buffer: &mut [u8]) {
     // TODO: support big endian?
     for (data, pixel) in buffer.chunks_exact_mut(4).zip(pixmap.pixels()) {
         data[0] = pixel.blue();
@@ -710,10 +924,70 @@ fn get_decoration(
     }))
 }
 
-pub fn handle_pointer_leave(state: &InnerServerState<impl X11Selection>, parent: Entity) {
-    if let Some(mut decoration) = get_decoration(&state.world, parent) {
-        decoration.handle_leave(&state.world);
+pub(crate) fn toplevel_has_resize_border(
+    window: &WindowData,
+    fullscreen: bool,
+    maximized: bool,
+    tiled: bool,
+) -> bool {
+    if fullscreen || maximized || tiled {
+        return false;
     }
+
+    if let Some(decorations) = window.attrs.decorations {
+        if !decorations.intersects(
+            crate::xstate::Decorations::Resizeh | crate::xstate::Decorations::All,
+        ) {
+            return false;
+        }
+    }
+
+    !matches!(
+        window.attrs.size_hints,
+        Some(crate::xstate::WmNormalHints {
+            min_size: Some(min_size),
+            max_size: Some(max_size),
+        }) if min_size == max_size
+    )
+}
+
+pub(crate) fn toplevel_can_resize(
+    window: &WindowData,
+    fullscreen: bool,
+    maximized: bool,
+    tiled: bool,
+) -> bool {
+    toplevel_has_resize_border(window, fullscreen, maximized, tiled)
+        && !matches!(
+            window.configure_interaction,
+            Some(crate::server::ConfigureInteraction::Move { .. })
+        )
+}
+
+fn parent_resize_state(world: &World, parent: Entity) -> (bool, bool) {
+    let Ok(window) = world.get::<&WindowData>(parent) else {
+        return (false, false);
+    };
+    let Ok(role) = world.get::<&SurfaceRole>(parent) else {
+        return (false, false);
+    };
+    let SurfaceRole::Toplevel(Some(toplevel)) = &*role else {
+        return (false, false);
+    };
+
+    let has_resize_border = toplevel_has_resize_border(
+        &window,
+        toplevel.fullscreen,
+        toplevel.maximized,
+        toplevel.tiled,
+    );
+    let can_resize = has_resize_border
+        && !matches!(
+            window.configure_interaction,
+            Some(crate::server::ConfigureInteraction::Move { .. })
+        );
+
+    (has_resize_border, can_resize)
 }
 
 pub fn handle_pointer_motion(
@@ -721,10 +995,16 @@ pub fn handle_pointer_motion(
     parent: Entity,
     surface_x: f64,
     surface_y: f64,
-) {
+) -> Option<xdg_toplevel::ResizeEdge> {
+    let (has_resize_border, can_resize) = parent_resize_state(&state.world, parent);
+
     if let Some(mut decoration) = get_decoration(&state.world, parent) {
-        decoration.handle_motion(&state.world, surface_x, surface_y);
+        decoration.set_resizable(has_resize_border);
+        decoration.set_resize_input_enabled(can_resize);
+        return decoration.handle_motion(&state.world, surface_x, surface_y, can_resize);
     }
+
+    None
 }
 
 pub fn handle_pointer_click(
@@ -745,8 +1025,9 @@ pub fn handle_pointer_click(
         .satellite
         .as_mut()
         .unwrap()
-        .handle_click(&toplevel.toplevel, seat, serial);
+        .handle_click();
     let window = *state.world.get::<&x::Window>(parent).unwrap();
+    let toplevel = toplevel.toplevel.clone();
     drop(role);
 
     match action {
@@ -754,10 +1035,11 @@ pub fn handle_pointer_click(
         DecorationAction::ToggleMaximized => {
             state.set_maximized(window, crate::xstate::SetState::Toggle)
         }
+        DecorationAction::Resize(edge) => state.resize_window_by_edge(window, edge),
         DecorationAction::Minimize => {
             state.set_minimized(window);
             state.connection.set_minimized(window, true);
         }
-        DecorationAction::Move => {}
+        DecorationAction::Move => toplevel._move(seat, serial),
     }
 }

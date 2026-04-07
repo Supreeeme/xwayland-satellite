@@ -6,6 +6,7 @@ use std::sync::{Arc, OnceLock};
 use wayland_client::globals::Global;
 use wayland_protocols::{
     wp::{
+        cursor_shape::v1::client::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
         fractional_scale::v1::client::wp_fractional_scale_v1::WpFractionalScaleV1,
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
         linux_drm_syncobj::v1::{client as c_sync, server as s_sync},
@@ -364,20 +365,49 @@ impl<S: X11Selection> Dispatch<WlPointer, Entity> for InnerServerState<S> {
                 let c_pointer = state
                     .world
                     .get::<&client::wl_pointer::WlPointer>(*entity)
+                    .map(|pointer| (*pointer).clone())
                     .unwrap();
 
-                let c_surface = surface.and_then(|s| {
+                let surface_entity = surface.as_ref().and_then(|surface| surface.data().copied());
+
+                let c_surface = surface.as_ref().and_then(|s| {
                     let e = s.data().copied()?;
                     Some(
                         state
                             .world
                             .get::<&client::wl_surface::WlSurface>(e)
+                            .map(|surface| (*surface).clone())
                             .unwrap(),
                     )
                 });
-                c_pointer.set_cursor(serial, c_surface.as_deref(), hotspot_x, hotspot_y);
+                let resize_edge_active = state
+                    .world
+                    .get::<&super::PointerResizeEdge>(*entity)
+                    .is_ok();
+                if !resize_edge_active {
+                    c_pointer.set_cursor(
+                        serial,
+                        c_surface.as_ref(),
+                        hotspot_x,
+                        hotspot_y,
+                    );
+                }
+
+                let forwarded = ForwardedPointerCursor {
+                    surface: surface_entity,
+                    hotspot_x,
+                    hotspot_y,
+                };
+                if let Ok(mut current) = state.world.get::<&mut ForwardedPointerCursor>(*entity) {
+                    *current = forwarded;
+                } else {
+                    state.world.insert_one(*entity, forwarded).unwrap();
+                }
             }
             Request::<WlPointer>::Release => {
+                if let Ok(shape_device) = state.world.remove_one::<WpCursorShapeDeviceV1>(*entity) {
+                    shape_device.destroy();
+                }
                 let (client, _) = state
                     .world
                     .remove::<(client::wl_pointer::WlPointer, WlPointer)>(*entity)
@@ -455,7 +485,18 @@ impl<S: X11Selection> Dispatch<WlSeat, Entity> for InnerServerState<S> {
                         .get_pointer(&state.qh, *entity)
                 };
                 let server = data_init.init(id, *entity);
-                state.world.insert(*entity, (client, server)).unwrap();
+                if let Some(shape_device) = state
+                    .cursor_shape_manager
+                    .as_ref()
+                    .map(|manager| manager.get_pointer(&client, &state.qh, ()))
+                {
+                    state
+                        .world
+                        .insert(*entity, (client, server, shape_device))
+                        .unwrap();
+                } else {
+                    state.world.insert(*entity, (client, server)).unwrap();
+                }
             }
             Request::<WlSeat>::GetKeyboard { id } => {
                 let client = {

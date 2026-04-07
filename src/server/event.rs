@@ -137,18 +137,23 @@ impl Event for SurfaceEvents {
                     return;
                 };
 
-                let needs_server_side_decorations = window_data
+                let wants_satellite_decorations = window_data
                     .attrs
                     .decorations
                     .is_none_or(|d| d.is_serverside());
 
-                if mode == Mode::ServerSide || !needs_server_side_decorations {
+                if mode == Mode::ServerSide || !wants_satellite_decorations {
                     let mut role = entity.get::<&mut SurfaceRole>().unwrap();
                     if let SurfaceRole::Toplevel(Some(toplevel)) = &mut *role {
                         toplevel.decoration.satellite.take();
                     }
                     return;
                 }
+
+                let draw_titlebar = window_data
+                    .attrs
+                    .decorations
+                    .is_none_or(|d| d.is_serverside());
 
                 let Some((sat_decoration, buf)) = entity
                     .get::<&client::wl_surface::WlSurface>()
@@ -157,6 +162,7 @@ impl Event for SurfaceEvents {
                             state,
                             &surface,
                             window_data.attrs.title.as_ref().map(WmName::name),
+                            draw_titlebar,
                         )
                     })
                 else {
@@ -297,6 +303,15 @@ impl SurfaceEvents {
                 || *state == u32::from(xdg_toplevel::State::TiledTop) as u8
                 || *state == u32::from(xdg_toplevel::State::TiledBottom) as u8
                 || *state == u32::from(xdg_toplevel::State::Fullscreen) as u8
+        })
+    }
+
+    fn toplevel_is_tiled(states: &[u8]) -> bool {
+        states.iter().any(|state| {
+            *state == u32::from(xdg_toplevel::State::TiledLeft) as u8
+                || *state == u32::from(xdg_toplevel::State::TiledRight) as u8
+                || *state == u32::from(xdg_toplevel::State::TiledTop) as u8
+                || *state == u32::from(xdg_toplevel::State::TiledBottom) as u8
         })
     }
 
@@ -467,7 +482,7 @@ impl SurfaceEvents {
                     (pending.y.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.y,
                 ),
             };
-            let width = if pending.width > 0 {
+            let mut width = if pending.width > 0 {
                 (pending.width as f64 * scale_factor.0) as u16
             } else {
                 window_data.attrs.dims.width
@@ -488,13 +503,25 @@ impl SurfaceEvents {
                     if let Some(d) = &toplevel.decoration.satellite {
                         let surface_width = (width as f64 / scale_factor.0) as i32;
                         if d.will_draw_decorations(surface_width) {
-                            height = height
-                                .saturating_sub(
-                                    (DecorationsDataSatellite::TITLEBAR_HEIGHT as f64
-                                        * scale_factor.0)
-                                        as u16,
-                                )
-                                .max(DecorationsDataSatellite::TITLEBAR_HEIGHT as u16);
+                            let outer_width = (width as f64 / scale_factor.0) as i32;
+                            let outer_height = (height as f64 / scale_factor.0) as i32;
+                            let has_resize_border =
+                                crate::server::decoration::toplevel_has_resize_border(
+                                    window_data,
+                                    toplevel.fullscreen,
+                                    toplevel.maximized,
+                                    toplevel.tiled,
+                                );
+                            let (content_width, content_height) =
+                                DecorationsDataSatellite::content_size_for_window_geometry(
+                                    outer_width,
+                                    outer_height,
+                                    d.is_maximized(),
+                                    has_resize_border,
+                                    d.draws_titlebar(),
+                                );
+                            width = ((content_width as f64) * scale_factor.0) as u16;
+                            height = ((content_height as f64) * scale_factor.0) as u16;
                         }
                     }
                 }
@@ -566,6 +593,7 @@ impl SurfaceEvents {
                         states.contains(&(u32::from(xdg_toplevel::State::Fullscreen) as u8));
                     toplevel.maximized =
                         states.contains(&(u32::from(xdg_toplevel::State::Maximized) as u8));
+                    toplevel.tiled = Self::toplevel_is_tiled(&states);
                     if prev_minimized {
                         toplevel.minimized = false;
                     }
@@ -684,7 +712,7 @@ pub(super) fn update_surface_viewport(
         &WlSurface,
     )>,
 ) {
-    let Some((window_data, viewport, scale_factor, _on_output, _preferred_scale, mut role, surface)) =
+    let Some((window_data, viewport, scale_factor, _on_output, _preferred_scale, mut role, _surface)) =
         surface_query.get()
     else {
         return;
@@ -698,34 +726,70 @@ pub(super) fn update_surface_viewport(
         viewport.set_destination(width, height);
     }
 
-    let mut toplevel_data = match &mut role {
-        Some(SurfaceRole::Toplevel(Some(data))) => Some(data),
-        _ => None,
-    };
-    if let Some(d) = toplevel_data
-        .as_mut()
-        .and_then(|d| d.decoration.satellite.as_deref_mut())
-    {
-        d.draw_decorations(world, width, scale_factor.0 as f32);
-    }
-    debug!("{} viewport: {width}x{height}", surface.id());
+    let mut window_geometry = (0, 0, width, height);
 
-    if let Some(hints) = size_hints {
-        let Some(data) = toplevel_data else {
-            return;
-        };
+    if let Some(role) = role.as_deref_mut() {
+        match role {
+            SurfaceRole::Toplevel(Some(data)) => {
+                let has_resize_border = crate::server::decoration::toplevel_has_resize_border(
+                    window_data,
+                    data.fullscreen,
+                    data.maximized,
+                    data.tiled,
+                );
+                let can_resize = crate::server::decoration::toplevel_can_resize(
+                    window_data,
+                    data.fullscreen,
+                    data.maximized,
+                    data.tiled,
+                );
+                if let Some(d) = data.decoration.satellite.as_deref_mut() {
+                    d.set_resizable(has_resize_border);
+                    d.set_resize_input_enabled(can_resize);
+                    d.draw_decorations(world, width, height, scale_factor.0 as f32);
+                    if d.will_draw_decorations(width) {
+                        window_geometry = DecorationsDataSatellite::window_geometry_for(
+                            width,
+                            height,
+                            d.is_maximized(),
+                            d.is_resizable(),
+                            d.draws_titlebar(),
+                        );
+                    }
+                }
 
-        let decorations_height = data
-            .decoration
-            .satellite
-            .as_ref()
-            .map_or(0, |_| DecorationsDataSatellite::TITLEBAR_HEIGHT);
-        super::apply_toplevel_size_hints(
-            &data.toplevel,
-            hints,
-            window_data.attrs.hints_x11_scale,
-            decorations_height,
-        );
+                data.xdg.surface.set_window_geometry(
+                    window_geometry.0,
+                    window_geometry.1,
+                    window_geometry.2,
+                    window_geometry.3,
+                );
+
+                if let Some(hints) = size_hints {
+                    let decorations_height = data
+                        .decoration
+                        .satellite
+                        .as_ref()
+                        .map_or(0, |decoration| decoration.titlebar_height());
+
+                    super::apply_toplevel_size_hints(
+                        &data.toplevel,
+                        hints,
+                        window_data.attrs.hints_x11_scale,
+                        decorations_height,
+                    );
+                }
+            }
+            other => {
+                let xdg = other.xdg_mut().unwrap();
+                xdg.surface.set_window_geometry(
+                    window_geometry.0,
+                    window_geometry.1,
+                    window_geometry.2,
+                    window_geometry.3,
+                );
+            }
+        }
     }
 }
 
@@ -822,22 +886,47 @@ impl Event for client::wl_pointer::Event {
                 let connection = &mut state.connection;
                 let state = &mut state.inner;
                 let mut cmd = CommandBuffer::new();
+                if let Ok(mut position) = state.world.get::<&mut PointerSurfacePosition>(target) {
+                    position.x = surface_x;
+                    position.y = surface_y;
+                } else {
+                    state
+                        .world
+                        .insert_one(
+                            target,
+                            PointerSurfacePosition {
+                                x: surface_x,
+                                y: surface_y,
+                            },
+                        )
+                        .unwrap();
+                }
                 let pending_enter = state.world.remove_one::<PendingEnter>(target).ok();
                 let surface_entity = surface.data().copied();
                 let mut query = surface_entity.and_then(|e| {
                     state
                         .world
-                        .query_one::<(&WlSurface, &SurfaceRole, &SurfaceScaleFactor, &x::Window)>(e)
+                        .query_one::<(
+                            &WlSurface,
+                            &SurfaceRole,
+                            &SurfaceScaleFactor,
+                            &x::Window,
+                            &WindowData,
+                        )>(e)
                         .ok()
                 });
-                let Some((surface, role, scale, window)) = query.as_mut().and_then(|q| q.get())
+                let Some((surface, role, scale, window, _window_data)) =
+                    query.as_mut().and_then(|q| q.get())
                 else {
                     if let Some(&DecorationMarker { parent }) = surface.data() {
                         drop(query);
+                        state.world.insert_one(target, PointerEnterSerial(serial)).unwrap();
                         state
                             .world
                             .insert_one(target, CurrentSurface::Decoration(parent))
                             .unwrap();
+                        let edge = decoration::handle_pointer_motion(state, parent, surface_x, surface_y);
+                        state.update_pointer_resize_cursor(target, edge);
                     } else {
                         warn!("could not enter surface {}: stale surface", surface.id());
                     }
@@ -847,6 +936,7 @@ impl Event for client::wl_pointer::Event {
 
                 let server = state.world.get::<&WlPointer>(target).unwrap();
                 cmd.insert(target, (*scale,));
+                cmd.insert_one(target, PointerEnterSerial(serial));
 
                 let surface_is_popup = matches!(role, SurfaceRole::Popup(_));
                 let mut do_enter = || {
@@ -885,9 +975,11 @@ impl Event for client::wl_pointer::Event {
                 drop(query);
                 drop(server);
                 cmd.run_on(&mut state.world);
+                state.update_pointer_resize_cursor(target, None);
             }
             Self::Leave { serial, surface } => {
                 let _ = state.world.remove_one::<PendingEnter>(target);
+                state.update_pointer_resize_cursor(target, None);
                 if !surface.is_alive() {
                     return;
                 }
@@ -895,7 +987,7 @@ impl Event for client::wl_pointer::Event {
                 if let Ok(CurrentSurface::Decoration(parent)) =
                     state.world.remove_one::<CurrentSurface>(target)
                 {
-                    decoration::handle_pointer_leave(state, parent);
+                    let _ = parent;
                     return;
                 }
                 if let Some(surface) = surface
@@ -920,16 +1012,42 @@ impl Event for client::wl_pointer::Event {
                 if !handle_pending_enter(target, state, "motion") {
                     return;
                 }
+                if let Ok(mut position) = state.world.get::<&mut PointerSurfacePosition>(target) {
+                    position.x = surface_x;
+                    position.y = surface_y;
+                } else {
+                    state
+                        .world
+                        .insert_one(
+                            target,
+                            PointerSurfacePosition {
+                                x: surface_x,
+                                y: surface_y,
+                            },
+                        )
+                        .unwrap();
+                }
                 {
-                    let Ok(surface) = state.world.get::<&CurrentSurface>(target) else {
+                    let current_surface = state
+                        .world
+                        .get::<&CurrentSurface>(target)
+                        .ok()
+                        .map(|surface| match *surface {
+                            CurrentSurface::Xwayland(entity) => CurrentSurface::Xwayland(entity),
+                            CurrentSurface::Decoration(parent) => CurrentSurface::Decoration(parent),
+                        });
+                    let Some(surface) = current_surface else {
                         warn!("could not motion on surface: stale surface");
                         return;
                     };
-                    if let CurrentSurface::Decoration(parent) = &*surface {
-                        decoration::handle_pointer_motion(state, *parent, surface_x, surface_y);
+                    if let CurrentSurface::Decoration(parent) = surface {
+                        let edge = decoration::handle_pointer_motion(state, parent, surface_x, surface_y);
+                        state.update_pointer_resize_cursor(target, edge);
                         return;
                     }
                 }
+                state.update_pointer_resize_cursor(target, None);
+
                 let (server, scale) = state
                     .world
                     .query_one_mut::<(&WlPointer, &SurfaceScaleFactor)>(target)
@@ -956,7 +1074,12 @@ impl Event for client::wl_pointer::Event {
                 let Ok(mut query) =
                     state
                         .world
-                        .query_one::<(&WlPointer, &client::wl_seat::WlSeat, &CurrentSurface)>(
+                        .query_one::<(
+                            &WlPointer,
+                            &client::wl_seat::WlSeat,
+                            &CurrentSurface,
+                            Option<&PointerSurfacePosition>,
+                        )>(
                             target,
                         )
                 else {
@@ -964,32 +1087,48 @@ impl Event for client::wl_pointer::Event {
                     return;
                 };
 
-                let (server, seat, current_surface) = query.get().unwrap();
+                let (server, seat, current_surface, _pointer_position) = query.get().unwrap();
+                let mut reset_configure_interaction = None;
 
                 // from linux/input-event-codes.h
                 mod button_codes {
                     pub const LEFT: u32 = 0x110;
                 }
 
-                if button_state == WEnum::Value(client::wl_pointer::ButtonState::Pressed)
-                    && button == button_codes::LEFT
-                {
+                if button_state == WEnum::Value(client::wl_pointer::ButtonState::Pressed) {
                     match current_surface {
                         CurrentSurface::Xwayland(entity) => {
+                            if button == button_codes::LEFT {
+                                reset_configure_interaction = Some(*entity);
+                            }
                             cmd.insert(*entity, (LastClickSerial(seat.clone(), serial),));
                         }
                         CurrentSurface::Decoration(parent) => {
-                            let seat = seat.clone();
-                            let parent = *parent;
-                            drop(query);
-                            decoration::handle_pointer_click(state, parent, &seat, serial);
-                            return;
+                            cmd.insert(*parent, (LastClickSerial(seat.clone(), serial),));
+
+                            if button == button_codes::LEFT {
+                                let seat = seat.clone();
+                                let parent = *parent;
+                                drop(query);
+                                state.clear_configure_interaction_for_entity(parent);
+                                cmd.run_on(&mut state.world);
+                                decoration::handle_pointer_click(state, parent, &seat, serial);
+                                return;
+                            }
                         }
                     }
+                } else if button_state == WEnum::Value(client::wl_pointer::ButtonState::Released) {
+                    reset_configure_interaction = match current_surface {
+                        CurrentSurface::Xwayland(entity) => Some(*entity),
+                        CurrentSurface::Decoration(parent) => Some(*parent),
+                    };
                 }
 
                 server.button(serial, time, button, convert_wenum(button_state));
                 drop(query);
+                if let Some(entity) = reset_configure_interaction {
+                    state.clear_configure_interaction_for_entity(entity);
+                }
                 cmd.run_on(&mut state.world);
             }
             _ => {

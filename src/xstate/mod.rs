@@ -506,6 +506,9 @@ impl XState {
                     let mask = e.value_mask();
                     let translated_move = mask.intersects(x::ConfigWindowMask::X | x::ConfigWindowMask::Y)
                         && server_state.begin_configure_move(e.window(), dims, mask);
+                    let translated_resize = mask
+                        .intersects(x::ConfigWindowMask::WIDTH | x::ConfigWindowMask::HEIGHT)
+                        && server_state.begin_configure_resize(e.window(), dims, mask);
                     server_state.handle_configure_request(
                         e.window(),
                         mask,
@@ -518,7 +521,7 @@ impl XState {
                     let can_change_position =
                         server_state.should_forward_configure_position(e.window(), mask);
 
-                    if !translated_move && can_change_position {
+                    if !translated_move && !translated_resize && can_change_position {
                         if mask.contains(x::ConfigWindowMask::X) {
                             list.push(x::ConfigWindow::X(e.x().into()));
                         }
@@ -526,10 +529,10 @@ impl XState {
                             list.push(x::ConfigWindow::Y(e.y().into()));
                         }
                     }
-                    if mask.contains(x::ConfigWindowMask::WIDTH) {
+                    if !translated_resize && mask.contains(x::ConfigWindowMask::WIDTH) {
                         list.push(x::ConfigWindow::Width(e.width().into()));
                     }
-                    if mask.contains(x::ConfigWindowMask::HEIGHT) {
+                    if !translated_resize && mask.contains(x::ConfigWindowMask::HEIGHT) {
                         list.push(x::ConfigWindow::Height(e.height().into()));
                     }
 
@@ -641,11 +644,13 @@ impl XState {
                     return;
                 };
                 let button = data[3];
-                // XXX: This can technically be driven by keyboard events and other mouse buttons as well,
-                // but I haven't found an application that does this yet. We'll cross that bridge when we get to it.
-                if button != 1 {
+                debug!(
+                    "_NET_WM_MOVERESIZE for {:?}: direction={direction:?} button={} root=({}, {})",
+                    e.window(), button, data[0], data[1]
+                );
+                if button == 0 {
                     warn!(
-                        "Attempted move/resize of {:?} with non left click button ({button})",
+                        "Attempted move/resize of {:?} without a mouse button ({button})",
                         e.window()
                     );
                     return;
@@ -663,7 +668,7 @@ impl XState {
                     | MoveResizeDirection::SizeBottom
                     | MoveResizeDirection::SizeBottomLeft
                     | MoveResizeDirection::SizeLeft => {
-                        server_state.resize_window(e.window(), direction);
+                        server_state.start_locked_resize_window(e.window(), direction);
                     }
                     MoveResizeDirection::SizeKeyboard
                     | MoveResizeDirection::MoveKeyboard
@@ -708,6 +713,9 @@ impl XState {
         }
         let wmhints = wm_hints.resolve()?;
         let motif_hints = motif_wm_hints.resolve()?;
+        if let Some(functions) = motif_hints.as_ref().and_then(|m| m.functions) {
+            server_state.set_win_functions(window, functions);
+        }
         if let Some(decorations) = motif_hints.as_ref().and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
         }
@@ -1074,6 +1082,9 @@ impl XState {
                 let motif_hints =
                     unwrap_or_skip_bad_window_ret!(self.get_motif_wm_hints(window).resolve())
                         .unwrap();
+                if let Some(functions) = motif_hints.functions {
+                    server_state.set_win_functions(window, functions);
+                }
                 if let Some(decorations) = motif_hints.decorations {
                     server_state.set_win_decorations(window, decorations);
                 }
@@ -1238,7 +1249,7 @@ impl From<&[u32]> for WmHints {
     }
 }
 
-pub use motif::Decorations;
+pub use motif::{Decorations, Functions};
 mod motif {
     use super::*;
     // Motif WM hints are incredibly poorly documented, I could only find this header:
@@ -1254,7 +1265,8 @@ mod motif {
     }
 
     bitflags! {
-        pub(super) struct Functions: u32 {
+        #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+        pub struct Functions: u32 {
             const All = 1;
             const Resize = 2;
             const Move = 4;

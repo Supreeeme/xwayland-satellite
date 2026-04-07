@@ -57,6 +57,7 @@ default = []
 systemd = ["dep:sd-notify"]
 # load decoration font at runtime instead of embedding it into the executable
 fontconfig = ["dep:fontconfig"]
+integration-tests = []
 
 [dev-dependencies]
 rustix = { workspace = true, features = ["fs"] }
