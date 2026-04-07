@@ -1,11 +1,9 @@
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 fn main() {
-    pretty_env_logger::formatted_timed_builder()
-        .filter_level(log::LevelFilter::Info)
-        .parse_default_env()
-        .init();
-    xwayland_satellite::main(parse_args());
+    let arg_data = parse_args();
+    init_logger(!arg_data.listenfds.is_empty());
+    xwayland_satellite::main(arg_data);
 }
 
 #[derive(Default)]
@@ -245,4 +243,39 @@ fn parse_args() -> RealData {
     data.flags = flags.to_vec();
 
     data
+}
+
+fn init_logger(integrated: bool) {
+    || -> Option<()> {
+        if !integrated {
+            return None;
+        }
+        let mut file_path = match std::env::var_os("XDG_STATE_HOME").map(std::path::PathBuf::from) {
+            Some(f) => f,
+            None => std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)?
+                .join(".local/state"),
+        };
+        file_path.push("xwayland-satellite");
+        std::fs::create_dir_all(&file_path).ok()?;
+        file_path.push(format!(
+            "{}.log",
+            humantime::format_rfc3339_seconds(std::time::SystemTime::now())
+        ));
+        // By directing `stderr` to the log file instead of directing the logger's output to the file,
+        // we capture any panic messages output as well
+        if let Ok(file) = std::fs::File::create(file_path) {
+            rustix::stdio::dup2_stderr(file).ok()?;
+        }
+        Some(())
+    }();
+    let log_level = if cfg!(debug_assertions) {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    };
+    pretty_env_logger::formatted_timed_builder()
+        .filter_level(log_level)
+        .parse_default_env()
+        .init();
 }

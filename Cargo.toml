@@ -32,13 +32,14 @@ crate-type = ["lib"]
 
 [dependencies]
 bitflags = "2.5.0"
-rustix = { workspace = true, features = ["event"] }
+rustix = { workspace = true, features = ["event", "stdio"] }
 wayland-client.workspace = true
 wayland-protocols = { workspace = true, features = ["client", "server", "staging", "unstable"] }
 wayland-server.workspace = true
 xcb = { version = "1.7.0", features = ["composite", "randr", "res"] }
 wl_drm = { path = "wl_drm" }
 log = "0.4.21"
+humantime = "2.4.0"
 pretty_env_logger = "0.5.0"
 xcb-util-cursor = "0.4"
 smithay-client-toolkit = { version = "0.20.0", default-features = false }
