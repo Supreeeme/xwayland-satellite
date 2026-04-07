@@ -1,11 +1,10 @@
+use pretty_env_logger::env_logger::fmt::Target;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 fn main() {
-    pretty_env_logger::formatted_timed_builder()
-        .filter_level(log::LevelFilter::Info)
-        .parse_default_env()
-        .init();
-    xwayland_satellite::main(parse_args());
+    let arg_data = parse_args();
+    init_logger(!arg_data.listenfds.is_empty());
+    xwayland_satellite::main(arg_data);
 }
 
 #[derive(Default)]
@@ -245,4 +244,34 @@ fn parse_args() -> RealData {
     data.flags = flags.to_vec();
 
     data
+}
+
+fn init_logger(integrated: bool) {
+    let output_file = || -> Option<std::fs::File> {
+        if !integrated {
+            return None;
+        }
+        let mut file_path = match std::env::var_os("XDG_STATE_HOME").map(std::path::PathBuf::from) {
+            Some(f) => f,
+            None => std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)?
+                .join(".local/state"),
+        };
+        file_path.push("xwayland-satellite");
+        std::fs::create_dir_all(&file_path).ok()?;
+        file_path.push("log");
+        std::fs::File::create(file_path).ok()
+    }();
+    let (default_level, log_output) = match output_file {
+        Some(f) => (
+            log::LevelFilter::Debug,
+            Target::Pipe(Box::new(std::io::BufWriter::new(f))),
+        ),
+        None => (log::LevelFilter::Info, Default::default()),
+    };
+    pretty_env_logger::formatted_timed_builder()
+        .filter_level(default_level)
+        .target(log_output)
+        .parse_default_env()
+        .init();
 }
