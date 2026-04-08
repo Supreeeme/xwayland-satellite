@@ -100,7 +100,7 @@ where
 #[derive(Default, Debug)]
 struct WindowAttributes {
     is_popup: bool,
-    allow_focus_when_popup: bool,
+    acquire_input_via_wm: bool,
     dims: WindowDims,
     size_hints: Option<WmNormalHints>,
     title: Option<WmName>,
@@ -960,7 +960,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         let attrs = &mut self.world.get::<&mut WindowData>(id).unwrap().attrs;
         attrs.group = hints.window_group;
-        attrs.allow_focus_when_popup = hints.allow_focus_when_popup;
+        attrs.acquire_input_via_wm = hints.acquire_input_via_wm;
     }
 
     pub fn set_size_hints(&mut self, window: x::Window, hints: WmNormalHints) {
