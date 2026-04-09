@@ -948,8 +948,16 @@ bitflags! {
     /// From ICCCM spec.
     /// https://tronche.com/gui/x/icccm/sec-4.html#s-4.1.2.3
     pub struct WmSizeHintsFlags: u32 {
+        const UserPosition = 1;
+        const ProgramPosition = 2;
+        const UserSize = 4;
+        const ProgramSize = 8;
         const ProgramMinSize = 16;
         const ProgramMaxSize = 32;
+        const ResizeIncrement = 64;
+        const AspectRatios = 128;
+        const BaseSize = 256;
+        const Gravity = 512;
     }
 }
 
@@ -957,7 +965,14 @@ bitflags! {
     /// https://tronche.com/gui/x/icccm/sec-4.html#s-4.1.2.4
     pub struct WmHintsFlags: u32 {
         const Input = 1;
+        const State = 2;
+        const IconPixmap = 4;
+        const IconWindow = 8;
+        const IconPosition = 16;
+        const IconMask = 32;
         const WindowGroup = 64;
+        const Message = 128;
+        const Urgency = 256;
     }
 }
 

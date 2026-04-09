@@ -36,53 +36,53 @@ impl WmNormalHints {
     }
     /// If called after `program_pos`, both positions will be set to the value passed to `user_pos`.
     fn user_pos(mut self, x: u32, y: u32) -> Self {
-        self.fields[0] |= 0x001;
+        self.fields[0] |= WmSizeHintsFlags::UserPosition.bits();
         self.fields[1] = x;
         self.fields[2] = y;
         self
     }
     /// If called after `program_size`, both sizes will be set to the value passed to `user_size`.
     fn user_size(mut self, w: u32, h: u32) -> Self {
-        self.fields[0] |= 0x002;
+        self.fields[0] |= WmSizeHintsFlags::UserSize.bits();
         self.fields[3] = w;
         self.fields[4] = h;
         self
     }
     /// If called after `user_pos`, both positions will be set to the value passed to `program_pos`.
     fn program_pos(mut self, x: u32, y: u32) -> Self {
-        self.fields[0] |= 0x004;
+        self.fields[0] |= WmSizeHintsFlags::ProgramPosition.bits();
         self.fields[1] = x;
         self.fields[2] = y;
         self
     }
     /// If called after `user_size`, both sizes will be set to the value passed to `program_size`.
     fn program_size(mut self, w: u32, h: u32) -> Self {
-        self.fields[0] |= 0x008;
+        self.fields[0] |= WmSizeHintsFlags::ProgramSize.bits();
         self.fields[3] = w;
         self.fields[4] = h;
         self
     }
     fn min_size(mut self, w: u32, h: u32) -> Self {
-        self.fields[0] |= 0x010;
+        self.fields[0] |= WmSizeHintsFlags::ProgramMinSize.bits();
         self.fields[5] = w;
         self.fields[6] = h;
         self
     }
     fn max_size(mut self, w: u32, h: u32) -> Self {
-        self.fields[0] |= 0x020;
+        self.fields[0] |= WmSizeHintsFlags::ProgramMaxSize.bits();
         self.fields[7] = w;
         self.fields[8] = h;
         self
     }
     fn resize_incr(mut self, w: u32, h: u32) -> Self {
-        self.fields[0] |= 0x040;
+        self.fields[0] |= WmSizeHintsFlags::ResizeIncrement.bits();
         self.fields[9] = w;
         self.fields[10] = h;
         self
     }
     /// Each tuple's first number is its numerator and second is its denominator.
     fn _aspect_ratios(mut self, min: (u32, u32), max: (u32, u32)) -> Self {
-        self.fields[0] |= 0x080;
+        self.fields[0] |= WmSizeHintsFlags::AspectRatios.bits();
         self.fields[11] = min.0;
         self.fields[12] = min.1;
         self.fields[13] = max.0;
@@ -90,13 +90,13 @@ impl WmNormalHints {
         self
     }
     fn base_size(mut self, w: u32, h: u32) -> Self {
-        self.fields[0] |= 0x100;
+        self.fields[0] |= WmSizeHintsFlags::BaseSize.bits();
         self.fields[15] = w;
         self.fields[16] = h;
         self
     }
     fn win_gravity(mut self, gravity: xcb::x::Gravity) -> Self {
-        self.fields[0] |= 0x200;
+        self.fields[0] |= WmSizeHintsFlags::Gravity.bits();
         self.fields[17] = gravity as _;
         self
     }
@@ -127,43 +127,43 @@ impl WmHints {
         Self { fields: [0; 9] }
     }
     fn input_model(mut self, input_hint: bool) -> Self {
-        self.fields[0] |= 0x001;
+        self.fields[0] |= WmHintsFlags::Input.bits();
         self.fields[1] = input_hint as _;
         self
     }
     fn initial_state(mut self, state_hint: StateHint) -> Self {
-        self.fields[0] |= 0x002;
+        self.fields[0] |= WmHintsFlags::State.bits();
         self.fields[2] = state_hint as _;
         self
     }
     fn icon_pixmap(mut self, pixmap: u32) -> Self {
-        self.fields[0] |= 0x004;
+        self.fields[0] |= WmHintsFlags::IconPixmap.bits();
         self.fields[3] = pixmap;
         self
     }
     fn icon_window(mut self, window: u32) -> Self {
-        self.fields[0] |= 0x008;
+        self.fields[0] |= WmHintsFlags::IconWindow.bits();
         self.fields[4] = window;
         self
     }
     fn _icon_position(mut self, x: u32, y: u32) -> Self {
-        self.fields[0] |= 0x010;
+        self.fields[0] |= WmHintsFlags::IconPosition.bits();
         self.fields[5] = x;
         self.fields[6] = y;
         self
     }
     fn icon_mask(mut self, mask: u32) -> Self {
-        self.fields[0] |= 0x020;
+        self.fields[0] |= WmHintsFlags::IconMask.bits();
         self.fields[7] = mask;
         self
     }
     fn group_leader(mut self, group: u32) -> Self {
-        self.fields[0] |= 0x040;
+        self.fields[0] |= WmHintsFlags::WindowGroup.bits();
         self.fields[8] = group;
         self
     }
     fn _urgent(mut self) -> Self {
-        self.fields[0] |= 0x100;
+        self.fields[0] |= WmHintsFlags::Urgency.bits();
         self
     }
 }
