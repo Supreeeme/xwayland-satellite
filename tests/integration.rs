@@ -345,6 +345,7 @@ xcb::atoms_struct! {
         win_type_utility => b"_NET_WM_WINDOW_TYPE_UTILITY",
         win_type_dnd => b"_NET_WM_WINDOW_TYPE_DND",
         win_type_combo => b"_NET_WM_WINDOW_TYPE_COMBO",
+        win_type_splash => b"_NET_WM_WINDOW_TYPE_SPLASH",
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
         wm_hints => b"WM_HINTS",
         mime1 => b"text/plain" only_if_exists = false,
@@ -2130,7 +2131,7 @@ fn popup_heuristics() {
         connection.atoms.net_wm_state,
         &[connection.atoms.skip_taskbar],
     );
-    f.map_as_popup(&mut connection, yabridge_popup);
+    f.map_as_toplevel(&mut connection, yabridge_popup);
 
     let steam = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
@@ -2194,6 +2195,107 @@ fn popup_heuristics() {
         &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
     );
     f.map_as_toplevel(&mut connection, wallpaper_engine);
+
+    let forza_like = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        forza_like,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_normal],
+    );
+    connection.set_property(
+        forza_like,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x3_u32, 0x26, 0x0, 0x0, 0x0],
+    );
+    connection.set_property(
+        forza_like,
+        connection.atoms.wm_hints,
+        connection.atoms.wm_hints,
+        &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
+    f.map_as_toplevel(&mut connection, forza_like);
+}
+
+#[test]
+fn popup_heuristics_property_recompute() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let win_toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut connection, win_toplevel);
+
+    let delayed_normal = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.map_window(delayed_normal);
+    f.wait_and_dispatch();
+
+    connection.set_property(
+        delayed_normal,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_normal],
+    );
+    connection.set_property(
+        delayed_normal,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x3_u32, 0x26, 0x0, 0x0, 0x0],
+    );
+    connection.set_property(
+        delayed_normal,
+        connection.atoms.wm_hints,
+        connection.atoms.wm_hints,
+        &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
+    f.wait_and_dispatch();
+
+    let surface = f
+        .testwl
+        .last_created_surface_id()
+        .expect("No surface created");
+    f.configure_and_verify_new_toplevel(&mut connection, delayed_normal, surface);
+}
+
+#[test]
+fn weak_popup_heuristics_do_not_auto_parent() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let parent = connection.new_window(connection.root, 0, 0, 100, 100, false);
+    let parent_surface = f.map_as_toplevel(&mut connection, parent);
+    f.testwl.focus_toplevel(parent_surface);
+    f.testwl.move_pointer_to(parent_surface, 20.0, 20.0);
+    f.wait_and_dispatch();
+
+    let weak_popup = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        weak_popup,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_splash],
+    );
+    connection.set_property(
+        weak_popup,
+        x::ATOM_ATOM,
+        connection.atoms.net_wm_state,
+        &[connection.atoms.skip_taskbar],
+    );
+
+    connection.map_window(weak_popup);
+    f.wait_and_dispatch();
+
+    let surface = f
+        .testwl
+        .last_created_surface_id()
+        .expect("No surface created");
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert!(
+        matches!(data.role, Some(testwl::SurfaceRole::Toplevel(_))),
+        "weak heuristic popup should fall back to toplevel, got {:?}",
+        data.role
+    );
+    f.configure_and_verify_new_toplevel(&mut connection, weak_popup, surface);
 }
 
 #[test]

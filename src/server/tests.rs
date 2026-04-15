@@ -2584,7 +2584,7 @@ fn transient_for_toplevel() {
         },
     );
 
-    f.satellite.set_transient_for(sub_toplevel, toplevel);
+    f.satellite.set_transient_for(sub_toplevel, Some(toplevel));
     f.map_window(&comp, sub_toplevel, &surface.obj, &buffer);
     f.run();
     let id = f.check_new_surface();

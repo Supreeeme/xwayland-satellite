@@ -595,6 +595,7 @@ impl XState {
                     return;
                 }
 
+                server_state.run();
                 match direction {
                     MoveResizeDirection::Move => {
                         server_state.move_window(e.window());
@@ -635,7 +636,6 @@ impl XState {
         let class = self.get_wm_class(window);
         let size_hints = self.get_wm_size_hints(window);
         let motif_wm_hints = self.get_motif_wm_hints(window);
-        let wm_hints = self.get_wm_hints(window);
         let mut title = name.resolve()?;
         if title.is_none() {
             title = self.get_wm_name(window).resolve()?;
@@ -650,7 +650,6 @@ impl XState {
         if let Some(hints) = size_hints.resolve()? {
             server_state.set_size_hints(window, hints);
         }
-        let wmhints = wm_hints.resolve()?;
         let motif_hints = motif_wm_hints.resolve()?;
         if let Some(decorations) = motif_hints.as_ref().and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
@@ -667,13 +666,21 @@ impl XState {
             .resolve()?
             .flatten();
 
-        let is_popup =
-            self.guess_is_popup(window, motif_hints, wmhints, transient_for.is_some())?;
-        server_state.set_popup(window, is_popup);
-        if let Some(parent) = transient_for.and_then(|t| (!is_popup).then_some(t)) {
-            server_state.set_transient_for(window, parent);
-        }
+        self.update_window_kind(server_state, window, motif_hints, transient_for)?;
 
+        Ok(())
+    }
+
+    fn update_window_kind(
+        &self,
+        server_state: &mut super::RealServerState,
+        window: x::Window,
+        motif_hints: Option<motif::Hints>,
+        transient_for: Option<x::Window>,
+    ) -> XResult<()> {
+        let window_kind = self.guess_window_kind(window, motif_hints, transient_for.is_some())?;
+        server_state.set_window_kind(window, window_kind);
+        server_state.set_transient_for(window, transient_for);
         Ok(())
     }
 
@@ -692,15 +699,13 @@ impl XState {
         }
     }
 
-    fn guess_is_popup(
+    fn guess_window_kind(
         &self,
         window: x::Window,
         motif_hints: Option<motif::Hints>,
-        wm_hints: Option<WmHints>,
         has_transient_for: bool,
-    ) -> XResult<bool> {
+    ) -> XResult<WindowKind> {
         let mut motif_popup = false;
-        let mut wmhint_popup = false;
         let mut has_skip_taskbar = None;
 
         let attrs = self
@@ -722,34 +727,23 @@ impl XState {
             has_skip_taskbar = Some(states.contains(&self.atoms.skip_taskbar));
         }
         if let Some(hints) = motif_hints {
-            // If MOTIF_WM_HINTS provides no decorations for client assume its a popup
             motif_popup = hints.decorations.is_some_and(|d| d.is_clientside());
-            // WMHINTS is considered popup only if client is not decorated && client does not
-            // accept input focus
-            // Sometimes popup is false-positive meaning both MOTIF Decorations and WM_HINTS input indicates its a popup
-            // but MOTIF has function flags that toplevel window should do
-            wmhint_popup = motif_popup
-                && wm_hints.is_some_and(|h| !h.acquire_input_via_wm)
-                && !hints.functions.as_ref().is_some_and(|f| {
-                    f.intersects(
-                        motif::Functions::Minimize
-                            | motif::Functions::Maximize
-                            | motif::Functions::Resize
-                            | motif::Functions::All,
-                    )
-                });
-            // If the motif hints indicate the user shouldn't be able to do anything
-            // to the window at all, it stands to reason it's probably a popup.
             if hints.functions.is_some_and(|f| f.is_empty()) {
-                return Ok(true);
+                return Ok(WindowKind::Popup(PopupKind::strong(
+                    PopupReason::MotifNoFunctions,
+                )));
             }
         }
 
         let override_redirect = self.connection.wait_for_reply(attrs)?.override_redirect();
-        let mut is_popup = override_redirect;
+        if override_redirect {
+            return Ok(WindowKind::Popup(PopupKind::strong(
+                PopupReason::OverrideRedirect,
+            )));
+        }
 
         let window_types = window_types.resolve()?.unwrap_or_else(|| {
-            if !override_redirect && has_transient_for {
+            if has_transient_for {
                 vec![self.window_atoms.dialog]
             } else {
                 vec![self.window_atoms.normal]
@@ -767,40 +761,63 @@ impl XState {
         }
         debug!("{window:?} override_redirect: {override_redirect:?}");
 
-        let mut known_window_type = false;
         for ty in window_types {
             match ty {
-                x if x == self.window_atoms.normal => is_popup = override_redirect || wmhint_popup,
-                x if x == self.window_atoms.dialog => is_popup = override_redirect,
-                x if x == self.window_atoms.utility => is_popup = override_redirect || motif_popup,
-                x if [
-                    self.window_atoms.menu,
-                    self.window_atoms.popup_menu,
-                    self.window_atoms.dropdown_menu,
-                    self.window_atoms.tooltip,
-                    self.window_atoms.drag_n_drop,
-                    self.window_atoms.combo,
-                ]
-                .contains(&x) =>
-                {
-                    is_popup = true;
+                x if x == self.window_atoms.normal => {
+                    return Ok(WindowKind::Toplevel(ToplevelReason::NormalWindowType));
                 }
-                _ => {
-                    continue;
+                x if x == self.window_atoms.dialog => {
+                    return Ok(WindowKind::Toplevel(ToplevelReason::Dialog));
                 }
+                x if x == self.window_atoms.utility && motif_popup => {
+                    return Ok(WindowKind::Popup(PopupKind::strong(
+                        PopupReason::UtilityMotifPopup,
+                    )));
+                }
+                x if x == self.window_atoms.utility => {
+                    return Ok(WindowKind::Toplevel(ToplevelReason::Utility));
+                }
+                x if x == self.window_atoms.menu => {
+                    return Ok(WindowKind::Popup(PopupKind::strong(
+                        PopupReason::ExplicitWindowType(PopupWindowType::Menu),
+                    )));
+                }
+                x if x == self.window_atoms.popup_menu => {
+                    return Ok(WindowKind::Popup(PopupKind::strong(
+                        PopupReason::ExplicitWindowType(PopupWindowType::PopupMenu),
+                    )));
+                }
+                x if x == self.window_atoms.dropdown_menu => {
+                    return Ok(WindowKind::Popup(PopupKind::strong(
+                        PopupReason::ExplicitWindowType(PopupWindowType::DropdownMenu),
+                    )));
+                }
+                x if x == self.window_atoms.tooltip => {
+                    return Ok(WindowKind::Popup(PopupKind::strong(
+                        PopupReason::ExplicitWindowType(PopupWindowType::Tooltip),
+                    )));
+                }
+                x if x == self.window_atoms.drag_n_drop => {
+                    return Ok(WindowKind::Popup(PopupKind::strong(
+                        PopupReason::ExplicitWindowType(PopupWindowType::DragAndDrop),
+                    )));
+                }
+                x if x == self.window_atoms.combo => {
+                    return Ok(WindowKind::Popup(PopupKind::strong(
+                        PopupReason::ExplicitWindowType(PopupWindowType::Combo),
+                    )));
+                }
+                _ => {}
             }
-
-            known_window_type = true;
-            break;
         }
 
-        if !known_window_type {
-            if let Some(has_skip_taskbar) = has_skip_taskbar {
-                is_popup = has_skip_taskbar || override_redirect;
-            }
+        if has_skip_taskbar == Some(true) {
+            return Ok(WindowKind::Toplevel(ToplevelReason::SuppressedPopup(
+                PopupKind::weak(PopupReason::SkipTaskbarHint),
+            )));
         }
 
-        Ok(is_popup)
+        Ok(WindowKind::Toplevel(ToplevelReason::Default))
     }
 
     fn get_property_cookie(
@@ -989,6 +1006,23 @@ impl XState {
                 let hints =
                     unwrap_or_skip_bad_window_ret!(self.get_wm_hints(window).resolve()).unwrap();
                 server_state.set_win_hints(window, hints);
+                let motif_hints = unwrap_or_skip_bad_window_ret!(self.get_motif_wm_hints(window).resolve());
+                let transient_for = unwrap_or_skip_bad_window_ret!(self
+                    .property_cookie_wrapper(
+                        window,
+                        self.atoms.wm_transient_for,
+                        x::ATOM_WINDOW,
+                        1,
+                        |reply: x::GetPropertyReply| reply.value::<x::Window>().first().copied(),
+                    )
+                    .resolve())
+                    .flatten();
+                unwrap_or_skip_bad_window_ret!(self.update_window_kind(
+                    server_state,
+                    window,
+                    motif_hints,
+                    transient_for,
+                ));
             }
             x if x == x::ATOM_WM_NORMAL_HINTS => {
                 let hints =
@@ -1011,13 +1045,31 @@ impl XState {
                     unwrap_or_skip_bad_window_ret!(self.get_wm_class(window).resolve()).unwrap();
                 server_state.set_win_class(window, class);
             }
-            x if x == self.atoms.motif_wm_hints => {
+            x if x == self.atoms.motif_wm_hints
+                || x == self.window_atoms.ty
+                || x == self.atoms.net_wm_state
+                || x == self.atoms.wm_transient_for => {
                 let motif_hints =
-                    unwrap_or_skip_bad_window_ret!(self.get_motif_wm_hints(window).resolve())
-                        .unwrap();
-                if let Some(decorations) = motif_hints.decorations {
+                    unwrap_or_skip_bad_window_ret!(self.get_motif_wm_hints(window).resolve());
+                if let Some(decorations) = motif_hints.as_ref().and_then(|m| m.decorations) {
                     server_state.set_win_decorations(window, decorations);
                 }
+                let transient_for = unwrap_or_skip_bad_window_ret!(self
+                    .property_cookie_wrapper(
+                        window,
+                        self.atoms.wm_transient_for,
+                        x::ATOM_WINDOW,
+                        1,
+                        |reply: x::GetPropertyReply| reply.value::<x::Window>().first().copied(),
+                    )
+                    .resolve())
+                    .flatten();
+                unwrap_or_skip_bad_window_ret!(self.update_window_kind(
+                    server_state,
+                    window,
+                    motif_hints,
+                    transient_for,
+                ));
             }
             _ => {
                 if log::log_enabled!(log::Level::Debug) {
@@ -1085,6 +1137,78 @@ xcb::atoms_struct! {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowKind {
+    Toplevel(ToplevelReason),
+    Popup(PopupKind),
+}
+
+impl WindowKind {
+    pub fn is_popup(&self) -> bool {
+        matches!(self, Self::Popup(_))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToplevelReason {
+    Default,
+    NormalWindowType,
+    Dialog,
+    Utility,
+    SuppressedPopup(PopupKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PopupKind {
+    pub strength: PopupStrength,
+    pub reason: PopupReason,
+}
+
+impl PopupKind {
+    pub const fn strong(reason: PopupReason) -> Self {
+        Self {
+            strength: PopupStrength::Strong,
+            reason,
+        }
+    }
+
+    pub const fn weak(reason: PopupReason) -> Self {
+        Self {
+            strength: PopupStrength::Weak,
+            reason,
+        }
+    }
+
+    pub fn is_strong(&self) -> bool {
+        matches!(self.strength, PopupStrength::Strong)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupStrength {
+    Strong,
+    Weak,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupReason {
+    OverrideRedirect,
+    MotifNoFunctions,
+    UtilityMotifPopup,
+    ExplicitWindowType(PopupWindowType),
+    SkipTaskbarHint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupWindowType {
+    Menu,
+    PopupMenu,
+    DropdownMenu,
+    Tooltip,
+    DragAndDrop,
+    Combo,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WindowDims {
     pub x: i16,
@@ -1145,7 +1269,7 @@ impl From<&[u32]> for WmNormalHints {
     }
 }
 
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
 pub struct WmHints {
     pub window_group: Option<x::Window>,
     pub acquire_input_via_wm: bool,

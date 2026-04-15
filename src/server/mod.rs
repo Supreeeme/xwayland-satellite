@@ -7,7 +7,10 @@ pub(crate) mod selection;
 mod tests;
 
 use self::event::*;
-use crate::xstate::{Decorations, MoveResizeDirection, WindowDims, WmHints, WmName, WmNormalHints};
+use crate::xstate::{
+    Decorations, MoveResizeDirection, PopupKind, WindowDims, WindowKind, WmHints, WmName,
+    WmNormalHints,
+};
 use crate::{X11Selection, XConnection, timespec_from_millis};
 use clientside::MyWorld;
 use decoration::{DecorationsData, DecorationsDataSatellite};
@@ -97,9 +100,9 @@ where
     u32::from(wenum).try_into().unwrap()
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct WindowAttributes {
-    is_popup: bool,
+    window_kind: WindowKind,
     dims: WindowDims,
     size_hints: Option<WmNormalHints>,
     title: Option<WmName>,
@@ -107,6 +110,21 @@ struct WindowAttributes {
     group: Option<x::Window>,
     decorations: Option<Decorations>,
     transient_for: Option<x::Window>,
+}
+
+impl Default for WindowAttributes {
+    fn default() -> Self {
+        Self {
+            window_kind: WindowKind::Toplevel(crate::xstate::ToplevelReason::Default),
+            dims: WindowDims::default(),
+            size_hints: None,
+            title: None,
+            class: None,
+            group: None,
+            decorations: None,
+            transient_for: None,
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
@@ -128,7 +146,13 @@ impl WindowData {
         Self {
             mapped: false,
             attrs: WindowAttributes {
-                is_popup: override_redirect,
+                window_kind: if override_redirect {
+                    WindowKind::Popup(PopupKind::strong(
+                        crate::xstate::PopupReason::OverrideRedirect,
+                    ))
+                } else {
+                    WindowKind::Toplevel(crate::xstate::ToplevelReason::Default)
+                },
                 dims,
                 ..Default::default()
             },
@@ -867,17 +891,13 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         self.windows.insert(window, id);
     }
 
-    pub fn set_popup(&mut self, window: x::Window, is_popup: bool) {
+    pub fn set_window_kind(&mut self, window: x::Window, window_kind: WindowKind) {
         let Some(id) = self.windows.get(&window).copied() else {
-            debug!("not setting popup for unknown window {window:?}");
+            debug!("not setting window kind for unknown window {window:?}");
             return;
         };
 
-        self.world
-            .get::<&mut WindowData>(id)
-            .unwrap()
-            .attrs
-            .is_popup = is_popup;
+        self.world.get::<&mut WindowData>(id).unwrap().attrs.window_kind = window_kind;
     }
 
     pub fn set_win_title(&mut self, window: x::Window, name: WmName) {
@@ -1038,7 +1058,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return true;
         };
 
-        !win.mapped || win.attrs.is_popup
+        !win.mapped || win.attrs.window_kind.is_popup()
     }
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
@@ -1061,7 +1081,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         };
         if dims == win.attrs.dims {
             return;
-        } else if win.attrs.is_popup {
+        } else if win.attrs.window_kind.is_popup() {
             win.attrs.dims = dims;
         }
 
@@ -1184,7 +1204,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
-    pub fn set_transient_for(&mut self, window: x::Window, parent: x::Window) {
+    pub fn set_transient_for(&mut self, window: x::Window, parent: Option<x::Window>) {
         let Some(mut win) = self
             .windows
             .get(&window)
@@ -1195,7 +1215,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return;
         };
 
-        win.attrs.transient_for = Some(parent);
+        win.attrs.transient_for = parent;
     }
 
     pub fn activate_window(&mut self, window: x::Window) {
@@ -1354,6 +1374,10 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
     /// Returns true if the created window is a toplevel.
     fn create_role_window(&mut self, window: x::Window, entity: Entity) -> bool {
+        if self.world.get::<&SurfaceRole>(entity).is_ok() {
+            debug!("{window:?} already has a SurfaceRole, skipping create_role_window");
+            return false;
+        }
         let xdg_surface;
         let mut popup_for = None;
         let mut fullscreen = false;
@@ -1367,8 +1391,8 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             xdg_surface = self.xdg_wm_base.get_xdg_surface(&surface, &self.qh, entity);
 
             let window_data = data.get::<&WindowData>().unwrap();
-            if window_data.attrs.is_popup {
-                popup_for = self.last_hovered.or(self.last_focused_toplevel);
+            if let WindowKind::Popup(popup_kind) = window_data.attrs.window_kind {
+                popup_for = self.popup_parent(&window_data, popup_kind);
             }
 
             let (width, height) = (window_data.attrs.dims.width, window_data.attrs.dims.height);
@@ -1407,6 +1431,21 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         self.world.insert(entity, (role,)).unwrap();
 
         is_toplevel
+    }
+
+    fn popup_parent(&self, window_data: &WindowData, popup_kind: PopupKind) -> Option<x::Window> {
+        if let Some(parent) = window_data.attrs.transient_for {
+            return self
+                .windows
+                .get(&parent)
+                .copied()
+                .and_then(|id| self.world.get::<&SurfaceRole>(id).ok())
+                .and_then(|role| role.xdg().map(|_| parent));
+        }
+        if popup_kind.is_strong() {
+            return self.last_hovered.or(self.last_focused_toplevel);
+        }
+        None
     }
 
     fn create_toplevel(
