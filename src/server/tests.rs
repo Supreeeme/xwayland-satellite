@@ -1613,6 +1613,66 @@ fn override_redirect_choose_hover_window() {
     assert_eq!(&popup_data.popup().parent, win1_xdg);
 }
 
+#[test]
+fn popup_no_focus_without_input_hint() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+
+    let win_toplevel = Window::new(1);
+    let (_, toplevel_id) = f.create_toplevel(&comp, win_toplevel);
+
+    // A popup without acquire_input_via_wm should not receive focus.
+    let win_popup = Window::new(2);
+    f.create_popup(
+        &comp,
+        PopupBuilder::new(win_popup, win_toplevel, toplevel_id),
+    );
+    assert_eq!(f.connection().focused_window, Some(win_toplevel));
+}
+
+#[test]
+fn popup_focus_on_map_with_input_hint() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+
+    let win_toplevel = Window::new(1);
+    let (_, toplevel_id) = f.create_toplevel(&comp, win_toplevel);
+
+    // A popup with acquire_input_via_wm should receive X11 keyboard focus
+    // at map time, matching what a real X11 WM does for windows with
+    // WM_HINTS input=True.
+    let win_popup = Window::new(2);
+    let (buffer, surface) = comp.create_surface();
+    let dims = WindowDims {
+        x: 10,
+        y: 20,
+        width: 100,
+        height: 50,
+    };
+    let data = WindowData {
+        mapped: true,
+        dims,
+        fullscreen: false,
+    };
+    f.new_window(win_popup, true, data);
+    f.satellite.set_win_hints(
+        win_popup,
+        super::WmHints {
+            window_group: None,
+            acquire_input_via_wm: true,
+        },
+    );
+    f.map_window(&comp, win_popup, &surface.obj, &buffer);
+    f.run();
+
+    let popup_id = f.check_new_surface();
+    assert_ne!(popup_id, toplevel_id);
+
+    f.testwl.configure_popup(popup_id);
+    f.run();
+
+    // Focus should have been given directly to the popup at map time.
+    assert_eq!(f.connection().focused_window, Some(win_popup));
+}
+
 #[track_caller]
 fn check_output_position_event(output: &TestObject<WlOutput>, pos: (i32, i32)) {
     let mut geo = None;
