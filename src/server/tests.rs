@@ -1616,14 +1616,13 @@ fn override_redirect_choose_hover_window() {
 #[test]
 fn popup_no_focus_without_input_hint() {
     let (mut f, comp) = TestFixture::new_with_compositor();
-    TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
 
     let win_toplevel = Window::new(1);
     let (_, toplevel_id) = f.create_toplevel(&comp, win_toplevel);
 
     // A popup without acquire_input_via_wm should not receive focus.
     let win_popup = Window::new(2);
-    let (_, _popup_id) = f.create_popup(
+    f.create_popup(
         &comp,
         PopupBuilder::new(win_popup, win_toplevel, toplevel_id),
     );
