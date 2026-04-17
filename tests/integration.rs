@@ -345,6 +345,7 @@ xcb::atoms_struct! {
         win_type_utility => b"_NET_WM_WINDOW_TYPE_UTILITY",
         win_type_dnd => b"_NET_WM_WINDOW_TYPE_DND",
         win_type_combo => b"_NET_WM_WINDOW_TYPE_COMBO",
+        win_type_splash => b"_NET_WM_WINDOW_TYPE_SPLASH",
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
         wm_hints => b"WM_HINTS",
         mime1 => b"text/plain" only_if_exists = false,
@@ -1875,6 +1876,31 @@ fn xdg_decorations() {
 }
 
 #[test]
+fn splash_screen_fixed_size() {
+    let mut f = Fixture::new();
+    let connection = Connection::new(&f.display);
+
+    let splash = connection.new_window(connection.root, 10, 10, 400, 350, false);
+    connection.set_property(
+        splash,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_splash],
+    );
+    connection.map_window(splash);
+    f.wait_and_dispatch();
+    let geo = connection.get_reply(&x::GetGeometry {
+        drawable: x::Drawable::Window(splash),
+    });
+    assert_eq!(geo.width(), 400);
+    assert_eq!(geo.height(), 350);
+    let surface = f.testwl.last_created_surface_id().unwrap();
+    let toplevel = f.testwl.get_surface_data(surface).unwrap().toplevel();
+    assert_eq!(toplevel.min_size, Some(testwl::Vec2 { x: 400, y: 350 }));
+    assert_eq!(toplevel.max_size, Some(testwl::Vec2 { x: 400, y: 350 }));
+}
+
+#[test]
 fn forced_1x_scale_consistent_x11_size() {
     let mut f = Fixture::new();
     f.testwl.enable_xdg_output_manager();
@@ -1945,255 +1971,6 @@ fn forced_1x_scale_consistent_x11_size() {
     assert_eq!(reply.dst_y(), 60);
     assert_eq!(geo.width(), 30);
     assert_eq!(geo.height(), 30);
-}
-
-#[test]
-fn popup_heuristics() {
-    let mut f = Fixture::new();
-    let mut connection = Connection::new(&f.display);
-
-    let win_toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
-    f.map_as_toplevel(&mut connection, win_toplevel);
-
-    let ghidra_popup = connection.new_window(connection.root, 10, 10, 50, 50, false);
-    connection.set_property(
-        ghidra_popup,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_normal],
-    );
-    connection.set_property(
-        ghidra_popup,
-        x::ATOM_ATOM,
-        connection.atoms.net_wm_state,
-        &[connection.atoms.skip_taskbar],
-    );
-    connection.set_property(
-        ghidra_popup,
-        connection.atoms.motif_wm_hints,
-        connection.atoms.motif_wm_hints,
-        &[0b11_u32, 0, 0, 0, 0],
-    );
-    f.map_as_popup(&mut connection, ghidra_popup);
-
-    let reaper_dialog = connection.new_window(connection.root, 10, 10, 50, 50, false);
-    connection.set_property(
-        ghidra_popup,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_normal],
-    );
-    connection.set_property(
-        ghidra_popup,
-        x::ATOM_ATOM,
-        connection.atoms.net_wm_state,
-        &[connection.atoms.skip_taskbar],
-    );
-    connection.set_property(
-        ghidra_popup,
-        connection.atoms.motif_wm_hints,
-        connection.atoms.motif_wm_hints,
-        &[0x2_u32, 0, 0x2a, 0, 0],
-    );
-    f.map_as_toplevel(&mut connection, reaper_dialog);
-
-    let chromium_menu = connection.new_window(connection.root, 10, 10, 50, 50, true);
-    connection.set_property(
-        chromium_menu,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_menu],
-    );
-    f.map_as_popup(&mut connection, chromium_menu);
-
-    let chromium_tooltip = connection.new_window(connection.root, 10, 10, 50, 50, true);
-    connection.set_property(
-        chromium_tooltip,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_tooltip],
-    );
-    f.map_as_popup(&mut connection, chromium_tooltip);
-
-    let discord_dnd = connection.new_window(connection.root, 20, 138, 48, 48, true);
-    connection.set_property(
-        discord_dnd,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_dnd],
-    );
-    f.map_as_popup(&mut connection, discord_dnd);
-
-    let git_gui_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
-    connection.set_property(
-        git_gui_popup,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_popup_menu],
-    );
-    f.map_as_popup(&mut connection, git_gui_popup);
-
-    let git_gui_dropdown = connection.new_window(connection.root, 10, 10, 50, 50, true);
-    connection.set_property(
-        git_gui_popup,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_dropdown_menu],
-    );
-    f.map_as_popup(&mut connection, git_gui_dropdown);
-
-    let wechat_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
-    connection.set_property(
-        wechat_popup,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_utility],
-    );
-    connection.set_property(
-        wechat_popup,
-        connection.atoms.motif_wm_hints,
-        connection.atoms.motif_wm_hints,
-        &[0x2_u32, 0, 0, 0, 0],
-    );
-    f.map_as_popup(&mut connection, wechat_popup);
-
-    let fcitx5_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
-    connection.set_property(
-        fcitx5_popup,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_combo],
-    );
-    f.map_as_popup(&mut connection, fcitx5_popup);
-
-    let godot_popup = connection.new_window(connection.root, 10, 10, 50, 50, true);
-    connection.set_property(
-        godot_popup,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_utility],
-    );
-    connection.set_property(
-        godot_popup,
-        connection.atoms.motif_wm_hints,
-        connection.atoms.motif_wm_hints,
-        &[0x2_u32, 0, 0, 0, 0],
-    );
-    f.map_as_popup(&mut connection, godot_popup);
-
-    let material_maker_popup = connection.new_window(connection.root, 10, 10, 50, 50, false);
-    connection.set_property(
-        material_maker_popup,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_utility],
-    );
-    connection.set_property(
-        material_maker_popup,
-        connection.atoms.motif_wm_hints,
-        connection.atoms.motif_wm_hints,
-        &[0x2_u32, 0, 0, 0, 0],
-    );
-    f.map_as_popup(&mut connection, material_maker_popup);
-
-    let ardour_toplevel = connection.new_window(connection.root, 10, 10, 50, 50, false);
-    connection.set_property(
-        ardour_toplevel,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_utility],
-    );
-    f.map_as_toplevel(&mut connection, ardour_toplevel);
-
-    let yabridge_popup = connection.new_window(connection.root, 10, 10, 50, 50, false);
-    connection.set_property(
-        yabridge_popup,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_normal],
-    );
-    connection.set_property(
-        yabridge_popup,
-        connection.atoms.motif_wm_hints,
-        connection.atoms.motif_wm_hints,
-        &[0x2_u32, 0, 0, 0, 0],
-    );
-    connection.set_property(
-        yabridge_popup,
-        connection.atoms.wm_hints,
-        connection.atoms.wm_hints,
-        &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
-    );
-    connection.set_property(
-        yabridge_popup,
-        x::ATOM_ATOM,
-        connection.atoms.net_wm_state,
-        &[connection.atoms.skip_taskbar],
-    );
-    f.map_as_popup(&mut connection, yabridge_popup);
-
-    let steam = connection.new_window(connection.root, 10, 10, 50, 50, false);
-    connection.set_property(
-        steam,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_normal],
-    );
-    connection.set_property(
-        steam,
-        connection.atoms.motif_wm_hints,
-        connection.atoms.motif_wm_hints,
-        &[0x2_u32, 0, 0, 0, 0],
-    );
-    connection.set_property(
-        steam,
-        connection.atoms.wm_hints,
-        connection.atoms.wm_hints,
-        &[0x1_u32, 1, 0, 0, 0, 0, 0, 0, 0],
-    );
-    f.map_as_toplevel(&mut connection, steam);
-
-    let battle_net = connection.new_window(connection.root, 10, 10, 50, 50, false);
-    connection.set_property(
-        battle_net,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_normal],
-    );
-    connection.set_property(
-        battle_net,
-        connection.atoms.motif_wm_hints,
-        connection.atoms.motif_wm_hints,
-        &[0x3_u32, 0x2c, 0x0, 0x0, 0x0],
-    );
-    connection.set_property(
-        battle_net,
-        connection.atoms.wm_hints,
-        connection.atoms.wm_hints,
-        &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
-    );
-    f.map_as_toplevel(&mut connection, battle_net);
-
-    let wallpaper_engine = connection.new_window(connection.root, 10, 10, 50, 50, false);
-    connection.set_property(
-        wallpaper_engine,
-        x::ATOM_ATOM,
-        connection.atoms.win_type,
-        &[connection.atoms.win_type_normal],
-    );
-    connection.set_property(
-        wallpaper_engine,
-        connection.atoms.motif_wm_hints,
-        connection.atoms.motif_wm_hints,
-        &[0x3_u32, 0x6, 0x0, 0x0, 0x0],
-    );
-    connection.set_property(
-        wallpaper_engine,
-        connection.atoms.wm_hints,
-        connection.atoms.wm_hints,
-        &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
-    );
-    f.map_as_toplevel(&mut connection, wallpaper_engine);
 }
 
 #[test]

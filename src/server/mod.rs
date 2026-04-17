@@ -7,7 +7,9 @@ pub(crate) mod selection;
 mod tests;
 
 use self::event::*;
-use crate::xstate::{Decorations, MoveResizeDirection, WindowDims, WmHints, WmName, WmNormalHints};
+use crate::xstate::{
+    Decorations, MoveResizeDirection, WindowDims, WindowRole, WmHints, WmName, WmNormalHints,
+};
 use crate::{X11Selection, XConnection, timespec_from_millis};
 use clientside::MyWorld;
 use decoration::{DecorationsData, DecorationsDataSatellite};
@@ -99,7 +101,7 @@ where
 
 #[derive(Default, Debug)]
 struct WindowAttributes {
-    is_popup: bool,
+    role: WindowRole,
     dims: WindowDims,
     size_hints: Option<WmNormalHints>,
     title: Option<WmName>,
@@ -128,7 +130,7 @@ impl WindowData {
         Self {
             mapped: false,
             attrs: WindowAttributes {
-                is_popup: override_redirect,
+                role: WindowRole::new_basic(override_redirect),
                 dims,
                 ..Default::default()
             },
@@ -867,17 +869,13 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         self.windows.insert(window, id);
     }
 
-    pub fn set_popup(&mut self, window: x::Window, is_popup: bool) {
+    pub fn set_window_role(&mut self, window: x::Window, role: WindowRole) {
         let Some(id) = self.windows.get(&window).copied() else {
             debug!("not setting popup for unknown window {window:?}");
             return;
         };
 
-        self.world
-            .get::<&mut WindowData>(id)
-            .unwrap()
-            .attrs
-            .is_popup = is_popup;
+        self.world.get::<&mut WindowData>(id).unwrap().attrs.role = role;
     }
 
     pub fn set_win_title(&mut self, window: x::Window, name: WmName) {
@@ -1038,7 +1036,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return true;
         };
 
-        !win.mapped || win.attrs.is_popup
+        !win.mapped || win.attrs.role.is_popup()
     }
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
@@ -1061,7 +1059,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         };
         if dims == win.attrs.dims {
             return;
-        } else if win.attrs.is_popup {
+        } else if win.attrs.role.is_popup() {
             win.attrs.dims = dims;
         }
 
@@ -1357,6 +1355,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         let xdg_surface;
         let mut popup_for = None;
         let mut fullscreen = false;
+        let splash;
 
         {
             let data = self.world.entity(entity).unwrap();
@@ -1367,9 +1366,10 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             xdg_surface = self.xdg_wm_base.get_xdg_surface(&surface, &self.qh, entity);
 
             let window_data = data.get::<&WindowData>().unwrap();
-            if window_data.attrs.is_popup {
+            if window_data.attrs.role.is_popup() {
                 popup_for = self.last_hovered.or(self.last_focused_toplevel);
             }
+            splash = window_data.attrs.role == WindowRole::Splash;
 
             let (width, height) = (window_data.attrs.dims.width, window_data.attrs.dims.height);
             for (_, dimensions) in self.world.query::<&OutputDimensions>().iter() {
@@ -1385,7 +1385,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             let data = self.create_popup(entity, xdg_surface, parent);
             (SurfaceRole::Popup(Some(data)), false)
         } else {
-            let data = self.create_toplevel(entity, xdg_surface, fullscreen);
+            let data = self.create_toplevel(entity, xdg_surface, fullscreen, splash);
             (SurfaceRole::Toplevel(Some(data)), true)
         };
 
@@ -1414,6 +1414,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         entity: Entity,
         xdg: XdgSurface,
         fullscreen: bool,
+        splash: bool,
     ) -> ToplevelData {
         let window = self.world.get::<&WindowData>(entity).unwrap();
         debug!(
@@ -1429,6 +1430,15 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             if let Some(max) = &hints.max_size {
                 toplevel.set_max_size(max.width, max.height);
             }
+        }
+        // Application splash windows are usually startup displays, so reporting their dimensions
+        // as fixed has no downside. The upside is tiling Wayland compositors use fixed size as a
+        // heurisitc to display those windows on a seperate floating level.
+        // https://yalter.github.io/niri/Floating-Windows.html
+        if splash {
+            let dims = window.attrs.dims;
+            toplevel.set_min_size(dims.width.into(), dims.height.into());
+            toplevel.set_max_size(dims.width.into(), dims.height.into());
         }
 
         let group = window.attrs.group.and_then(|win| {

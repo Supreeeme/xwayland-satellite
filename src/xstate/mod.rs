@@ -2,7 +2,8 @@ mod settings;
 use settings::Settings;
 mod selection;
 use selection::{Selection, SelectionState};
-use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
+#[cfg(test)]
+mod tests;
 
 use crate::XConnection;
 use bitflags::bitflags;
@@ -11,6 +12,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::fd::BorrowedFd;
 use std::rc::Rc;
+use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
 use xcb::{Xid, XidNew, x};
 use xcb_util_cursor::{Cursor, CursorContext};
 
@@ -63,35 +65,24 @@ macro_rules! unwrap_or_skip_bad_window_ret {
     };
 }
 
-/// Essentially a trait alias.
-trait PropertyResolver {
-    type Output;
-    fn resolve(self, reply: x::GetPropertyReply) -> Self::Output;
-}
-impl<T, Output> PropertyResolver for T
-where
-    T: FnOnce(x::GetPropertyReply) -> Output,
-{
-    type Output = Output;
-    fn resolve(self, reply: x::GetPropertyReply) -> Self::Output {
-        (self)(reply)
-    }
-}
-
-struct PropertyCookieWrapper<'a, F: PropertyResolver> {
+struct PropertyCookieWrapper<'a> {
     connection: &'a xcb::Connection,
     cookie: x::GetPropertyCookie,
-    resolver: F,
 }
-
-impl<F: PropertyResolver> PropertyCookieWrapper<'_, F> {
+impl PropertyCookieWrapper<'_> {
+    fn new(
+        connection: &'_ xcb::Connection,
+        cookie: x::GetPropertyCookie,
+    ) -> PropertyCookieWrapper<'_> {
+        PropertyCookieWrapper { connection, cookie }
+    }
     /// Get the result from our property cookie.
-    fn resolve(self) -> XResult<Option<F::Output>> {
+    fn resolve<F>(self, f: impl FnOnce(x::GetPropertyReply) -> F) -> XResult<Option<F>> {
         let reply = self.connection.wait_for_reply(self.cookie)?;
         if reply.r#type() == x::ATOM_NONE {
             Ok(None)
         } else {
-            Ok(Some(self.resolver.resolve(reply)))
+            Ok(Some(f(reply)))
         }
     }
 }
@@ -631,176 +622,63 @@ impl XState {
         server_state: &mut super::RealServerState,
         window: x::Window,
     ) -> XResult<()> {
-        let name = self.get_net_wm_name(window);
-        let class = self.get_wm_class(window);
-        let size_hints = self.get_wm_size_hints(window);
-        let motif_wm_hints = self.get_motif_wm_hints(window);
-        let wm_hints = self.get_wm_hints(window);
-        let mut title = name.resolve()?;
+        let mut title = self.get_net_wm_name(window)?;
         if title.is_none() {
-            title = self.get_wm_name(window).resolve()?;
+            title = self.get_wm_name(window)?;
         }
-
         if let Some(name) = title {
             server_state.set_win_title(window, name);
         }
-        if let Some(class) = class.resolve()? {
+
+        if let Some(class) = self.get_wm_class(window)? {
             server_state.set_win_class(window, class);
         }
-        if let Some(hints) = size_hints.resolve()? {
+
+        let size_hints = self.get_wm_size_hints(window)?;
+        if let Some(hints) = size_hints {
             server_state.set_size_hints(window, hints);
         }
-        let wmhints = wm_hints.resolve()?;
-        let motif_hints = motif_wm_hints.resolve()?;
-        if let Some(decorations) = motif_hints.as_ref().and_then(|m| m.decorations) {
+
+        let motif_wm_hints = self.get_motif_wm_hints(window)?;
+        if let Some(decorations) = motif_wm_hints.as_ref().and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
         }
 
-        let transient_for = self
-            .property_cookie_wrapper(
-                window,
-                self.atoms.wm_transient_for,
-                x::ATOM_WINDOW,
-                1,
-                |reply: x::GetPropertyReply| reply.value::<x::Window>().first().copied(),
-            )
-            .resolve()?
-            .flatten();
+        let wm_hints = self.get_wm_hints(window)?;
 
-        let is_popup =
-            self.guess_is_popup(window, motif_hints, wmhints, transient_for.is_some())?;
-        server_state.set_popup(window, is_popup);
-        if let Some(parent) = transient_for.and_then(|t| (!is_popup).then_some(t)) {
+        let transient_for = self.get_transient_for(window)?;
+        let override_redirect = self.get_override_redirect(window)?;
+
+        let window_types = self
+            .get_net_wm_window_types(window)?
+            .unwrap_or_else(Vec::new);
+        let skip_taskbar = self
+            .get_net_wm_state(window)?
+            .map(|a| a.contains(&self.atoms.skip_taskbar));
+
+        let heuristics = WindowRoleHeuristics {
+            override_redirect,
+            has_transient_for: transient_for.is_some(),
+            window_types,
+            motif_wm_hints,
+            wm_hints,
+            wm_normal_hints: size_hints,
+            skip_taskbar,
+        };
+        let role = heuristics.guess_window_role(&self.window_atoms);
+        if log::log_enabled!(target: "window_role_heuristics", log::Level::Debug) {
+            debug!(
+                target: "window_role_heuristics",
+                "{window:?} set to {role:?} - properties: {}",
+                heuristics.log(&self.connection)
+            );
+        }
+        server_state.set_window_role(window, role);
+        if let Some(parent) = transient_for.and_then(|t| (!role.is_popup()).then_some(t)) {
             server_state.set_transient_for(window, parent);
         }
 
         Ok(())
-    }
-
-    fn property_cookie_wrapper<F: PropertyResolver>(
-        &self,
-        window: x::Window,
-        property: x::Atom,
-        ty: x::Atom,
-        len: u32,
-        resolver: F,
-    ) -> PropertyCookieWrapper<'_, F> {
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie: self.get_property_cookie(window, property, ty, len),
-            resolver,
-        }
-    }
-
-    fn guess_is_popup(
-        &self,
-        window: x::Window,
-        motif_hints: Option<motif::Hints>,
-        wm_hints: Option<WmHints>,
-        has_transient_for: bool,
-    ) -> XResult<bool> {
-        let mut motif_popup = false;
-        let mut wmhint_popup = false;
-        let mut has_skip_taskbar = None;
-
-        let attrs = self
-            .connection
-            .send_request(&x::GetWindowAttributes { window });
-
-        let atoms_vec = |reply: x::GetPropertyReply| reply.value::<x::Atom>().to_vec();
-        let window_types =
-            self.property_cookie_wrapper(window, self.window_atoms.ty, x::ATOM_ATOM, 10, atoms_vec);
-        let window_state = self.property_cookie_wrapper(
-            window,
-            self.atoms.net_wm_state,
-            x::ATOM_ATOM,
-            10,
-            atoms_vec,
-        );
-
-        if let Some(states) = window_state.resolve()? {
-            has_skip_taskbar = Some(states.contains(&self.atoms.skip_taskbar));
-        }
-        if let Some(hints) = motif_hints {
-            // If MOTIF_WM_HINTS provides no decorations for client assume its a popup
-            motif_popup = hints.decorations.is_some_and(|d| d.is_clientside());
-            // WMHINTS is considered popup only if client is not decorated && client does not
-            // accept input focus
-            // Sometimes popup is false-positive meaning both MOTIF Decorations and WM_HINTS input indicates its a popup
-            // but MOTIF has function flags that toplevel window should do
-            wmhint_popup = motif_popup
-                && wm_hints.is_some_and(|h| !h.acquire_input_via_wm)
-                && !hints.functions.as_ref().is_some_and(|f| {
-                    f.intersects(
-                        motif::Functions::Minimize
-                            | motif::Functions::Maximize
-                            | motif::Functions::Resize
-                            | motif::Functions::All,
-                    )
-                });
-            // If the motif hints indicate the user shouldn't be able to do anything
-            // to the window at all, it stands to reason it's probably a popup.
-            if hints.functions.is_some_and(|f| f.is_empty()) {
-                return Ok(true);
-            }
-        }
-
-        let override_redirect = self.connection.wait_for_reply(attrs)?.override_redirect();
-        let mut is_popup = override_redirect;
-
-        let window_types = window_types.resolve()?.unwrap_or_else(|| {
-            if !override_redirect && has_transient_for {
-                vec![self.window_atoms.dialog]
-            } else {
-                vec![self.window_atoms.normal]
-            }
-        });
-
-        if log::log_enabled!(log::Level::Debug) {
-            let win_types = window_types
-                .iter()
-                .copied()
-                .map(|t| get_atom_name(&self.connection, t))
-                .collect::<Vec<_>>();
-
-            debug!("{window:?} window_types: {win_types:?}");
-        }
-        debug!("{window:?} override_redirect: {override_redirect:?}");
-
-        let mut known_window_type = false;
-        for ty in window_types {
-            match ty {
-                x if x == self.window_atoms.normal => is_popup = override_redirect || wmhint_popup,
-                x if x == self.window_atoms.dialog => is_popup = override_redirect,
-                x if x == self.window_atoms.utility => is_popup = override_redirect || motif_popup,
-                x if [
-                    self.window_atoms.menu,
-                    self.window_atoms.popup_menu,
-                    self.window_atoms.dropdown_menu,
-                    self.window_atoms.tooltip,
-                    self.window_atoms.drag_n_drop,
-                    self.window_atoms.combo,
-                ]
-                .contains(&x) =>
-                {
-                    is_popup = true;
-                }
-                _ => {
-                    continue;
-                }
-            }
-
-            known_window_type = true;
-            break;
-        }
-
-        if !known_window_type {
-            if let Some(has_skip_taskbar) = has_skip_taskbar {
-                is_popup = has_skip_taskbar || override_redirect;
-            }
-        }
-
-        Ok(is_popup)
     }
 
     fn get_property_cookie(
@@ -820,10 +698,7 @@ impl XState {
         })
     }
 
-    fn get_wm_class(
-        &self,
-        window: x::Window,
-    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = String>> {
+    fn get_wm_class(&self, window: x::Window) -> XResult<Option<String>> {
         let cookie = self.get_property_cookie(window, x::ATOM_WM_CLASS, x::ATOM_STRING, 256);
         let resolver = move |reply: x::GetPropertyReply| {
             let data: &[u8] = reply.value();
@@ -842,17 +717,10 @@ impl XState {
             trace!("{window:?} class: {class:?}");
             class.to_string_lossy().to_string()
         };
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie,
-            resolver,
-        }
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
-    fn get_wm_name(
-        &self,
-        window: x::Window,
-    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = WmName>> {
+    fn get_wm_name(&self, window: x::Window) -> XResult<Option<WmName>> {
         let cookie = self.get_property_cookie(window, x::ATOM_WM_NAME, x::ATOM_STRING, 256);
         let resolver = |reply: x::GetPropertyReply| {
             let data: &[u8] = reply.value();
@@ -863,17 +731,10 @@ impl XState {
             WmName::WmName(name)
         };
 
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie,
-            resolver,
-        }
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
-    fn get_net_wm_name(
-        &self,
-        window: x::Window,
-    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = WmName>> {
+    fn get_net_wm_name(&self, window: x::Window) -> XResult<Option<WmName>> {
         let cookie =
             self.get_property_cookie(window, self.atoms.net_wm_name, self.atoms.utf8_string, 256);
         let resolver = |reply: x::GetPropertyReply| {
@@ -883,17 +744,10 @@ impl XState {
             WmName::NetWmName(name)
         };
 
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie,
-            resolver,
-        }
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
-    fn get_wm_hints(
-        &self,
-        window: x::Window,
-    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = WmHints>> {
+    fn get_wm_hints(&self, window: x::Window) -> XResult<Option<WmHints>> {
         let cookie = self.get_property_cookie(window, x::ATOM_WM_HINTS, x::ATOM_WM_HINTS, 9);
         let resolver = |reply: x::GetPropertyReply| {
             let data: &[u32] = reply.value();
@@ -901,17 +755,10 @@ impl XState {
             trace!("wm hints: {hints:?}");
             hints
         };
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie,
-            resolver,
-        }
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
-    fn get_wm_size_hints(
-        &self,
-        window: x::Window,
-    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = WmNormalHints>> {
+    fn get_wm_size_hints(&self, window: x::Window) -> XResult<Option<WmNormalHints>> {
         let cookie =
             self.get_property_cookie(window, x::ATOM_WM_NORMAL_HINTS, x::ATOM_WM_SIZE_HINTS, 9);
         let resolver = |reply: x::GetPropertyReply| {
@@ -919,17 +766,10 @@ impl XState {
             WmNormalHints::from(data)
         };
 
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie,
-            resolver,
-        }
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
-    fn get_motif_wm_hints(
-        &self,
-        window: x::Window,
-    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = motif::Hints>> {
+    fn get_motif_wm_hints(&self, window: x::Window) -> XResult<Option<motif::Hints>> {
         let cookie = self.get_property_cookie(
             window,
             self.atoms.motif_wm_hints,
@@ -941,11 +781,38 @@ impl XState {
             motif::Hints::from(data)
         };
 
-        PropertyCookieWrapper {
-            connection: &self.connection,
-            cookie,
-            resolver,
-        }
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
+    }
+
+    fn get_transient_for(&self, window: x::Window) -> XResult<Option<x::Window>> {
+        let cookie =
+            self.get_property_cookie(window, self.atoms.wm_transient_for, x::ATOM_WINDOW, 1);
+        let resolver = |reply: x::GetPropertyReply| reply.value::<x::Window>().first().copied();
+        PropertyCookieWrapper::new(&self.connection, cookie)
+            .resolve(resolver)
+            .map(Option::flatten)
+    }
+
+    fn get_net_wm_window_types(&self, window: x::Window) -> XResult<Option<Vec<x::Atom>>> {
+        let cookie = self.get_property_cookie(window, self.window_atoms.ty, x::ATOM_ATOM, 10);
+        let resolver = |reply: x::GetPropertyReply| reply.value::<x::Atom>().to_vec();
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
+    }
+
+    fn get_net_wm_state(&self, window: x::Window) -> XResult<Option<Vec<x::Atom>>> {
+        let cookie = self.get_property_cookie(window, self.atoms.net_wm_state, x::ATOM_ATOM, 10);
+        let resolver = |reply: x::GetPropertyReply| reply.value::<x::Atom>().to_vec();
+        PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
+    }
+
+    fn get_override_redirect(&self, window: x::Window) -> XResult<bool> {
+        self.connection
+            .wait_for_reply(
+                self.connection
+                    .send_request(&x::GetWindowAttributes { window }),
+            )
+            .map(|w| w.override_redirect())
+            .map_err(MaybeBadWindow::from)
     }
 
     fn get_pid(&self, window: x::Window) -> Option<u32> {
@@ -986,35 +853,28 @@ impl XState {
 
         match event.atom() {
             x if x == x::ATOM_WM_HINTS => {
-                let hints =
-                    unwrap_or_skip_bad_window_ret!(self.get_wm_hints(window).resolve()).unwrap();
+                let hints = unwrap_or_skip_bad_window_ret!(self.get_wm_hints(window)).unwrap();
                 server_state.set_win_hints(window, hints);
             }
             x if x == x::ATOM_WM_NORMAL_HINTS => {
-                let hints =
-                    unwrap_or_skip_bad_window_ret!(self.get_wm_size_hints(window).resolve())
-                        .unwrap();
+                let hints = unwrap_or_skip_bad_window_ret!(self.get_wm_size_hints(window)).unwrap();
                 server_state.set_size_hints(window, hints);
             }
             x if x == x::ATOM_WM_NAME => {
-                let name =
-                    unwrap_or_skip_bad_window_ret!(self.get_wm_name(window).resolve()).unwrap();
+                let name = unwrap_or_skip_bad_window_ret!(self.get_wm_name(window)).unwrap();
                 server_state.set_win_title(window, name);
             }
             x if x == self.atoms.net_wm_name => {
-                let name =
-                    unwrap_or_skip_bad_window_ret!(self.get_net_wm_name(window).resolve()).unwrap();
+                let name = unwrap_or_skip_bad_window_ret!(self.get_net_wm_name(window)).unwrap();
                 server_state.set_win_title(window, name);
             }
             x if x == x::ATOM_WM_CLASS => {
-                let class =
-                    unwrap_or_skip_bad_window_ret!(self.get_wm_class(window).resolve()).unwrap();
+                let class = unwrap_or_skip_bad_window_ret!(self.get_wm_class(window)).unwrap();
                 server_state.set_win_class(window, class);
             }
             x if x == self.atoms.motif_wm_hints => {
                 let motif_hints =
-                    unwrap_or_skip_bad_window_ret!(self.get_motif_wm_hints(window).resolve())
-                        .unwrap();
+                    unwrap_or_skip_bad_window_ret!(self.get_motif_wm_hints(window)).unwrap();
                 if let Some(decorations) = motif_hints.decorations {
                     server_state.set_win_decorations(window, decorations);
                 }
@@ -1097,8 +957,16 @@ bitflags! {
     /// From ICCCM spec.
     /// https://tronche.com/gui/x/icccm/sec-4.html#s-4.1.2.3
     pub struct WmSizeHintsFlags: u32 {
+        const UserPosition = 1;
+        const ProgramPosition = 2;
+        const UserSize = 4;
+        const ProgramSize = 8;
         const ProgramMinSize = 16;
         const ProgramMaxSize = 32;
+        const ResizeIncrement = 64;
+        const AspectRatios = 128;
+        const BaseSize = 256;
+        const Gravity = 512;
     }
 }
 
@@ -1106,7 +974,14 @@ bitflags! {
     /// https://tronche.com/gui/x/icccm/sec-4.html#s-4.1.2.4
     pub struct WmHintsFlags: u32 {
         const Input = 1;
+        const State = 2;
+        const IconPixmap = 4;
+        const IconWindow = 8;
+        const IconPosition = 16;
+        const IconMask = 32;
         const WindowGroup = 64;
+        const Message = 128;
+        const Urgency = 256;
     }
 }
 
@@ -1184,6 +1059,7 @@ mod motif {
     }
 
     bitflags! {
+        #[derive(Debug, PartialEq, Eq, Clone, Copy)]
         pub(super) struct Functions: u32 {
             const All = 1;
             const Resize = 2;
@@ -1207,7 +1083,7 @@ mod motif {
         }
     }
 
-    #[derive(Default)]
+    #[derive(Default, Debug, PartialEq, Eq, Clone, Copy)]
     pub(super) struct Hints {
         pub(super) functions: Option<Functions>,
         pub(super) decorations: Option<Decorations>,
@@ -1247,6 +1123,131 @@ mod motif {
                 zxdg_toplevel_decoration_v1::Mode::ServerSide
             }
         }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum WindowRole {
+    #[default]
+    Toplevel,
+    Popup,
+    /// A special type of toplevel which is constrained to a fixed size
+    /// Commonly the window which displays while the main application is starting up
+    Splash,
+}
+impl WindowRole {
+    /// Define a toplevel or popup with no special properties
+    pub fn new_basic(popup: bool) -> Self {
+        if popup { Self::Popup } else { Self::Toplevel }
+    }
+    pub fn is_popup(&self) -> bool {
+        *self == Self::Popup
+    }
+}
+
+#[derive(Default)]
+struct WindowRoleHeuristics {
+    override_redirect: bool,
+    has_transient_for: bool,
+    window_types: Vec<x::Atom>,
+    motif_wm_hints: Option<motif::Hints>,
+    wm_hints: Option<WmHints>,
+    wm_normal_hints: Option<WmNormalHints>,
+    skip_taskbar: Option<bool>,
+}
+impl WindowRoleHeuristics {
+    fn guess_window_role(&self, window_atoms: &WindowTypes) -> WindowRole {
+        if self.override_redirect {
+            return WindowRole::Popup;
+        }
+
+        let mut motif_no_decor = false;
+        let mut wmhint_popup = false;
+        if let Some(hints) = self.motif_wm_hints {
+            motif_no_decor = hints.decorations.is_some_and(|d| d.is_clientside());
+            // WMHINTS is considered popup only if client is not decorated && client does not
+            // accept input focus
+            // Sometimes popup is false-positive meaning both MOTIF Decorations and WM_HINTS input indicates its a popup
+            // but MOTIF has function flags that toplevel window should do
+            wmhint_popup = motif_no_decor
+                && self
+                    .wm_hints
+                    .as_ref()
+                    .is_some_and(|h| !h.acquire_input_via_wm)
+                && !hints.functions.as_ref().is_some_and(|f| {
+                    f.intersects(
+                        motif::Functions::Minimize
+                            | motif::Functions::Maximize
+                            | motif::Functions::Resize
+                            | motif::Functions::All,
+                    )
+                });
+            // If the motif hints indicate the user shouldn't be able to do anything
+            // to the window at all, it stands to reason it's probably a popup.
+            if hints.functions.is_some_and(|f| f.is_empty()) {
+                return WindowRole::Popup;
+            }
+        }
+        let forced_size = self.wm_normal_hints.is_some_and(|h| {
+            h.min_size
+                .zip(h.max_size)
+                .is_some_and(|(min, max)| min == max)
+        });
+
+        let mut window_types = self.window_types.clone();
+        if self.window_types.is_empty() {
+            if !self.override_redirect && self.has_transient_for {
+                window_types = vec![window_atoms.dialog];
+            } else {
+                window_types = vec![window_atoms.normal];
+            }
+        }
+
+        for ty in window_types {
+            match ty {
+                x if x == window_atoms.normal => return WindowRole::new_basic(wmhint_popup),
+                x if x == window_atoms.dialog => {
+                    return WindowRole::new_basic(self.has_transient_for && motif_no_decor);
+                }
+                x if x == window_atoms.utility => {
+                    return WindowRole::new_basic(motif_no_decor && forced_size);
+                }
+                x if x == window_atoms.splash => return WindowRole::Splash,
+                x if [
+                    window_atoms.menu,
+                    window_atoms.popup_menu,
+                    window_atoms.dropdown_menu,
+                    window_atoms.tooltip,
+                    window_atoms.drag_n_drop,
+                    window_atoms.combo,
+                ]
+                .contains(&x) =>
+                {
+                    return WindowRole::Popup;
+                }
+                _ => {}
+            };
+        }
+
+        // A last resort for windows with an unrecognized _NET_WM_WINDOW_TYPE
+        WindowRole::new_basic(self.skip_taskbar.is_some_and(|x| x))
+    }
+
+    fn log(&self, connection: &xcb::Connection) -> String {
+        format!(
+            "override_redirect: {}, has_transient_for: {}, window_types: {:?}, \
+            motif_wm_hints: {:?}, wm_hints: {:?}, wm_normal_hints: {:?}, skip_taskbar: {:?}",
+            self.override_redirect,
+            self.has_transient_for,
+            self.window_types
+                .iter()
+                .map(|t| get_atom_name(connection, *t))
+                .collect::<Vec<_>>(),
+            self.motif_wm_hints,
+            self.wm_hints,
+            self.wm_normal_hints,
+            self.skip_taskbar
+        )
     }
 }
 
