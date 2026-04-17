@@ -453,8 +453,8 @@ mod wrh {
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/pull/328
-    // Utilizing the WM_HINTS input focus set to false, along with no decoration in MOTIF hints to
-    // avoid false positives (because of Pixel Composer, skip_taskbar is not one of those hints)
+    // WM_HINTS input focus set to false, along with no decoration in MOTIF hints, is currently a
+    // popup heuristic. This heuristic is arguably not good, see below.
     #[test]
     fn yabridge_vst_menu() {
         let win_types = WindowTypes::new();
@@ -479,7 +479,13 @@ mod wrh {
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
+    // https://github.com/Supreeeme/xwayland-satellite/issues/392
+    // A wide range of Wine Steam projects look similar to Yabridge menus but, unlike those, should
+    // not be pop-ups. This early example was originally distinguished by not having skip_taskbar,
+    // although Yabridge in certain Wine versions did not set this either, see
+    // https://github.com/Supreeeme/xwayland-satellite/pull/355
     #[test]
+    #[ignore = "regression by #355"]
     fn steam_pixel_composer() {
         let win_types = WindowTypes::new();
         let wm_hints = WmHints::new()
@@ -500,7 +506,7 @@ mod wrh {
             wm_normal_hints: Some(wm_normal_hints.into()),
             ..Default::default()
         };
-        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
     }
     #[test]
     fn battlenet_login() {
