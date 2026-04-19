@@ -51,6 +51,9 @@ use wayland_server::protocol::{
 #[derive(Copy, Clone)]
 pub(super) struct SurfaceScaleFactor(pub f64);
 
+#[derive(Copy, Clone)]
+pub(super) struct PointerEntity(pub Entity);
+
 #[derive(hecs::Bundle)]
 pub(super) struct SurfaceBundle {
     pub client: client::wl_surface::WlSurface,
@@ -1436,13 +1439,17 @@ impl Event for c_dmabuf::zwp_linux_dmabuf_feedback_v1::Event {
 impl Event for zwp_relative_pointer_v1::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
         let server = state.world.get::<&RelativePointerServer>(target).unwrap();
+        let pointer_entity = state.world.get::<&PointerEntity>(target).unwrap().0;
+        let scale = state.world.get::<&SurfaceScaleFactor>(pointer_entity)
+            .map(|s| s.0).unwrap_or(1.0);
+
         simple_event_shunt! {
             server, self => [
                 RelativeMotion {
                     utime_hi,
                     utime_lo,
-                    dx,
-                    dy,
+                    |dx| dx * scale,
+                    |dy| dy * scale,
                     dx_unaccel,
                     dy_unaccel
                 }
