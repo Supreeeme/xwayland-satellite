@@ -358,11 +358,42 @@ xcb::atoms_struct! {
 
 struct Settings {
     serial: u32,
-    data: HashMap<String, Setting>,
+    int_settings: HashMap<String, IntSetting>,
+    string_settings: HashMap<String, StringSetting>,
 }
-struct Setting {
+
+struct IntSetting {
     value: i32,
     last_change: u32,
+}
+
+struct StringSetting {
+    value: String,
+    last_change: u32,
+}
+
+struct EnvVarGuard {
+    name: String,
+    old_value: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(name: impl Into<String>, value: &str) -> Self {
+        let name = name.into();
+        let old_value = std::env::var(&name).ok();
+        unsafe { std::env::set_var(&name, value) };
+        Self { name, old_value }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(old_value) = self.old_value.take() {
+            unsafe { std::env::set_var(&self.name, old_value) };
+        } else {
+            unsafe { std::env::remove_var(&self.name) };
+        }
+    }
 }
 
 struct Connection {
@@ -648,9 +679,11 @@ impl Connection {
         let num_settings = u32::from_le_bytes(data[8..12].try_into().unwrap());
 
         let mut current_idx = 12;
-        let mut settings = HashMap::new();
+        let mut int_settings = HashMap::new();
+        let mut string_settings = HashMap::new();
         for _ in 0..num_settings {
-            assert_eq!(&data[current_idx..current_idx + 2], &[0, 0]);
+            let setting_type = data[current_idx];
+            assert_eq!(data[current_idx + 1], 0);
             let name_len =
                 u16::from_le_bytes(data[current_idx + 2..current_idx + 4].try_into().unwrap());
 
@@ -660,16 +693,30 @@ impl Connection {
             let data_start = padding_start + num_padding_bytes;
             let last_change =
                 u32::from_le_bytes(data[data_start..data_start + 4].try_into().unwrap());
-            let value =
-                i32::from_le_bytes(data[data_start + 4..data_start + 8].try_into().unwrap());
-
-            settings.insert(name, Setting { value, last_change });
-            current_idx = data_start + 8;
+            let value_or_len =
+                u32::from_le_bytes(data[data_start + 4..data_start + 8].try_into().unwrap());
+            current_idx = match setting_type {
+                0 => {
+                    let value = value_or_len as i32;
+                    int_settings.insert(name, IntSetting { value, last_change });
+                    data_start + 8
+                }
+                1 => {
+                    let start = data_start + 8;
+                    let end = start + value_or_len as usize;
+                    let value = String::from_utf8(data[start..end].to_vec()).unwrap();
+                    string_settings.insert(name, StringSetting { value, last_change });
+                    let padding = (4 - (value_or_len % 4)) % 4;
+                    end + padding as usize
+                }
+                other => panic!("Unexpected setting type: {other}"),
+            };
         }
 
         Settings {
             serial,
-            data: settings,
+            int_settings,
+            string_settings,
         }
     }
 }
@@ -2206,12 +2253,12 @@ fn xsettings_scale() {
 
     let settings = connection.get_xsettings();
     let settings_serial = settings.serial;
-    assert_eq!(settings.data["Xft/DPI"].value, 96 * 1024);
-    let dpi_serial = settings.data["Xft/DPI"].last_change;
-    assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 1);
-    let window_serial = settings.data["Gdk/WindowScalingFactor"].last_change;
-    assert_eq!(settings.data["Gdk/UnscaledDPI"].value, 96 * 1024);
-    let unscaled_serial = settings.data["Gdk/UnscaledDPI"].last_change;
+    assert_eq!(settings.int_settings["Xft/DPI"].value, 96 * 1024);
+    let dpi_serial = settings.int_settings["Xft/DPI"].last_change;
+    assert_eq!(settings.int_settings["Gdk/WindowScalingFactor"].value, 1);
+    let window_serial = settings.int_settings["Gdk/WindowScalingFactor"].last_change;
+    assert_eq!(settings.int_settings["Gdk/UnscaledDPI"].value, 96 * 1024);
+    let unscaled_serial = settings.int_settings["Gdk/UnscaledDPI"].last_change;
 
     let output = f.testwl.get_output("WL-1").unwrap();
     output.scale(2);
@@ -2220,18 +2267,18 @@ fn xsettings_scale() {
 
     let settings = connection.get_xsettings();
     assert!(settings.serial > settings_serial);
-    assert_eq!(settings.data["Xft/DPI"].value, 2 * 96 * 1024);
-    assert!(settings.data["Xft/DPI"].last_change > dpi_serial);
-    assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 2);
-    assert!(settings.data["Gdk/WindowScalingFactor"].last_change > window_serial);
-    assert_eq!(settings.data["Gdk/UnscaledDPI"].value, 96 * 1024);
-    assert!(settings.data["Gdk/UnscaledDPI"].last_change > unscaled_serial);
+    assert_eq!(settings.int_settings["Xft/DPI"].value, 2 * 96 * 1024);
+    assert!(settings.int_settings["Xft/DPI"].last_change > dpi_serial);
+    assert_eq!(settings.int_settings["Gdk/WindowScalingFactor"].value, 2);
+    assert!(settings.int_settings["Gdk/WindowScalingFactor"].last_change > window_serial);
+    assert_eq!(settings.int_settings["Gdk/UnscaledDPI"].value, 96 * 1024);
+    assert!(settings.int_settings["Gdk/UnscaledDPI"].last_change > unscaled_serial);
 
     let output2 = f.create_output(0, 0);
     let settings = connection.get_xsettings();
-    assert_eq!(settings.data["Xft/DPI"].value, 96 * 1024);
-    assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 1);
-    assert_eq!(settings.data["Gdk/UnscaledDPI"].value, 96 * 1024);
+    assert_eq!(settings.int_settings["Xft/DPI"].value, 96 * 1024);
+    assert_eq!(settings.int_settings["Gdk/WindowScalingFactor"].value, 1);
+    assert_eq!(settings.int_settings["Gdk/UnscaledDPI"].value, 96 * 1024);
 
     output2.scale(2);
     output2.done();
@@ -2239,9 +2286,9 @@ fn xsettings_scale() {
     std::thread::sleep(Duration::from_millis(1));
 
     let settings = connection.get_xsettings();
-    assert_eq!(settings.data["Xft/DPI"].value, 2 * 96 * 1024);
-    assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 2);
-    assert_eq!(settings.data["Gdk/UnscaledDPI"].value, 96 * 1024);
+    assert_eq!(settings.int_settings["Xft/DPI"].value, 2 * 96 * 1024);
+    assert_eq!(settings.int_settings["Gdk/WindowScalingFactor"].value, 2);
+    assert_eq!(settings.int_settings["Gdk/UnscaledDPI"].value, 96 * 1024);
 }
 
 #[test]
@@ -2274,12 +2321,12 @@ fn xsettings_fractional_scale() {
     let settings = connection.get_xsettings();
 
     assert_eq!(
-        settings.data["Xft/DPI"].value,
+        settings.int_settings["Xft/DPI"].value,
         (1.5 * 96_f64 * 1024_f64).round() as i32
     );
-    assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 1);
+    assert_eq!(settings.int_settings["Gdk/WindowScalingFactor"].value, 1);
     assert_eq!(
-        settings.data["Gdk/UnscaledDPI"].value,
+        settings.int_settings["Gdk/UnscaledDPI"].value,
         (1.5 * 96_f64 * 1024_f64).round() as i32
     );
 
@@ -2290,13 +2337,32 @@ fn xsettings_fractional_scale() {
 
     let settings = connection.get_xsettings();
     assert_eq!(
-        settings.data["Xft/DPI"].value,
+        settings.int_settings["Xft/DPI"].value,
         (2.5 * 96_f64 * 1024_f64).round() as i32
     );
-    assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 2);
+    assert_eq!(settings.int_settings["Gdk/WindowScalingFactor"].value, 2);
     assert_eq!(
-        settings.data["Gdk/UnscaledDPI"].value,
+        settings.int_settings["Gdk/UnscaledDPI"].value,
         (2.5 / 2.0 * 96_f64 * 1024_f64).round() as i32
+    );
+}
+
+#[test]
+fn xsettings_cursor_theme_from_env() {
+    let _guard = EnvVarGuard::set("XCURSOR_THEME", "Adwaita");
+    let f = Fixture::new_preset(|testwl| {
+        testwl.new_output(0, 0); // WL-1
+    });
+    let connection = Connection::new(&f.display);
+
+    let settings = connection.get_xsettings();
+    assert_eq!(
+        settings.string_settings["Gtk/CursorThemeName"].value,
+        "Adwaita"
+    );
+    assert_eq!(
+        settings.string_settings["Gtk/CursorThemeName"].last_change,
+        0
     );
 }
 
