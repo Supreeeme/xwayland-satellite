@@ -46,11 +46,13 @@ const DEFAULT_DPI: i32 = 96;
 /// I don't know why, but the DPI related xsettings seem to
 /// divide the DPI by 1024.
 const DPI_SCALE_FACTOR: i32 = 1024;
+const DEFAULT_CURSOR_SIZE: i32 = 24;
 const DEFAULT_CURSOR_THEME: &str = "default";
 
 const XFT_DPI: &str = "Xft/DPI";
 const GDK_WINDOW_SCALE: &str = "Gdk/WindowScalingFactor";
 const GDK_UNSCALED_DPI: &str = "Gdk/UnscaledDPI";
+const GTK_CURSOR_THEME_SIZE: &str = "Gtk/CursorThemeSize";
 const GTK_CURSOR_THEME_NAME: &str = "Gtk/CursorThemeName";
 
 pub(super) struct Settings {
@@ -121,6 +123,13 @@ impl Settings {
                     GDK_UNSCALED_DPI,
                     IntSetting {
                         value: DEFAULT_DPI * DPI_SCALE_FACTOR,
+                        last_change_serial: 0,
+                    },
+                ),
+                (
+                    GTK_CURSOR_THEME_SIZE,
+                    IntSetting {
+                        value: DEFAULT_CURSOR_SIZE,
                         last_change_serial: 0,
                     },
                 ),
@@ -228,6 +237,12 @@ impl Settings {
             .entry(GDK_WINDOW_SCALE)
             .insert_entry(IntSetting {
                 value: scale as i32,
+                last_change_serial: self.serial,
+            });
+        self.int_settings
+            .entry(GTK_CURSOR_THEME_SIZE)
+            .insert_entry(IntSetting {
+                value: (DEFAULT_CURSOR_SIZE as f64 * scale) as i32,
                 last_change_serial: self.serial,
             });
     }
