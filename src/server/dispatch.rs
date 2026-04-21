@@ -167,7 +167,7 @@ impl<S: X11Selection> Dispatch<WlSurface, Entity> for InnerServerState<S> {
                 }
             }
             Request::<WlSurface>::SetBufferScale { scale } => {
-                client.set_buffer_scale(scale);
+                client.set_buffer_scale(state.last_configured_scale.map_or(scale, |f| f as i32));
             }
             Request::<WlSurface>::SetInputRegion { region } => {
                 let region = region.as_ref().map(|r| r.data().unwrap());
