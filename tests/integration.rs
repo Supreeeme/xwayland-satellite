@@ -2140,6 +2140,8 @@ fn xsettings_scale() {
     let window_serial = settings.int_settings["Gdk/WindowScalingFactor"].last_change;
     assert_eq!(settings.int_settings["Gdk/UnscaledDPI"].value, 96 * 1024);
     let unscaled_serial = settings.int_settings["Gdk/UnscaledDPI"].last_change;
+    assert_eq!(settings.int_settings["Gtk/CursorThemeSize"].value, 24);
+    let cursor_serial = settings.int_settings["Gtk/CursorThemeSize"].last_change;
 
     let output = f.testwl.get_output("WL-1").unwrap();
     output.scale(2);
@@ -2154,12 +2156,15 @@ fn xsettings_scale() {
     assert!(settings.int_settings["Gdk/WindowScalingFactor"].last_change > window_serial);
     assert_eq!(settings.int_settings["Gdk/UnscaledDPI"].value, 96 * 1024);
     assert!(settings.int_settings["Gdk/UnscaledDPI"].last_change > unscaled_serial);
+    assert_eq!(settings.int_settings["Gtk/CursorThemeSize"].value, 2 * 24);
+    assert!(settings.int_settings["Gtk/CursorThemeSize"].last_change > cursor_serial);
 
     let output2 = f.create_output(0, 0);
     let settings = connection.get_xsettings();
     assert_eq!(settings.int_settings["Xft/DPI"].value, 96 * 1024);
     assert_eq!(settings.int_settings["Gdk/WindowScalingFactor"].value, 1);
     assert_eq!(settings.int_settings["Gdk/UnscaledDPI"].value, 96 * 1024);
+    assert_eq!(settings.int_settings["Gtk/CursorThemeSize"].value, 24);
 
     output2.scale(2);
     output2.done();
@@ -2170,6 +2175,7 @@ fn xsettings_scale() {
     assert_eq!(settings.int_settings["Xft/DPI"].value, 2 * 96 * 1024);
     assert_eq!(settings.int_settings["Gdk/WindowScalingFactor"].value, 2);
     assert_eq!(settings.int_settings["Gdk/UnscaledDPI"].value, 96 * 1024);
+    assert_eq!(settings.int_settings["Gtk/CursorThemeSize"].value, 2 * 24);
 }
 
 #[test]
@@ -2208,6 +2214,10 @@ fn xsettings_fractional_scale() {
         settings.int_settings["Gdk/UnscaledDPI"].value,
         (1.5 * 96_f64 * 1024_f64).round() as i32
     );
+    assert_eq!(
+        settings.int_settings["Gtk/CursorThemeSize"].value,
+        (1.5 * 24_f64).round() as i32
+    );
 
     let data = f.testwl.get_surface_data(surface).unwrap();
     let fractional = data.fractional.as_ref().unwrap();
@@ -2223,6 +2233,10 @@ fn xsettings_fractional_scale() {
     assert_eq!(
         settings.int_settings["Gdk/UnscaledDPI"].value,
         (2.5 / 2.0 * 96_f64 * 1024_f64).round() as i32
+    );
+    assert_eq!(
+        settings.int_settings["Gtk/CursorThemeSize"].value,
+        (2.5 * 24_f64).round() as i32
     );
 }
 
