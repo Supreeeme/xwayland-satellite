@@ -46,15 +46,20 @@ const DEFAULT_DPI: i32 = 96;
 /// I don't know why, but the DPI related xsettings seem to
 /// divide the DPI by 1024.
 const DPI_SCALE_FACTOR: i32 = 1024;
+const DEFAULT_CURSOR_SIZE: i32 = 24;
+const DEFAULT_CURSOR_THEME: &str = "default";
 
 const XFT_DPI: &str = "Xft/DPI";
 const GDK_WINDOW_SCALE: &str = "Gdk/WindowScalingFactor";
 const GDK_UNSCALED_DPI: &str = "Gdk/UnscaledDPI";
+const GTK_CURSOR_THEME_SIZE: &str = "Gtk/CursorThemeSize";
+const GTK_CURSOR_THEME_NAME: &str = "Gtk/CursorThemeName";
 
 pub(super) struct Settings {
     window: x::Window,
     serial: u32,
-    settings: HashMap<&'static str, IntSetting>,
+    int_settings: HashMap<&'static str, IntSetting>,
+    string_settings: HashMap<&'static str, StringSetting>,
 }
 
 #[derive(Copy, Clone)]
@@ -63,12 +68,22 @@ struct IntSetting {
     last_change_serial: u32,
 }
 
+#[derive(Clone)]
+struct StringSetting {
+    value: String,
+    last_change_serial: u32,
+}
+
 mod setting_type {
     pub const INTEGER: u8 = 0;
+    pub const STRING: u8 = 1;
 }
 
 impl Settings {
     pub(super) fn new(connection: &xcb::Connection, atoms: &super::Atoms, root: x::Window) -> Self {
+        // Is this a good place for reading this env var?
+        let cursor_theme =
+            std::env::var("XCURSOR_THEME").unwrap_or_else(|_| DEFAULT_CURSOR_THEME.to_string());
         let window = connection.generate_id();
         connection
             .send_and_check_request(&x::CreateWindow {
@@ -89,7 +104,7 @@ impl Settings {
         let s = Settings {
             window,
             serial: 0,
-            settings: HashMap::from([
+            int_settings: HashMap::from([
                 (
                     XFT_DPI,
                     IntSetting {
@@ -111,7 +126,21 @@ impl Settings {
                         last_change_serial: 0,
                     },
                 ),
+                (
+                    GTK_CURSOR_THEME_SIZE,
+                    IntSetting {
+                        value: DEFAULT_CURSOR_SIZE,
+                        last_change_serial: 0,
+                    },
+                ),
             ]),
+            string_settings: HashMap::from([(
+                GTK_CURSOR_THEME_NAME,
+                StringSetting {
+                    value: cursor_theme,
+                    last_change_serial: 0,
+                },
+            )]),
         };
 
         connection
@@ -141,7 +170,8 @@ impl Settings {
         ];
 
         data.extend_from_slice(&self.serial.to_le_bytes());
-        data.extend_from_slice(&(self.settings.len() as u32).to_le_bytes());
+        let num_settings = (self.int_settings.len() + self.string_settings.len()) as u32;
+        data.extend_from_slice(&num_settings.to_le_bytes());
 
         fn insert_with_padding(data: &[u8], out: &mut Vec<u8>) {
             out.extend_from_slice(data);
@@ -150,12 +180,35 @@ impl Settings {
             out.extend(std::iter::repeat_n(0, num_padding_bytes));
         }
 
-        for (name, setting) in &self.settings {
-            data.extend_from_slice(&[setting_type::INTEGER, 0]);
-            data.extend_from_slice(&(name.len() as u16).to_le_bytes());
-            insert_with_padding(name.as_bytes(), &mut data);
-            data.extend_from_slice(&setting.last_change_serial.to_le_bytes());
-            data.extend_from_slice(&setting.value.to_le_bytes());
+        fn insert_setting_header(
+            name: &str,
+            setting_type: u8,
+            last_change_serial: u32,
+            out: &mut Vec<u8>,
+        ) {
+            out.extend_from_slice(&[setting_type, 0]);
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            insert_with_padding(name.as_bytes(), out);
+            out.extend_from_slice(&last_change_serial.to_le_bytes());
+        }
+
+        fn insert_integer_setting(name: &str, setting: &IntSetting, out: &mut Vec<u8>) {
+            insert_setting_header(name, setting_type::INTEGER, setting.last_change_serial, out);
+            out.extend_from_slice(&setting.value.to_le_bytes());
+        }
+
+        fn insert_string_setting(name: &str, setting: &StringSetting, out: &mut Vec<u8>) {
+            insert_setting_header(name, setting_type::STRING, setting.last_change_serial, out);
+            out.extend_from_slice(&(setting.value.len() as u32).to_le_bytes());
+            insert_with_padding(setting.value.as_bytes(), out);
+        }
+
+        for (name, setting) in &self.int_settings {
+            insert_integer_setting(name, setting, &mut data);
+        }
+
+        for (name, setting) in &self.string_settings {
+            insert_string_setting(name, setting, &mut data);
         }
 
         data
@@ -165,23 +218,31 @@ impl Settings {
         self.serial += 1;
 
         let scale = scale.max(1.0);
+        let scaled_dpi = (scale * DEFAULT_DPI as f64 * DPI_SCALE_FACTOR as f64).round() as i32;
         let setting = IntSetting {
-            value: (scale * DEFAULT_DPI as f64 * DPI_SCALE_FACTOR as f64).round() as i32,
+            value: scaled_dpi,
             last_change_serial: self.serial,
         };
-        self.settings.entry(XFT_DPI).insert_entry(setting);
+
+        self.int_settings.entry(XFT_DPI).insert_entry(setting);
         // Gdk/WindowScalingFactor + Gdk/UnscaledDPI is identical to setting
         // GDK_SCALE = scale and then GDK_DPI_SCALE = 1 / scale.
-        self.settings
+        self.int_settings
             .entry(GDK_UNSCALED_DPI)
             .insert_entry(IntSetting {
-                value: setting.value / scale as i32,
+                value: scaled_dpi / scale as i32,
                 last_change_serial: self.serial,
             });
-        self.settings
+        self.int_settings
             .entry(GDK_WINDOW_SCALE)
             .insert_entry(IntSetting {
                 value: scale as i32,
+                last_change_serial: self.serial,
+            });
+        self.int_settings
+            .entry(GTK_CURSOR_THEME_SIZE)
+            .insert_entry(IntSetting {
+                value: (DEFAULT_CURSOR_SIZE as f64 * scale) as i32,
                 last_change_serial: self.serial,
             });
     }

@@ -65,6 +65,30 @@ use wayland_server::{
     },
 };
 
+struct CursorSurface;
+
+fn cursor_scale<S: X11Selection>(state: &InnerServerState<S>) -> i32 {
+    state.last_configured_scale.map_or(1, |f| f as i32).max(1)
+}
+
+fn prepare_cursor_surface<S: X11Selection>(
+    state: &mut InnerServerState<S>,
+    surface_entity: Option<Entity>,
+) -> i32 {
+    let scale = cursor_scale(state);
+    let Some(surface_entity) = surface_entity else {
+        return scale;
+    };
+    let _ = state.world.insert_one(surface_entity, CursorSurface);
+    let s = state
+        .world
+        .get::<&client::wl_surface::WlSurface>(surface_entity)
+        .unwrap();
+    s.set_buffer_scale(scale);
+    s.commit();
+    scale
+}
+
 // noop
 impl<S: X11Selection> Dispatch<WlCallback, ()> for InnerServerState<S> {
     fn request(
@@ -167,6 +191,10 @@ impl<S: X11Selection> Dispatch<WlSurface, Entity> for InnerServerState<S> {
                 }
             }
             Request::<WlSurface>::SetBufferScale { scale } => {
+                let scale = data
+                    .has::<CursorSurface>()
+                    .then(|| cursor_scale(state))
+                    .unwrap_or(scale);
                 client.set_buffer_scale(scale);
             }
             Request::<WlSurface>::SetInputRegion { region } => {
@@ -358,20 +386,19 @@ impl<S: X11Selection> Dispatch<WlPointer, Entity> for InnerServerState<S> {
                 hotspot_y,
                 surface,
             } => {
+                let surf_key: Option<Entity> = surface.map(|s| s.data().copied().unwrap());
+                let scale = prepare_cursor_surface(state, surf_key);
                 let c_pointer = state
                     .world
                     .get::<&client::wl_pointer::WlPointer>(*entity)
                     .unwrap();
-
-                let c_surface = surface.and_then(|s| {
-                    let e = s.data().copied()?;
-                    Some(
-                        state
-                            .world
-                            .get::<&client::wl_surface::WlSurface>(e)
-                            .unwrap(),
-                    )
+                let c_surface = surf_key.map(|e| {
+                    state
+                        .world
+                        .get::<&client::wl_surface::WlSurface>(e)
+                        .unwrap()
                 });
+                let (hotspot_x, hotspot_y) = (hotspot_x / scale, hotspot_y / scale);
                 c_pointer.set_cursor(serial, c_surface.as_deref(), hotspot_x, hotspot_y);
             }
             Request::<WlPointer>::Release => {
@@ -1148,12 +1175,19 @@ impl<S: X11Selection> Dispatch<s_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2, En
                 hotspot_y,
             } => {
                 let surf_key: Option<Entity> = surface.map(|s| s.data().copied().unwrap());
+                drop(client);
+                let scale = prepare_cursor_surface(state, surf_key);
+                let client = state
+                    .world
+                    .get::<&c_tablet::zwp_tablet_tool_v2::ZwpTabletToolV2>(*entity)
+                    .unwrap();
                 let c_surface = surf_key.map(|key| {
                     state
                         .world
                         .get::<&client::wl_surface::WlSurface>(key)
                         .unwrap()
                 });
+                let (hotspot_x, hotspot_y) = (hotspot_x / scale, hotspot_y / scale);
                 client.set_cursor(serial, c_surface.as_deref(), hotspot_x, hotspot_y);
             }
             s_tablet::zwp_tablet_tool_v2::Request::Destroy => {

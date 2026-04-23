@@ -473,6 +473,7 @@ pub struct InnerServerState<S: X11Selection> {
     global_offset_updated: bool,
     updated_outputs: Vec<Entity>,
     new_scale: Option<f64>,
+    last_configured_scale: Option<f64>,
 }
 
 impl<S: X11Selection> ServerState<NoConnection<S>> {
@@ -581,6 +582,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             global_offset_updated: false,
             updated_outputs: Vec::new(),
             new_scale: None,
+            last_configured_scale: None,
             decoration_manager,
             world,
         };
@@ -719,6 +721,7 @@ impl<C: XConnection> ServerState<C> {
 
                 debug!("Using new scale {scale}");
                 self.new_scale = Some(scale);
+                self.last_configured_scale = Some(scale);
             }
         }
 
