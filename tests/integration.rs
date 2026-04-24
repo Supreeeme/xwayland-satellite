@@ -2130,7 +2130,7 @@ fn popup_heuristics() {
         connection.atoms.net_wm_state,
         &[connection.atoms.skip_taskbar],
     );
-    f.map_as_popup(&mut connection, yabridge_popup);
+    f.map_as_toplevel(&mut connection, yabridge_popup);
 
     let steam = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
@@ -2173,6 +2173,27 @@ fn popup_heuristics() {
         &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
     );
     f.map_as_toplevel(&mut connection, battle_net);
+
+    let steam_game = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        steam_game,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_normal],
+    );
+    connection.set_property(
+        steam_game,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x3_u32, 0x24, 0x0, 0x0, 0x0],
+    );
+    connection.set_property(
+        steam_game,
+        connection.atoms.wm_hints,
+        connection.atoms.wm_hints,
+        &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
+    f.map_as_toplevel(&mut connection, steam_game);
 
     let wallpaper_engine = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
