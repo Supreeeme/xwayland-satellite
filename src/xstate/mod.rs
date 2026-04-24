@@ -635,7 +635,6 @@ impl XState {
         let class = self.get_wm_class(window);
         let size_hints = self.get_wm_size_hints(window);
         let motif_wm_hints = self.get_motif_wm_hints(window);
-        let wm_hints = self.get_wm_hints(window);
         let mut title = name.resolve()?;
         if title.is_none() {
             title = self.get_wm_name(window).resolve()?;
@@ -650,7 +649,6 @@ impl XState {
         if let Some(hints) = size_hints.resolve()? {
             server_state.set_size_hints(window, hints);
         }
-        let wmhints = wm_hints.resolve()?;
         let motif_hints = motif_wm_hints.resolve()?;
         if let Some(decorations) = motif_hints.as_ref().and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
@@ -667,8 +665,7 @@ impl XState {
             .resolve()?
             .flatten();
 
-        let is_popup =
-            self.guess_is_popup(window, motif_hints, wmhints, transient_for.is_some())?;
+        let is_popup = self.guess_is_popup(window, motif_hints, transient_for.is_some())?;
         server_state.set_popup(window, is_popup);
         if let Some(parent) = transient_for.and_then(|t| (!is_popup).then_some(t)) {
             server_state.set_transient_for(window, parent);
@@ -696,11 +693,9 @@ impl XState {
         &self,
         window: x::Window,
         motif_hints: Option<motif::Hints>,
-        wm_hints: Option<WmHints>,
         has_transient_for: bool,
     ) -> XResult<bool> {
         let mut motif_popup = false;
-        let mut wmhint_popup = false;
         let mut has_skip_taskbar = None;
 
         let attrs = self
@@ -722,22 +717,7 @@ impl XState {
             has_skip_taskbar = Some(states.contains(&self.atoms.skip_taskbar));
         }
         if let Some(hints) = motif_hints {
-            // If MOTIF_WM_HINTS provides no decorations for client assume its a popup
             motif_popup = hints.decorations.is_some_and(|d| d.is_clientside());
-            // WMHINTS is considered popup only if client is not decorated && client does not
-            // accept input focus
-            // Sometimes popup is false-positive meaning both MOTIF Decorations and WM_HINTS input indicates its a popup
-            // but MOTIF has function flags that toplevel window should do
-            wmhint_popup = motif_popup
-                && wm_hints.is_some_and(|h| !h.acquire_input_via_wm)
-                && !hints.functions.as_ref().is_some_and(|f| {
-                    f.intersects(
-                        motif::Functions::Minimize
-                            | motif::Functions::Maximize
-                            | motif::Functions::Resize
-                            | motif::Functions::All,
-                    )
-                });
             // If the motif hints indicate the user shouldn't be able to do anything
             // to the window at all, it stands to reason it's probably a popup.
             if hints.functions.is_some_and(|f| f.is_empty()) {
@@ -770,7 +750,7 @@ impl XState {
         let mut known_window_type = false;
         for ty in window_types {
             match ty {
-                x if x == self.window_atoms.normal => is_popup = override_redirect || wmhint_popup,
+                x if x == self.window_atoms.normal => is_popup = override_redirect,
                 x if x == self.window_atoms.dialog => is_popup = override_redirect,
                 x if x == self.window_atoms.utility => is_popup = override_redirect || motif_popup,
                 x if [
