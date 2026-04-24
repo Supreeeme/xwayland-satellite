@@ -2105,32 +2105,32 @@ fn popup_heuristics() {
     );
     f.map_as_toplevel(&mut connection, ardour_toplevel);
 
-    let yabridge_popup = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    let normal_skip_taskbar_window = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
-        yabridge_popup,
+        normal_skip_taskbar_window,
         x::ATOM_ATOM,
         connection.atoms.win_type,
         &[connection.atoms.win_type_normal],
     );
     connection.set_property(
-        yabridge_popup,
+        normal_skip_taskbar_window,
         connection.atoms.motif_wm_hints,
         connection.atoms.motif_wm_hints,
         &[0x2_u32, 0, 0, 0, 0],
     );
     connection.set_property(
-        yabridge_popup,
+        normal_skip_taskbar_window,
         connection.atoms.wm_hints,
         connection.atoms.wm_hints,
         &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
     );
     connection.set_property(
-        yabridge_popup,
+        normal_skip_taskbar_window,
         x::ATOM_ATOM,
         connection.atoms.net_wm_state,
         &[connection.atoms.skip_taskbar],
     );
-    f.map_as_toplevel(&mut connection, yabridge_popup);
+    f.map_as_toplevel(&mut connection, normal_skip_taskbar_window);
 
     let steam = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
