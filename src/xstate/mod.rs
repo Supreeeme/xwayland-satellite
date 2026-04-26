@@ -8,6 +8,7 @@ use crate::{ToplevelCapabilities, XConnection};
 use bitflags::bitflags;
 use log::{debug, trace, warn};
 use std::collections::HashMap;
+use std::env;
 use std::ffi::CString;
 use std::os::fd::BorrowedFd;
 use std::rc::Rc;
@@ -40,6 +41,82 @@ impl From<xcb::ProtocolError> for MaybeBadWindow {
             other => Self::Other(xcb::Error::Protocol(other)),
         }
     }
+}
+
+const RESOURCE_MANAGER_READ_LONGS: u32 = 16 * 1024;
+
+fn env_xresource_value(name: &str) -> Option<String> {
+    let value = env::var(name).ok()?;
+    let value = value.trim();
+    if value.is_empty() || value.contains(['\0', '\n', '\r']) {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+fn xcursor_resource_manager(
+    existing: &[u8],
+    theme: Option<&str>,
+    size: Option<&str>,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    let existing = String::from_utf8_lossy(existing);
+
+    for line in existing.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("Xcursor.theme:") || trimmed.starts_with("Xcursor.size:") {
+            continue;
+        }
+        out.extend_from_slice(line.as_bytes());
+        out.push(b'\n');
+    }
+
+    if let Some(theme) = theme {
+        out.extend_from_slice(b"Xcursor.theme: ");
+        out.extend_from_slice(theme.as_bytes());
+        out.push(b'\n');
+    }
+
+    if let Some(size) = size {
+        out.extend_from_slice(b"Xcursor.size: ");
+        out.extend_from_slice(size.as_bytes());
+        out.push(b'\n');
+    }
+
+    out
+}
+
+fn publish_xcursor_resource_manager(connection: &xcb::Connection, root: x::Window) {
+    let theme = env_xresource_value("XCURSOR_THEME");
+    let size = env_xresource_value("XCURSOR_SIZE");
+    if theme.is_none() && size.is_none() {
+        return;
+    }
+
+    let existing = connection
+        .wait_for_reply(connection.send_request(&x::GetProperty {
+            delete: false,
+            window: root,
+            property: x::ATOM_RESOURCE_MANAGER,
+            r#type: x::ATOM_STRING,
+            long_offset: 0,
+            long_length: RESOURCE_MANAGER_READ_LONGS,
+        }))
+        .ok()
+        .map(|reply| reply.value::<u8>().to_vec())
+        .unwrap_or_default();
+
+    let data = xcursor_resource_manager(&existing, theme.as_deref(), size.as_deref());
+    connection
+        .send_and_check_request(&x::ChangeProperty {
+            window: root,
+            mode: x::PropMode::Replace,
+            property: x::ATOM_RESOURCE_MANAGER,
+            r#type: x::ATOM_STRING,
+            data: &data,
+        })
+        .unwrap();
 }
 
 type XResult<T> = Result<T, MaybeBadWindow>;
@@ -212,7 +289,7 @@ impl XState {
             })
             .unwrap();
         {
-            // Setup default cursor theme
+            publish_xcursor_resource_manager(&connection, root);
             let ctx = CursorContext::new(&connection, screen).unwrap();
             let left_ptr = ctx.load_cursor(Cursor::LeftPtr);
             connection
