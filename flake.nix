@@ -41,7 +41,7 @@
           src = lib.fileset.toSource {
             root = ./.;
             fileset = lib.fileset.unions [
-              ./OpenSans-Regular.ttf
+              ./OpenSans-Bold.ttf
               ./build.rs
               ./macros
               ./testwl

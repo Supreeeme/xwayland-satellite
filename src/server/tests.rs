@@ -4119,6 +4119,60 @@ fn client_side_decorations() {
 }
 
 #[test]
+fn client_side_decorations_no_global_do_not_create_satellite_frame() {
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.disable_decorations_global();
+    });
+    let compositor = f.compositor();
+    let window = Window::new(1);
+    let (buffer, surface) = compositor.create_surface();
+
+    let data = WindowData {
+        mapped: true,
+        dims: WindowDims {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 50,
+        },
+        fullscreen: false,
+    };
+    let dims = data.dims;
+
+    f.new_window(window, false, data);
+    f.satellite
+        .set_win_decorations(window, super::Decorations::empty());
+    f.map_window(&compositor, window, &surface.obj, &buffer);
+    f.run();
+
+    let id = f.check_new_surface();
+    let needs_role_release = f
+        .testwl
+        .get_surface_data(id)
+        .is_some_and(|surface_data| surface_data.role.is_none());
+
+    if needs_role_release {
+        f.reconfigure_window(window, dims, false);
+        f.run();
+    }
+
+    let surfaces = f.testwl.created_surfaces();
+    assert_eq!(
+        surfaces.len(),
+        1,
+        "client-side decorated windows should not get satellite frame/titlebar surfaces"
+    );
+
+    assert_eq!(surfaces[0], id);
+    let surface_data = f.testwl.get_surface_data(id).unwrap();
+    assert!(
+        matches!(surface_data.role, Some(SurfaceRole::Toplevel(_))),
+        "surface role: {:?}",
+        surface_data.role
+    );
+}
+
+#[test]
 #[ignore = "Legacy expectation pending broader startup/decor harness modernization"]
 fn client_side_decorations_no_global() {
     let mut f = TestFixture::new_pre_connect(|testwl| {

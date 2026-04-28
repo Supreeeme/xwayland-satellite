@@ -384,7 +384,11 @@ impl<S: X11Selection> Dispatch<WlPointer, Entity> for InnerServerState<S> {
                     .world
                     .get::<&super::PointerResizeEdge>(*entity)
                     .is_ok();
-                if !resize_edge_active {
+                let decoration_surface_active = state
+                    .world
+                    .get::<&CurrentSurface>(*entity)
+                    .is_ok_and(|surface| surface.is_decoration());
+                if !resize_edge_active && !decoration_surface_active {
                     c_pointer.set_cursor(
                         serial,
                         c_surface.as_ref(),

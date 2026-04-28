@@ -1,5 +1,6 @@
-use super::decoration::DecorationMarker;
+use super::decoration::{DecorationFrameCallback, DecorationMarker};
 
+use super::event::DecorationFrameEvent;
 use super::{GlobalName, ObjectEvent};
 use hecs::{Entity, World};
 use smithay_client_toolkit::{
@@ -258,6 +259,27 @@ impl Dispatch<WlCallback, server::wl_callback::WlCallback> for MyWorld {
     ) {
         if let Event::<WlCallback>::Done { callback_data } = event {
             s_callback.done(callback_data);
+        }
+    }
+}
+
+impl Dispatch<WlCallback, DecorationFrameCallback> for MyWorld {
+    fn event(
+        state: &mut Self,
+        _: &WlCallback,
+        event: <WlCallback as Proxy>::Event,
+        callback: &DecorationFrameCallback,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let Event::<WlCallback>::Done { callback_data } = event {
+            state.events.push((
+                callback.parent,
+                ObjectEvent::DecorationFrame(DecorationFrameEvent::Done {
+                    generation: callback.generation,
+                    callback_data,
+                }),
+            ));
         }
     }
 }

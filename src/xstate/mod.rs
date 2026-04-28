@@ -1129,6 +1129,22 @@ impl XState {
         let window = event.window();
 
         match event.atom() {
+            x if x == self.atoms.active_win && window == self.root => {
+                let active = unwrap_or_skip_bad_window_ret!(self
+                    .connection
+                    .wait_for_reply(self.get_property_cookie(
+                        self.root,
+                        self.atoms.active_win,
+                        x::ATOM_WINDOW,
+                        1,
+                    )));
+                let active_value: &[x::Window] = active.value();
+                let active_window = active_value
+                    .first()
+                    .copied()
+                    .filter(|window| *window != x::Window::none());
+                server_state.sync_active_window_property(active_window, "x11 _NET_ACTIVE_WINDOW");
+            }
             x if x == x::ATOM_WM_HINTS => {
                 let hints =
                     unwrap_or_skip_bad_window_ret!(self.get_wm_hints(window).resolve()).unwrap();

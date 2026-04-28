@@ -1,3 +1,4 @@
+mod color_scheme;
 mod server;
 pub mod xstate;
 
@@ -85,6 +86,7 @@ pub fn version() -> &'static str {
 
 pub fn main(mut data: impl RunData) -> Option<()> {
     info!("Starting xwayland-satellite version {}", version());
+    let mut color_scheme_monitor = color_scheme::initialize();
 
     let socket = ListeningSocket::bind_auto("xwls", 1..=128).unwrap();
     let mut display = Display::new().unwrap();
@@ -224,6 +226,19 @@ pub fn main(mut data: impl RunData) -> Option<()> {
         data.xwayland_ready(display, xwl_pid);
     }
     let mut server_state = xstate.server_state_setup(server_state);
+    let color_scheme_fd = color_scheme_monitor.as_ref().map(|monitor| {
+        // SAFETY: color_scheme_monitor lives until the main loop exits.
+        unsafe { BorrowedFd::borrow_raw(monitor.as_raw_fd()) }
+    });
+    let mut fds = vec![
+        PollFd::from_borrowed_fd(server_fd, PollFlags::IN),
+        PollFd::new(&xsock_wl, PollFlags::IN),
+        PollFd::from_borrowed_fd(display_fd, PollFlags::IN),
+        PollFd::new(&quit_rx, PollFlags::IN),
+    ];
+    if let Some(fd) = color_scheme_fd {
+        fds.push(PollFd::from_borrowed_fd(fd, PollFlags::IN));
+    }
 
     #[cfg(feature = "systemd")]
     {
@@ -240,6 +255,12 @@ pub fn main(mut data: impl RunData) -> Option<()> {
         xstate.handle_events(&mut server_state);
 
         display.dispatch_clients(&mut *server_state).unwrap();
+        if color_scheme_monitor
+            .as_mut()
+            .is_some_and(|monitor| monitor.drain_changes())
+        {
+            server_state.redraw_decorations_for_color_scheme();
+        }
         server_state.run();
 
         if let Some(scale) = server_state.new_global_scale() {
