@@ -1,6 +1,8 @@
+mod color_scheme;
 mod server;
 pub mod xstate;
 
+use bitflags::bitflags;
 use crate::server::{NoConnection, PendingSurfaceState, ServerState};
 use crate::xstate::{RealConnection, XState};
 use log::{error, info};
@@ -14,11 +16,24 @@ use std::process::{Command, ExitStatus, Stdio};
 use wayland_server::{Display, ListeningSocket};
 use xcb::x;
 
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct ToplevelCapabilities: u8 {
+        const WINDOW_MENU = 1 << 0;
+        const MAXIMIZE = 1 << 1;
+        const FULLSCREEN = 1 << 2;
+        const MINIMIZE = 1 << 3;
+    }
+}
+
 pub trait XConnection: Sized + 'static {
     type X11Selection: X11Selection;
 
     fn set_window_dims(&mut self, window: x::Window, dims: PendingSurfaceState) -> bool;
     fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool);
+    fn set_maximized(&mut self, window: x::Window, maximized: bool);
+    fn set_minimized(&mut self, window: x::Window, minimized: bool);
+    fn set_allowed_actions(&mut self, window: x::Window, capabilities: ToplevelCapabilities);
     fn focus_window(&mut self, window: x::Window, output_name: Option<String>);
     fn close_window(&mut self, window: x::Window);
     fn unmap_window(&mut self, window: x::Window);
@@ -71,6 +86,7 @@ pub fn version() -> &'static str {
 
 pub fn main(mut data: impl RunData) -> Option<()> {
     info!("Starting xwayland-satellite version {}", version());
+    let mut color_scheme_monitor = color_scheme::initialize();
 
     let socket = ListeningSocket::bind_auto("xwls", 1..=128).unwrap();
     let mut display = Display::new().unwrap();
@@ -210,6 +226,19 @@ pub fn main(mut data: impl RunData) -> Option<()> {
         data.xwayland_ready(display, xwl_pid);
     }
     let mut server_state = xstate.server_state_setup(server_state);
+    let color_scheme_fd = color_scheme_monitor.as_ref().map(|monitor| {
+        // SAFETY: color_scheme_monitor lives until the main loop exits.
+        unsafe { BorrowedFd::borrow_raw(monitor.as_raw_fd()) }
+    });
+    let mut fds = vec![
+        PollFd::from_borrowed_fd(server_fd, PollFlags::IN),
+        PollFd::new(&xsock_wl, PollFlags::IN),
+        PollFd::from_borrowed_fd(display_fd, PollFlags::IN),
+        PollFd::new(&quit_rx, PollFlags::IN),
+    ];
+    if let Some(fd) = color_scheme_fd {
+        fds.push(PollFd::from_borrowed_fd(fd, PollFlags::IN));
+    }
 
     #[cfg(feature = "systemd")]
     {
@@ -226,7 +255,23 @@ pub fn main(mut data: impl RunData) -> Option<()> {
         xstate.handle_events(&mut server_state);
 
         display.dispatch_clients(&mut *server_state).unwrap();
+        if color_scheme_monitor
+            .as_mut()
+            .is_some_and(|monitor| monitor.drain_changes())
+        {
+            server_state.redraw_decorations_for_color_scheme();
+        }
         server_state.run();
+
+        if let Some(scale) = server_state.new_global_scale() {
+            server_state.published_x11_scale = scale;
+            server_state.republish_xwayland_outputs_for_x11_scale();
+            display.flush_clients().unwrap();
+            xstate.update_global_scale(scale);
+        }
+
+        server_state.flush_pending_x11_configures();
+
         display.flush_clients().unwrap();
 
         if let Some(sel) = server_state.new_selection::<Clipboard>() {
@@ -235,10 +280,6 @@ pub fn main(mut data: impl RunData) -> Option<()> {
 
         if let Some(sel) = server_state.new_selection::<Primary>() {
             xstate.set_primary_selection(sel);
-        }
-
-        if let Some(scale) = server_state.new_global_scale() {
-            xstate.update_global_scale(scale);
         }
 
         match poll(&mut fds, None) {

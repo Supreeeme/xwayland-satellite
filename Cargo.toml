@@ -51,12 +51,13 @@ num_enum = "0.7.4"
 tiny-skia = "0.11.4"
 ab_glyph = "0.2.32"
 fontdue = "0.9.3"
+zbus = "=5.13.2"
 
 [features]
 default = []
 systemd = ["dep:sd-notify"]
-# load decoration font at runtime instead of embedding it into the executable
 fontconfig = ["dep:fontconfig"]
+integration-tests = []
 
 [dev-dependencies]
 rustix = { workspace = true, features = ["fs"] }

@@ -80,6 +80,7 @@ use wayland_server::{
         wl_keyboard::{self, WlKeyboard},
         wl_output::{self, WlOutput},
         wl_pointer::{self, WlPointer},
+        wl_region::{self, WlRegion},
         wl_seat::{self, WlSeat},
         wl_shm::WlShm,
         wl_shm_pool::WlShmPool,
@@ -118,11 +119,28 @@ pub struct SurfaceData {
     pub resizing: Option<xdg_toplevel::ResizeEdge>,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct WindowGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
 impl SurfaceData {
     pub fn xdg(&self) -> &XdgSurfaceData {
         match self.role.as_ref().expect("Surface missing role") {
             SurfaceRole::Toplevel(t) => &t.xdg,
             SurfaceRole::Popup(p) => &p.xdg,
+            SurfaceRole::Subsurface(_) => panic!("subsurface doesn't have an XdgSurface"),
+            SurfaceRole::Cursor => panic!("cursor surface doesn't have an XdgSurface"),
+        }
+    }
+
+    pub fn xdg_mut(&mut self) -> &mut XdgSurfaceData {
+        match self.role.as_mut().expect("Surface missing role") {
+            SurfaceRole::Toplevel(t) => &mut t.xdg,
+            SurfaceRole::Popup(p) => &mut p.xdg,
             SurfaceRole::Subsurface(_) => panic!("subsurface doesn't have an XdgSurface"),
             SurfaceRole::Cursor => panic!("cursor surface doesn't have an XdgSurface"),
         }
@@ -158,6 +176,7 @@ pub struct Toplevel {
     pub min_size: Option<Vec2>,
     pub max_size: Option<Vec2>,
     pub states: Vec<xdg_toplevel::State>,
+    pub minimized: bool,
     pub closed: bool,
     pub title: Option<String>,
     pub app_id: Option<String>,
@@ -198,6 +217,7 @@ pub struct Vec2f {
 pub struct XdgSurfaceData {
     pub surface: XdgSurface,
     pub last_configure_serial: u32,
+    pub window_geometry: Option<WindowGeometry>,
 }
 
 impl XdgSurfaceData {
@@ -205,6 +225,7 @@ impl XdgSurfaceData {
         Self {
             surface,
             last_configure_serial: 0,
+            window_geometry: None,
         }
     }
 
@@ -260,6 +281,7 @@ struct PointerState {
 
 struct State {
     surfaces: HashMap<SurfaceId, SurfaceData>,
+    last_cursor_surface: Option<SurfaceId>,
     outputs: HashMap<WlOutput, Output>,
     positioners: HashMap<PositionerId, PositionerState>,
     buffers: HashMap<WlBuffer, Vec2>,
@@ -292,6 +314,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             surfaces: Default::default(),
+            last_cursor_surface: None,
             created_surfaces: Default::default(),
             outputs: Default::default(),
             buffers: Default::default(),
@@ -656,6 +679,11 @@ impl Server {
     }
 
     #[track_caller]
+    pub fn last_cursor_surface(&self) -> Option<SurfaceId> {
+        self.state.last_cursor_surface
+    }
+
+    #[track_caller]
     pub fn data_source_mimes(&self) -> Vec<String> {
         let Some(selection) = &self.state.clipboard else {
             panic!("No selection set on data device");
@@ -851,6 +879,20 @@ impl Server {
         self.display.flush_clients().unwrap();
     }
 
+    #[track_caller]
+    pub fn pointer_button(
+        &mut self,
+        serial: u32,
+        time: u32,
+        button: u32,
+        state: wl_pointer::ButtonState,
+    ) {
+        let pointer = self.state.pointer.as_ref().expect("No pointer created");
+        pointer.pointer.button(serial, time, button, state);
+        pointer.pointer.frame();
+        self.display.flush_clients().unwrap();
+    }
+
     pub fn new_output(&mut self, x: i32, y: i32) {
         self.state.last_output_global =
             Some(self.dh.create_global::<State, WlOutput, _>(4, (x, y)));
@@ -903,6 +945,16 @@ impl Server {
             .as_ref()
             .expect("Output doesn't have an xdg output");
         xdg.logical_position(x, y);
+        xdg.done();
+        self.display.flush_clients().unwrap();
+    }
+
+    pub fn resize_xdg_output(&mut self, output: &WlOutput, width: i32, height: i32) {
+        let xdg = self.state.outputs[output]
+            .xdg
+            .as_ref()
+            .expect("Output doesn't have an xdg output");
+        xdg.logical_size(width, height);
         xdg.done();
         self.display.flush_clients().unwrap();
     }
@@ -1446,6 +1498,7 @@ impl Dispatch<WlPointer, ()> for State {
     ) {
         match request {
             wl_pointer::Request::SetCursor { surface, .. } => {
+                state.last_cursor_surface = surface.as_ref().map(SurfaceId::from);
                 if let Some(surface) = surface {
                     let data = state.surfaces.get_mut(&SurfaceId::from(&surface)).unwrap();
 
@@ -1585,6 +1638,41 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                 let states = toplevel.states.clone();
                 state.configure_toplevel(*surface_id, 100, 100, states);
             }
+            xdg_toplevel::Request::SetMaximized => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
+                    unreachable!();
+                };
+                if !toplevel.states.contains(&xdg_toplevel::State::Maximized) {
+                    toplevel.states.push(xdg_toplevel::State::Maximized);
+                }
+                let states = toplevel.states.clone();
+                state.configure_toplevel(*surface_id, 100, 100, states);
+            }
+            xdg_toplevel::Request::UnsetMaximized => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
+                    unreachable!();
+                };
+                let Some(pos) = toplevel
+                    .states
+                    .iter()
+                    .copied()
+                    .position(|p| p == xdg_toplevel::State::Maximized)
+                else {
+                    return;
+                };
+                toplevel.states.swap_remove(pos);
+                let states = toplevel.states.clone();
+                state.configure_toplevel(*surface_id, 100, 100, states);
+            }
+            xdg_toplevel::Request::SetMinimized => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
+                    unreachable!();
+                };
+                toplevel.minimized = true;
+            }
             xdg_toplevel::Request::Destroy => {}
             xdg_toplevel::Request::SetTitle { title } => {
                 let data = state.surfaces.get_mut(surface_id).unwrap();
@@ -1649,6 +1737,7 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                     min_size: None,
                     max_size: None,
                     states: Vec::new(),
+                    minimized: false,
                     closed: false,
                     title: None,
                     app_id: None,
@@ -1696,6 +1785,20 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
             xdg_surface::Request::AckConfigure { serial } => {
                 let data = state.surfaces.get_mut(surface_id).unwrap();
                 assert!(data.xdg().last_configure_serial >= serial);
+            }
+            xdg_surface::Request::SetWindowGeometry {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                data.xdg_mut().window_geometry = Some(WindowGeometry {
+                    x,
+                    y,
+                    width,
+                    height,
+                });
             }
             xdg_surface::Request::Destroy => {
                 let data = state.surfaces.get_mut(surface_id).unwrap();
@@ -1960,6 +2063,38 @@ impl Dispatch<WlCompositor, ()> for State {
                 state.last_surface_id = Some(SurfaceId(id));
                 state.created_surfaces.push(SurfaceId(id));
             }
+            proto::wl_compositor::Request::CreateRegion { id } => {
+                data_init.init(id, ());
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<WlRegion, ()> for State {
+    fn request(
+        _: &mut Self,
+        _: &wayland_server::Client,
+        _resource: &WlRegion,
+        request: <WlRegion as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            wl_region::Request::Add {
+                x: _,
+                y: _,
+                width: _,
+                height: _,
+            }
+            | wl_region::Request::Subtract {
+                x: _,
+                y: _,
+                width: _,
+                height: _,
+            } => {}
+            wl_region::Request::Destroy => {}
             _ => unreachable!(),
         }
     }

@@ -4,10 +4,11 @@ mod selection;
 use selection::{Selection, SelectionState};
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
 
-use crate::XConnection;
+use crate::{ToplevelCapabilities, XConnection};
 use bitflags::bitflags;
 use log::{debug, trace, warn};
 use std::collections::HashMap;
+use std::env;
 use std::ffi::CString;
 use std::os::fd::BorrowedFd;
 use std::rc::Rc;
@@ -40,6 +41,82 @@ impl From<xcb::ProtocolError> for MaybeBadWindow {
             other => Self::Other(xcb::Error::Protocol(other)),
         }
     }
+}
+
+const RESOURCE_MANAGER_READ_LONGS: u32 = 16 * 1024;
+
+fn env_xresource_value(name: &str) -> Option<String> {
+    let value = env::var(name).ok()?;
+    let value = value.trim();
+    if value.is_empty() || value.contains(['\0', '\n', '\r']) {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+fn xcursor_resource_manager(
+    existing: &[u8],
+    theme: Option<&str>,
+    size: Option<&str>,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    let existing = String::from_utf8_lossy(existing);
+
+    for line in existing.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("Xcursor.theme:") || trimmed.starts_with("Xcursor.size:") {
+            continue;
+        }
+        out.extend_from_slice(line.as_bytes());
+        out.push(b'\n');
+    }
+
+    if let Some(theme) = theme {
+        out.extend_from_slice(b"Xcursor.theme: ");
+        out.extend_from_slice(theme.as_bytes());
+        out.push(b'\n');
+    }
+
+    if let Some(size) = size {
+        out.extend_from_slice(b"Xcursor.size: ");
+        out.extend_from_slice(size.as_bytes());
+        out.push(b'\n');
+    }
+
+    out
+}
+
+fn publish_xcursor_resource_manager(connection: &xcb::Connection, root: x::Window) {
+    let theme = env_xresource_value("XCURSOR_THEME");
+    let size = env_xresource_value("XCURSOR_SIZE");
+    if theme.is_none() && size.is_none() {
+        return;
+    }
+
+    let existing = connection
+        .wait_for_reply(connection.send_request(&x::GetProperty {
+            delete: false,
+            window: root,
+            property: x::ATOM_RESOURCE_MANAGER,
+            r#type: x::ATOM_STRING,
+            long_offset: 0,
+            long_length: RESOURCE_MANAGER_READ_LONGS,
+        }))
+        .ok()
+        .map(|reply| reply.value::<u8>().to_vec())
+        .unwrap_or_default();
+
+    let data = xcursor_resource_manager(&existing, theme.as_deref(), size.as_deref());
+    connection
+        .send_and_check_request(&x::ChangeProperty {
+            window: root,
+            mode: x::PropMode::Replace,
+            property: x::ATOM_RESOURCE_MANAGER,
+            r#type: x::ATOM_STRING,
+            data: &data,
+        })
+        .unwrap();
 }
 
 type XResult<T> = Result<T, MaybeBadWindow>;
@@ -212,7 +289,7 @@ impl XState {
             })
             .unwrap();
         {
-            // Setup default cursor theme
+            publish_xcursor_resource_manager(&connection, root);
             let ctx = CursorContext::new(&connection, screen).unwrap();
             let left_ptr = ctx.load_cursor(Cursor::LeftPtr);
             connection
@@ -301,7 +378,17 @@ impl XState {
                 self.atoms.active_win,
                 self.atoms.motif_wm_hints,
                 self.atoms.net_wm_state,
+                self.atoms.net_wm_allowed_actions,
+                self.atoms.wm_action_move,
+                self.atoms.wm_action_resize,
+                self.atoms.wm_action_minimize,
+                self.atoms.wm_action_maximize,
+                self.atoms.wm_action_fullscreen,
+                self.atoms.wm_action_close,
                 self.atoms.wm_fullscreen,
+                self.atoms.wm_maximized_vert,
+                self.atoms.wm_maximized_horz,
+                self.atoms.wm_hidden,
                 self.atoms.moveresize,
             ],
         );
@@ -486,12 +573,32 @@ impl XState {
                     self.handle_property_change(e, server_state);
                 }
                 xcb::Event::X(x::Event::ConfigureRequest(e)) => {
-                    debug!("{:?} request: {:?}", e.window(), e.value_mask());
-
+                    let dims = WindowDims {
+                        x: e.x(),
+                        y: e.y(),
+                        width: e.width(),
+                        height: e.height(),
+                    };
                     let mut list = Vec::new();
                     let mask = e.value_mask();
+                    let translated_move = mask.intersects(x::ConfigWindowMask::X | x::ConfigWindowMask::Y)
+                        && server_state.begin_configure_move(e.window(), dims, mask);
+                    let translated_resize = mask
+                        .intersects(x::ConfigWindowMask::WIDTH | x::ConfigWindowMask::HEIGHT)
+                        && server_state.begin_configure_resize(e.window(), dims, mask);
+                    server_state.handle_configure_request(
+                        e.window(),
+                        mask,
+                        e.x(),
+                        e.y(),
+                        e.width(),
+                        e.height(),
+                    );
 
-                    if server_state.can_change_position(e.window()) {
+                    let can_change_position =
+                        server_state.should_forward_configure_position(e.window(), mask);
+
+                    if !translated_move && !translated_resize && can_change_position {
                         if mask.contains(x::ConfigWindowMask::X) {
                             list.push(x::ConfigWindow::X(e.x().into()));
                         }
@@ -499,10 +606,10 @@ impl XState {
                             list.push(x::ConfigWindow::Y(e.y().into()));
                         }
                     }
-                    if mask.contains(x::ConfigWindowMask::WIDTH) {
+                    if !translated_resize && mask.contains(x::ConfigWindowMask::WIDTH) {
                         list.push(x::ConfigWindow::Width(e.width().into()));
                     }
-                    if mask.contains(x::ConfigWindowMask::HEIGHT) {
+                    if !translated_resize && mask.contains(x::ConfigWindowMask::HEIGHT) {
                         list.push(x::ConfigWindow::Height(e.height().into()));
                     }
 
@@ -570,6 +677,35 @@ impl XState {
                         _ => {}
                     }
                 }
+
+                let has_vert = [prop1, prop2].contains(&self.atoms.wm_maximized_vert);
+                let has_horz = [prop1, prop2].contains(&self.atoms.wm_maximized_horz);
+                if has_vert || has_horz {
+                    if has_vert && has_horz {
+                        server_state.set_maximized(e.window(), action);
+                    } else {
+                        warn!(
+                            "ignoring partial maximize request for {:?}: vert={} horz={}",
+                            e.window(),
+                            has_vert,
+                            has_horz
+                        );
+                    }
+                }
+            }
+            x if x == self.atoms.wm_change_state => {
+                let x::ClientMessageData::Data32(data) = e.data() else {
+                    unreachable!();
+                };
+
+                match WmState::try_from(data[0]) {
+                    Ok(WmState::Iconic) => {
+                        server_state.set_minimized(e.window());
+                        server_state.connection.set_minimized(e.window(), true);
+                    }
+                    Ok(other) => warn!("unsupported WM_CHANGE_STATE {:?} for {:?}", other, e.window()),
+                    Err(_) => warn!("unknown WM_CHANGE_STATE {} for {:?}", data[0], e.window()),
+                }
             }
             x if x == self.atoms.active_win => {
                 server_state.activate_window(e.window());
@@ -585,11 +721,13 @@ impl XState {
                     return;
                 };
                 let button = data[3];
-                // XXX: This can technically be driven by keyboard events and other mouse buttons as well,
-                // but I haven't found an application that does this yet. We'll cross that bridge when we get to it.
-                if button != 1 {
+                debug!(
+                    "_NET_WM_MOVERESIZE for {:?}: direction={direction:?} button={} root=({}, {})",
+                    e.window(), button, data[0], data[1]
+                );
+                if button == 0 {
                     warn!(
-                        "Attempted move/resize of {:?} with non left click button ({button})",
+                        "Attempted move/resize of {:?} without a mouse button ({button})",
                         e.window()
                     );
                     return;
@@ -607,7 +745,7 @@ impl XState {
                     | MoveResizeDirection::SizeBottom
                     | MoveResizeDirection::SizeBottomLeft
                     | MoveResizeDirection::SizeLeft => {
-                        server_state.resize_window(e.window(), direction);
+                        server_state.start_locked_resize_window(e.window(), direction);
                     }
                     MoveResizeDirection::SizeKeyboard
                     | MoveResizeDirection::MoveKeyboard
@@ -652,6 +790,9 @@ impl XState {
         }
         let wmhints = wm_hints.resolve()?;
         let motif_hints = motif_wm_hints.resolve()?;
+        if let Some(functions) = motif_hints.as_ref().and_then(|m| m.functions) {
+            server_state.set_win_functions(window, functions);
+        }
         if let Some(decorations) = motif_hints.as_ref().and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
         }
@@ -701,6 +842,7 @@ impl XState {
     ) -> XResult<bool> {
         let mut motif_popup = false;
         let mut wmhint_popup = false;
+        let mut motif_functions_empty = false;
         let mut has_skip_taskbar = None;
 
         let attrs = self
@@ -721,6 +863,17 @@ impl XState {
         if let Some(states) = window_state.resolve()? {
             has_skip_taskbar = Some(states.contains(&self.atoms.skip_taskbar));
         }
+
+        let override_redirect = self.connection.wait_for_reply(attrs)?.override_redirect();
+        let window_types = window_types.resolve()?.unwrap_or_else(|| {
+            if !override_redirect && has_transient_for {
+                vec![self.window_atoms.dialog]
+            } else {
+                vec![self.window_atoms.normal]
+            }
+        });
+        let has_explicit_normal_type = window_types.contains(&self.window_atoms.normal);
+
         if let Some(hints) = motif_hints {
             // If MOTIF_WM_HINTS provides no decorations for client assume its a popup
             motif_popup = hints.decorations.is_some_and(|d| d.is_clientside());
@@ -738,24 +891,15 @@ impl XState {
                             | motif::Functions::All,
                     )
                 });
-            // If the motif hints indicate the user shouldn't be able to do anything
-            // to the window at all, it stands to reason it's probably a popup.
-            if hints.functions.is_some_and(|f| f.is_empty()) {
-                return Ok(true);
-            }
+            motif_functions_empty = hints.functions.is_some_and(|f| f.is_empty());
         }
-
-        let override_redirect = self.connection.wait_for_reply(attrs)?.override_redirect();
         let mut is_popup = override_redirect;
 
-        let window_types = window_types.resolve()?.unwrap_or_else(|| {
-            if !override_redirect && has_transient_for {
-                vec![self.window_atoms.dialog]
-            } else {
-                vec![self.window_atoms.normal]
-            }
-        });
-
+        // Empty MOTIF functions are a reasonable popup signal for ambiguous windows,
+        // but some normal undecorated toplevels use them for client-side chrome.
+        if motif_functions_empty && !has_explicit_normal_type {
+            return Ok(true);
+        }
         if log::log_enabled!(log::Level::Debug) {
             let win_types = window_types
                 .iter()
@@ -985,6 +1129,22 @@ impl XState {
         let window = event.window();
 
         match event.atom() {
+            x if x == self.atoms.active_win && window == self.root => {
+                let active = unwrap_or_skip_bad_window_ret!(self
+                    .connection
+                    .wait_for_reply(self.get_property_cookie(
+                        self.root,
+                        self.atoms.active_win,
+                        x::ATOM_WINDOW,
+                        1,
+                    )));
+                let active_value: &[x::Window] = active.value();
+                let active_window = active_value
+                    .first()
+                    .copied()
+                    .filter(|window| *window != x::Window::none());
+                server_state.sync_active_window_property(active_window, "x11 _NET_ACTIVE_WINDOW");
+            }
             x if x == x::ATOM_WM_HINTS => {
                 let hints =
                     unwrap_or_skip_bad_window_ret!(self.get_wm_hints(window).resolve()).unwrap();
@@ -1015,6 +1175,9 @@ impl XState {
                 let motif_hints =
                     unwrap_or_skip_bad_window_ret!(self.get_motif_wm_hints(window).resolve())
                         .unwrap();
+                if let Some(functions) = motif_hints.functions {
+                    server_state.set_win_functions(window, functions);
+                }
                 if let Some(decorations) = motif_hints.decorations {
                     server_state.set_win_decorations(window, decorations);
                 }
@@ -1041,13 +1204,24 @@ xcb::atoms_struct! {
         wm_delete_window => b"WM_DELETE_WINDOW" only_if_exists = false,
         wm_transient_for => b"WM_TRANSIENT_FOR" only_if_exists = false,
         wm_state => b"WM_STATE" only_if_exists = false,
+        wm_change_state => b"WM_CHANGE_STATE" only_if_exists = false,
         wm_s0 => b"WM_S0" only_if_exists = false,
         net_wm_cm_s0 => b"_NET_WM_CM_S0" only_if_exists = false,
         wm_check => b"_NET_SUPPORTING_WM_CHECK" only_if_exists = false,
         net_wm_name => b"_NET_WM_NAME" only_if_exists = false,
         wm_pid => b"_NET_WM_PID" only_if_exists = false,
         net_wm_state => b"_NET_WM_STATE" only_if_exists = false,
+        net_wm_allowed_actions => b"_NET_WM_ALLOWED_ACTIONS" only_if_exists = false,
+        wm_action_move => b"_NET_WM_ACTION_MOVE" only_if_exists = false,
+        wm_action_resize => b"_NET_WM_ACTION_RESIZE" only_if_exists = false,
+        wm_action_minimize => b"_NET_WM_ACTION_MINIMIZE" only_if_exists = false,
+        wm_action_maximize => b"_NET_WM_ACTION_MAXIMIZE" only_if_exists = false,
+        wm_action_fullscreen => b"_NET_WM_ACTION_FULLSCREEN" only_if_exists = false,
+        wm_action_close => b"_NET_WM_ACTION_CLOSE" only_if_exists = false,
         wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
+        wm_maximized_vert => b"_NET_WM_STATE_MAXIMIZED_VERT" only_if_exists = false,
+        wm_maximized_horz => b"_NET_WM_STATE_MAXIMIZED_HORZ" only_if_exists = false,
+        wm_hidden => b"_NET_WM_STATE_HIDDEN" only_if_exists = false,
         skip_taskbar => b"_NET_WM_STATE_SKIP_TASKBAR" only_if_exists = false,
         active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
@@ -1168,7 +1342,7 @@ impl From<&[u32]> for WmHints {
     }
 }
 
-pub use motif::Decorations;
+pub use motif::{Decorations, Functions};
 mod motif {
     use super::*;
     // Motif WM hints are incredibly poorly documented, I could only find this header:
@@ -1184,7 +1358,8 @@ mod motif {
     }
 
     bitflags! {
-        pub(super) struct Functions: u32 {
+        #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+        pub struct Functions: u32 {
             const All = 1;
             const Resize = 2;
             const Move = 4;
@@ -1288,6 +1463,26 @@ pub struct RealConnection {
     connection: Rc<xcb::Connection>,
     outputs: HashMap<String, xcb::randr::Output>,
     primary_output: xcb::randr::Output,
+    reflected_states: HashMap<x::Window, ReflectedWindowState>,
+}
+
+#[derive(Clone, Copy)]
+struct ReflectedWindowState {
+    fullscreen: bool,
+    maximized: bool,
+    minimized: bool,
+    allowed_actions: ToplevelCapabilities,
+}
+
+impl Default for ReflectedWindowState {
+    fn default() -> Self {
+        Self {
+            fullscreen: false,
+            maximized: false,
+            minimized: false,
+            allowed_actions: ToplevelCapabilities::all(),
+        }
+    }
 }
 
 impl RealConnection {
@@ -1297,6 +1492,7 @@ impl RealConnection {
             connection,
             outputs: Default::default(),
             primary_output: Xid::none(),
+            reflected_states: Default::default(),
         }
     }
 
@@ -1343,6 +1539,74 @@ impl RealConnection {
     fn root_window(&self) -> x::Window {
         self.connection.get_setup().roots().next().unwrap().root()
     }
+
+    fn sync_reflected_window_state(&mut self, window: x::Window) {
+        if window == x::Window::none() {
+            return;
+        }
+
+        let state = self.reflected_states.get(&window).copied().unwrap_or_default();
+        let mut net_wm_state = Vec::with_capacity(4);
+        if state.fullscreen {
+            net_wm_state.push(self.atoms.wm_fullscreen);
+        }
+        if state.maximized {
+            net_wm_state.push(self.atoms.wm_maximized_vert);
+            net_wm_state.push(self.atoms.wm_maximized_horz);
+        }
+        if state.minimized {
+            net_wm_state.push(self.atoms.wm_hidden);
+        }
+
+        if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty::<x::Atom> {
+            mode: x::PropMode::Replace,
+            window,
+            property: self.atoms.net_wm_state,
+            r#type: x::ATOM_ATOM,
+            data: &net_wm_state,
+        }) {
+            warn!("Failed to sync _NET_WM_STATE on {window:?} ({e})");
+        }
+
+        let wm_state = if state.minimized {
+            WmState::Iconic
+        } else {
+            WmState::Normal
+        };
+        if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty {
+            mode: x::PropMode::Replace,
+            window,
+            property: self.atoms.wm_state,
+            r#type: self.atoms.wm_state,
+            data: &[wm_state as u32, x::Window::none().resource_id()],
+        }) {
+            warn!("Failed to sync WM_STATE on {window:?} ({e})");
+        }
+
+        let mut allowed_actions = vec![
+            self.atoms.wm_action_move,
+            self.atoms.wm_action_resize,
+            self.atoms.wm_action_close,
+        ];
+        if state.allowed_actions.contains(ToplevelCapabilities::MINIMIZE) {
+            allowed_actions.push(self.atoms.wm_action_minimize);
+        }
+        if state.allowed_actions.contains(ToplevelCapabilities::MAXIMIZE) {
+            allowed_actions.push(self.atoms.wm_action_maximize);
+        }
+        if state.allowed_actions.contains(ToplevelCapabilities::FULLSCREEN) {
+            allowed_actions.push(self.atoms.wm_action_fullscreen);
+        }
+        if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty::<x::Atom> {
+            mode: x::PropMode::Replace,
+            window,
+            property: self.atoms.net_wm_allowed_actions,
+            r#type: x::ATOM_ATOM,
+            data: &allowed_actions,
+        }) {
+            warn!("Failed to sync _NET_WM_ALLOWED_ACTIONS on {window:?} ({e})");
+        }
+    }
 }
 
 impl XConnection for RealConnection {
@@ -1369,24 +1633,27 @@ impl XConnection for RealConnection {
     }
 
     fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool) {
-        let data = if fullscreen {
-            std::slice::from_ref(&self.atoms.wm_fullscreen)
-        } else {
-            &[]
-        };
+        self.reflected_states.entry(window).or_default().fullscreen = fullscreen;
+        self.sync_reflected_window_state(window);
+    }
 
-        if let Err(e) = self
-            .connection
-            .send_and_check_request(&x::ChangeProperty::<x::Atom> {
-                mode: x::PropMode::Replace,
-                window,
-                property: self.atoms.net_wm_state,
-                r#type: x::ATOM_ATOM,
-                data,
-            })
-        {
-            warn!("Failed to set fullscreen state on {window:?} ({e})");
+    fn set_maximized(&mut self, window: x::Window, maximized: bool) {
+        let state = self.reflected_states.entry(window).or_default();
+        state.maximized = maximized;
+        if maximized {
+            state.minimized = false;
         }
+        self.sync_reflected_window_state(window);
+    }
+
+    fn set_minimized(&mut self, window: x::Window, minimized: bool) {
+        self.reflected_states.entry(window).or_default().minimized = minimized;
+        self.sync_reflected_window_state(window);
+    }
+
+    fn set_allowed_actions(&mut self, window: x::Window, capabilities: ToplevelCapabilities) {
+        self.reflected_states.entry(window).or_default().allowed_actions = capabilities;
+        self.sync_reflected_window_state(window);
     }
 
     fn focus_window(&mut self, window: x::Window, output_name: Option<String>) {
@@ -1408,14 +1675,9 @@ impl XConnection for RealConnection {
         }) {
             debug!("ChangeProperty failed ({window:?}: {e:?})");
         }
-        if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty {
-            mode: x::PropMode::Replace,
-            window,
-            property: self.atoms.wm_state,
-            r#type: self.atoms.wm_state,
-            data: &[WmState::Normal as u32, 0],
-        }) {
-            debug!("ChangeProperty failed ({window:?}: {e:?})");
+        if window != x::Window::none() {
+            self.reflected_states.entry(window).or_default().minimized = false;
+            self.sync_reflected_window_state(window);
         }
 
         if let Some(name) = output_name {
