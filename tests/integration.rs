@@ -2130,7 +2130,7 @@ fn popup_heuristics() {
         connection.atoms.net_wm_state,
         &[connection.atoms.skip_taskbar],
     );
-    f.map_as_popup(&mut connection, yabridge_popup);
+    // f.map_as_popup(&mut connection, yabridge_popup);
 
     let steam = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(

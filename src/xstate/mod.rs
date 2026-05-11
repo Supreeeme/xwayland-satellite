@@ -706,7 +706,6 @@ impl XState {
         has_transient_for: bool,
     ) -> XResult<bool> {
         let mut motif_popup = false;
-        let mut wmhint_popup = false;
         let mut has_skip_taskbar = None;
 
         let attrs = self
@@ -730,20 +729,6 @@ impl XState {
         if let Some(hints) = motif_hints {
             // If MOTIF_WM_HINTS provides no decorations for client assume its a popup
             motif_popup = hints.decorations.is_some_and(|d| d.is_clientside());
-            // WMHINTS is considered popup only if client is not decorated && client does not
-            // accept input focus
-            // Sometimes popup is false-positive meaning both MOTIF Decorations and WM_HINTS input indicates its a popup
-            // but MOTIF has function flags that toplevel window should do
-            wmhint_popup = motif_popup
-                && wm_hints.is_some_and(|h| !h.acquire_input_via_wm)
-                && !hints.functions.as_ref().is_some_and(|f| {
-                    f.intersects(
-                        motif::Functions::Minimize
-                            | motif::Functions::Maximize
-                            | motif::Functions::Resize
-                            | motif::Functions::All,
-                    )
-                });
             // If the motif hints indicate the user shouldn't be able to do anything
             // to the window at all, it stands to reason it's probably a popup.
             if hints.functions.is_some_and(|f| f.is_empty()) {
@@ -776,7 +761,7 @@ impl XState {
         let mut known_window_type = false;
         for ty in window_types {
             match ty {
-                x if x == self.window_atoms.normal => is_popup = override_redirect || wmhint_popup,
+                x if x == self.window_atoms.normal => is_popup = override_redirect,
                 x if x == self.window_atoms.dialog => is_popup = override_redirect,
                 x if x == self.window_atoms.utility => is_popup = override_redirect || motif_popup,
                 x if [
