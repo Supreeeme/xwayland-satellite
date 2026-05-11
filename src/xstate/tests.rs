@@ -39,6 +39,7 @@ mod window_role_heuristics {
             window_types: vec![win_types.dialog],
             has_transient_for: true,
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0, 0, 0, 0].as_slice())),
+            wm_class: Some("ghidra-Ghidra".into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
@@ -51,6 +52,7 @@ mod window_role_heuristics {
         let win = WindowRoleHeuristics {
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0x11, 0, 0].as_slice())),
             window_types: vec![win_types.normal],
+            wm_class: Some("REAPER".into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
@@ -62,6 +64,7 @@ mod window_role_heuristics {
         let win_types = WindowTypes::new();
         let win = WindowRoleHeuristics {
             override_redirect: true,
+            wm_class: Some("REAPER".into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
@@ -100,6 +103,7 @@ mod window_role_heuristics {
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.popup_menu],
             override_redirect: true,
+            wm_class: Some("Menu".into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
@@ -126,6 +130,7 @@ mod window_role_heuristics {
             has_transient_for: true,
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 1, 0, 0, 0].as_slice())),
             window_types: vec![win_types.utility, win_types.normal],
+            wm_class: Some("wechat".into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
@@ -141,6 +146,7 @@ mod window_role_heuristics {
             override_redirect: true,
             window_types: vec![win_types.utility],
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
+            wm_class: Some("Godot".into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
@@ -154,6 +160,7 @@ mod window_role_heuristics {
             has_transient_for: true,
             window_types: vec![win_types.utility],
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
+            wm_class: Some("Material Maker".into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
@@ -166,6 +173,7 @@ mod window_role_heuristics {
         let win_types = WindowTypes::new();
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.utility],
+            wm_class: Some("Ardour-8.12.0".into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
@@ -176,6 +184,7 @@ mod window_role_heuristics {
         let win = WindowRoleHeuristics {
             has_transient_for: true,
             window_types: vec![win_types.utility],
+            wm_class: Some("Ardour-8.12.0".into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
@@ -189,6 +198,7 @@ mod window_role_heuristics {
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.combo],
             override_redirect: true,
+            wm_class: Some("fcitx".into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
@@ -198,24 +208,26 @@ mod window_role_heuristics {
     // Yabridge has dropdowns which expect to be pop-ups but does not express that clearly through
     // its X properties (which are not even consistent across WINE versions).
     #[test]
-    #[ignore = "intentional regression: WM_HINTS heuristic removed to fix #365, #392"]
     fn yabridge_vst_menu() {
         let win_types = WindowTypes::new();
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.normal],
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x24, 0, 0, 0].as_slice())),
+            wm_class: Some("yabridge-host.exe.so".into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
     // Several Steam games running through WINE set WM_HINTS and _MOTIF_WM_HINTS identically to
     // Yabridge (the properties checked for by a previous fix) but which expect to be top-level.
+    // See also https://github.com/Supreeeme/xwayland-satellite/issues/365 for more examples.
     #[test]
     fn steam_pixel_composer() {
         let win_types = WindowTypes::new();
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.normal],
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x24, 0, 0, 0].as_slice())),
+            wm_class: Some("steam_app_2299510".into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
@@ -226,20 +238,19 @@ mod window_role_heuristics {
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.normal],
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x2c, 0, 0, 0].as_slice())),
+            wm_class: Some("battle.net.exe".into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
     }
-
     // https://github.com/Supreeeme/xwayland-satellite/issues/365
-    // Similar to Battle.net above, certain MOTIF hints settings overrule the WM_HINTS pop-up
-    // heuristic, so the window is top-level.
     #[test]
     fn wallpaper_engine() {
         let win_types = WindowTypes::new();
         let win = WindowRoleHeuristics {
             window_types: vec![win_types.normal],
             motif_wm_hints: Some(motif::Hints::from([0x3_u32, 0x3e, 0, 0, 0].as_slice())),
+            wm_class: Some("steam_app_431960".into()),
             ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);

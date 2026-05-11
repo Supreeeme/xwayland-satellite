@@ -639,8 +639,8 @@ impl XState {
             server_state.set_win_title(window, name);
         }
 
-        let class = self.get_wm_class(window);
-        if let Some(class) = class.resolve()? {
+        let wm_class = self.get_wm_class(window).resolve()?;
+        if let Some(class) = wm_class.clone() {
             server_state.set_win_class(window, class);
         }
 
@@ -678,6 +678,7 @@ impl XState {
             has_transient_for: transient_for.is_some(),
             window_types,
             motif_wm_hints,
+            wm_class,
         };
         let role = heuristics.guess_window_role(&self.window_atoms);
         if log::log_enabled!(target: "window_role_heuristics", log::Level::Debug) {
@@ -1209,12 +1210,18 @@ impl WindowRole {
     }
 }
 
+// An escape hatch for Yabridge, which needs to be a pop-up despite lack of an indicator
+const POPUP_WM_CLASSES: [&str; 2] = [
+    "yabridge-host.exe",    // wine 10.xx
+    "yabridge-host.exe.so", // wine 9.xx
+];
 #[derive(Default)]
 struct WindowRoleHeuristics {
     override_redirect: bool,
     has_transient_for: bool,
     window_types: Vec<x::Atom>,
     motif_wm_hints: Option<motif::Hints>,
+    wm_class: Option<String>,
 }
 impl WindowRoleHeuristics {
     fn guess_window_role(&self, window_atoms: &WindowTypes) -> WindowRole {
@@ -1230,6 +1237,13 @@ impl WindowRoleHeuristics {
             if hints.functions.is_some_and(|f| f.is_empty()) {
                 return WindowRole::Popup;
             }
+        }
+        if self
+            .wm_class
+            .as_ref()
+            .is_some_and(|c| POPUP_WM_CLASSES.contains(&c.as_str()))
+        {
+            return WindowRole::Popup;
         }
 
         let mut window_types = self.window_types.clone();
@@ -1268,7 +1282,7 @@ impl WindowRoleHeuristics {
     fn log(&self, connection: &xcb::Connection) -> String {
         format!(
             "override_redirect: {}, has_transient_for: {}, window_types: {:?}, \
-            motif_wm_hints: {:?}",
+            motif_wm_hints: {:?}, wm_class: {:?}",
             self.override_redirect,
             self.has_transient_for,
             self.window_types
@@ -1276,6 +1290,7 @@ impl WindowRoleHeuristics {
                 .map(|t| get_atom_name(connection, *t))
                 .collect::<Vec<_>>(),
             self.motif_wm_hints,
+            self.wm_class,
         )
     }
 }
