@@ -101,6 +101,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
             &xsock_xwl.as_raw_fd().to_string(),
             "-displayfd",
             &ready_tx.as_raw_fd().to_string(),
+            "-enable-ei-portal",
         ])
         .args(data.flags())
         .env("WAYLAND_DISPLAY", socket.socket_name().unwrap())
