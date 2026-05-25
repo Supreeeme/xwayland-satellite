@@ -451,7 +451,7 @@ impl SurfaceEvents {
 
                 if first_configure {
                     let window_data = data.get::<&WindowData>().unwrap();
-                    if window_data.attrs.acquire_input_via_wm {
+                    if window_data.attrs.require_wm_focus() {
                         let window = *data.get::<&x::Window>().unwrap();
                         state.inner.to_focus = Some(FocusData {
                             window,

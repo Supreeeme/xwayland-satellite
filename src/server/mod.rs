@@ -101,6 +101,7 @@ where
 struct WindowAttributes {
     is_popup: bool,
     acquire_input_via_wm: bool,
+    has_take_focus: bool,
     dims: WindowDims,
     size_hints: Option<WmNormalHints>,
     title: Option<WmName>,
@@ -108,6 +109,13 @@ struct WindowAttributes {
     group: Option<x::Window>,
     decorations: Option<Decorations>,
     transient_for: Option<x::Window>,
+}
+
+impl WindowAttributes {
+    /// AKA "Passive" input model
+    fn require_wm_focus(&self) -> bool {
+        self.acquire_input_via_wm && !self.has_take_focus
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
@@ -961,6 +969,16 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         let attrs = &mut self.world.get::<&mut WindowData>(id).unwrap().attrs;
         attrs.group = hints.window_group;
         attrs.acquire_input_via_wm = hints.acquire_input_via_wm;
+    }
+
+    pub fn set_take_focus(&mut self, window: x::Window, has_take_focus: bool) {
+        let Some(id) = self.windows.get(&window).copied() else {
+            debug!("not setting hints for unknown window {window:?}");
+            return;
+        };
+
+        let attrs = &mut self.world.get::<&mut WindowData>(id).unwrap().attrs;
+        attrs.has_take_focus = has_take_focus;
     }
 
     pub fn set_size_hints(&mut self, window: x::Window, hints: WmNormalHints) {

@@ -634,6 +634,7 @@ impl XState {
         let size_hints = self.get_wm_size_hints(window);
         let motif_wm_hints = self.get_motif_wm_hints(window);
         let wm_hints = self.get_wm_hints(window);
+        let protocols = self.get_protocols(window);
         let mut title = name.resolve()?;
         if title.is_none() {
             title = self.get_wm_name(window).resolve()?;
@@ -647,6 +648,10 @@ impl XState {
         }
         if let Some(hints) = size_hints.resolve()? {
             server_state.set_size_hints(window, hints);
+        }
+        if let Some(reply) = protocols.resolve()? {
+            let protocols: &[x::Atom] = reply.value();
+            server_state.set_take_focus(window, protocols.contains(&self.atoms.wm_take_focus));
         }
         let wmhints = wm_hints.resolve()?;
         let motif_hints = motif_wm_hints.resolve()?;
@@ -909,6 +914,19 @@ impl XState {
         }
     }
 
+    fn get_protocols(
+        &self,
+        window: x::Window,
+    ) -> PropertyCookieWrapper<'_, impl PropertyResolver<Output = x::GetPropertyReply>> {
+        let cookie = self.get_property_cookie(window, self.atoms.wm_protocols, x::ATOM_ATOM, 10);
+        let resolver = |reply: x::GetPropertyReply| reply;
+        PropertyCookieWrapper {
+            connection: &self.connection,
+            cookie,
+            resolver,
+        }
+    }
+
     fn get_wm_size_hints(
         &self,
         window: x::Window,
@@ -1039,6 +1057,7 @@ xcb::atoms_struct! {
         wl_surface_id => b"WL_SURFACE_ID" only_if_exists = false,
         wl_surface_serial => b"WL_SURFACE_SERIAL" only_if_exists = false,
         wm_protocols => b"WM_PROTOCOLS" only_if_exists = false,
+        wm_take_focus => b"WM_TAKE_FOCUS" only_if_exists = false,
         wm_delete_window => b"WM_DELETE_WINDOW" only_if_exists = false,
         wm_transient_for => b"WM_TRANSIENT_FOR" only_if_exists = false,
         wm_state => b"WM_STATE" only_if_exists = false,

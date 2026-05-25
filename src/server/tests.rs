@@ -1673,6 +1673,47 @@ fn popup_focus_on_map_with_input_hint() {
     assert_eq!(f.connection().focused_window, Some(win_popup));
 }
 
+#[test]
+fn popup_no_focus_input_hint_wm_take_focus() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+
+    let win_toplevel = Window::new(1);
+    let (_, toplevel_id) = f.create_toplevel(&comp, win_toplevel);
+
+    let win_popup = Window::new(2);
+    let (buffer, surface) = comp.create_surface();
+    let dims = WindowDims {
+        x: 10,
+        y: 20,
+        width: 100,
+        height: 50,
+    };
+    let data = WindowData {
+        mapped: true,
+        dims,
+        fullscreen: false,
+    };
+    f.new_window(win_popup, true, data);
+    f.satellite.set_win_hints(
+        win_popup,
+        super::WmHints {
+            window_group: None,
+            acquire_input_via_wm: true,
+        },
+    );
+    f.satellite.set_take_focus(win_popup, true);
+    f.map_window(&comp, win_popup, &surface.obj, &buffer);
+    f.run();
+
+    let popup_id = f.check_new_surface();
+    assert_ne!(popup_id, toplevel_id);
+
+    f.testwl.configure_popup(popup_id);
+    f.run();
+
+    assert_eq!(f.connection().focused_window, Some(win_toplevel));
+}
+
 #[track_caller]
 fn check_output_position_event(output: &TestObject<WlOutput>, pos: (i32, i32)) {
     let mut geo = None;
