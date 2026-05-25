@@ -2105,32 +2105,32 @@ fn popup_heuristics() {
     );
     f.map_as_toplevel(&mut connection, ardour_toplevel);
 
-    let yabridge_popup = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    let normal_skip_taskbar_window = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
-        yabridge_popup,
+        normal_skip_taskbar_window,
         x::ATOM_ATOM,
         connection.atoms.win_type,
         &[connection.atoms.win_type_normal],
     );
     connection.set_property(
-        yabridge_popup,
+        normal_skip_taskbar_window,
         connection.atoms.motif_wm_hints,
         connection.atoms.motif_wm_hints,
         &[0x2_u32, 0, 0, 0, 0],
     );
     connection.set_property(
-        yabridge_popup,
+        normal_skip_taskbar_window,
         connection.atoms.wm_hints,
         connection.atoms.wm_hints,
         &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
     );
     connection.set_property(
-        yabridge_popup,
+        normal_skip_taskbar_window,
         x::ATOM_ATOM,
         connection.atoms.net_wm_state,
         &[connection.atoms.skip_taskbar],
     );
-    f.map_as_popup(&mut connection, yabridge_popup);
+    f.map_as_toplevel(&mut connection, normal_skip_taskbar_window);
 
     let steam = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
@@ -2173,6 +2173,27 @@ fn popup_heuristics() {
         &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
     );
     f.map_as_toplevel(&mut connection, battle_net);
+
+    let steam_game = connection.new_window(connection.root, 10, 10, 50, 50, false);
+    connection.set_property(
+        steam_game,
+        x::ATOM_ATOM,
+        connection.atoms.win_type,
+        &[connection.atoms.win_type_normal],
+    );
+    connection.set_property(
+        steam_game,
+        connection.atoms.motif_wm_hints,
+        connection.atoms.motif_wm_hints,
+        &[0x3_u32, 0x24, 0x0, 0x0, 0x0],
+    );
+    connection.set_property(
+        steam_game,
+        connection.atoms.wm_hints,
+        connection.atoms.wm_hints,
+        &[0x1_u32, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
+    f.map_as_toplevel(&mut connection, steam_game);
 
     let wallpaper_engine = connection.new_window(connection.root, 10, 10, 50, 50, false);
     connection.set_property(
