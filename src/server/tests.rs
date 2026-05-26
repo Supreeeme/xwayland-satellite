@@ -1388,6 +1388,11 @@ macro_rules! selection_tests {
             }
 
             #[test]
+            fn copy_from_x11_without_x11_focus() {
+                super::copy_from_x11_without_x11_focus::<$selection_type>();
+            }
+
+            #[test]
             fn copy_from_wayland() {
                 super::copy_from_wayland::<$selection_type>();
             }
@@ -1444,6 +1449,26 @@ fn copy_from_x11<T: SelectionTest>() {
         true
     });
     assert_eq!(*mimes, data);
+}
+
+fn copy_from_x11_without_x11_focus<T: SelectionTest>() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+
+    let mimes = std::rc::Rc::new(vec![testwl::PasteData {
+        mime_type: "text".to_string(),
+        data: b"abc".to_vec(),
+    }]);
+
+    f.satellite.set_selection_source::<T::SelectionType>(&mimes);
+    f.run();
+
+    let win = Window::new(1);
+    let (_surface, _id) = f.create_toplevel(&comp, win);
+
+    let server_mimes = T::mimes(&mut f.testwl);
+    for mime in mimes.iter() {
+        assert!(server_mimes.contains(&mime.mime_type));
+    }
 }
 
 fn copy_from_wayland<T: SelectionTest>() {

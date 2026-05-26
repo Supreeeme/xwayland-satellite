@@ -1,288 +1,265 @@
-use super::clientside::SelectionEvents;
-use super::{InnerServerState, MyWorld, ServerState};
+use super::clientside::MyWorld;
+use super::{InnerServerState, ServerState};
 use crate::{X11Selection, XConnection};
-use log::{info, warn};
-use smithay_client_toolkit::data_device_manager::ReadPipe;
+use log::info;
+use rustix::pipe::{PipeFlags, pipe_with};
+use std::io::Read;
+use std::marker::PhantomData;
+use std::os::fd::{AsFd, OwnedFd};
+use std::rc::{Rc, Weak};
+use std::sync::Mutex;
+use wayland_client::Proxy;
+use wayland_client::QueueHandle;
 use wayland_client::globals::GlobalList;
 use wayland_client::protocol::wl_seat::WlSeat;
-use wayland_client::{Proxy, QueueHandle};
 
-use smithay_client_toolkit::data_device_manager::{
-    DataDeviceManagerState, data_device::DataDevice,
-    data_offer::SelectionOffer as WlSelectionOffer, data_source::CopyPasteSource,
+use wayland_protocols::ext::data_control::v1::client::{
+    ext_data_control_device_v1::ExtDataControlDeviceV1,
+    ext_data_control_manager_v1::ExtDataControlManagerV1,
+    ext_data_control_offer_v1::ExtDataControlOfferV1,
+    ext_data_control_source_v1::ExtDataControlSourceV1,
 };
-use smithay_client_toolkit::primary_selection::PrimarySelectionManagerState;
-use smithay_client_toolkit::primary_selection::device::PrimarySelectionDevice;
-use smithay_client_toolkit::primary_selection::offer::PrimarySelectionOffer;
-use smithay_client_toolkit::primary_selection::selection::PrimarySelectionSource;
-use std::io::Read;
-use std::rc::{Rc, Weak};
+
+#[derive(Copy, Clone, Debug)]
+pub(super) enum SourceKind {
+    Clipboard,
+    Primary,
+}
+
+pub(crate) fn offer_mimes(offer: &ExtDataControlOfferV1) -> Vec<String> {
+    let data: &Mutex<Vec<String>> = offer.data().unwrap();
+    data.lock().unwrap().clone()
+}
 
 pub(super) struct SelectionStates<S: X11Selection> {
-    clipboard: Option<SelectionState<S, Clipboard>>,
-    primary: Option<SelectionState<S, Primary>>,
+    manager: Option<ExtDataControlManagerV1>,
+    device: Option<ExtDataControlDeviceV1>,
+    clipboard: SlotState<S>,
+    primary: SlotState<S>,
+}
+
+struct SlotState<S: X11Selection> {
+    source: Option<SlotSource<S>>,
+}
+
+impl<S: X11Selection> Default for SlotState<S> {
+    fn default() -> Self {
+        Self { source: None }
+    }
+}
+
+enum SlotSource<S: X11Selection> {
+    X11 {
+        inner: ExtDataControlSourceV1,
+        data: Weak<S>,
+    },
+    Foreign(AnyForeignSelection),
+}
+
+// Not a `Drop` impl: `new_selection` partial-moves the inner offer out of `AnyForeignSelection`
+// into `ForeignSelection`, which has its own Drop. Anywhere we drop an `AnyForeignSelection`
+// without transferring its offer first goes through `destroy_slot` instead.
+struct AnyForeignSelection {
+    mime_types: Box<[String]>,
+    inner: ExtDataControlOfferV1,
+}
+
+fn destroy_slot<S: X11Selection>(s: Option<SlotSource<S>>) {
+    match s {
+        Some(SlotSource::X11 { inner, .. }) => inner.destroy(),
+        Some(SlotSource::Foreign(f)) => f.inner.destroy(),
+        None => {}
+    }
 }
 
 impl<S: X11Selection> SelectionStates<S> {
     pub fn new(global_list: &GlobalList, qh: &QueueHandle<MyWorld>) -> Self {
+        let manager = global_list
+            .bind::<ExtDataControlManagerV1, _, _>(qh, 1..=1, ())
+            .ok();
+        if manager.is_none() {
+            info!(
+                "compositor does not expose ext-data-control-v1; X11 selection bridge disabled"
+            );
+        }
         Self {
-            clipboard: DataDeviceManagerState::bind(global_list, qh)
-                .inspect_err(|e| {
-                    warn!("Could not bind data device manager ({e:?}). Clipboard will not work.")
-                })
-                .ok()
-                .map(SelectionState::new),
-            primary: PrimarySelectionManagerState::bind(global_list, qh)
-                .inspect_err(|_| info!("Primary selection unsupported."))
-                .ok()
-                .map(SelectionState::new),
+            manager,
+            device: None,
+            clipboard: SlotState::default(),
+            primary: SlotState::default(),
         }
     }
 
     pub fn seat_created(&mut self, qh: &QueueHandle<MyWorld>, seat: &WlSeat) {
-        if let Some(c) = &mut self.clipboard {
-            c.device = Some(c.manager.get_data_device(qh, seat));
+        let Some(m) = self.manager.as_ref() else {
+            return;
+        };
+        let device = m.get_data_device(seat, qh, ());
+        // Push any pending X11 selections to the new device. set_selection_source may have
+        // been called before the wl_seat global arrived (during startup).
+        if let Some(SlotSource::X11 { inner, .. }) = &self.clipboard.source {
+            device.set_selection(Some(inner));
         }
-
-        if let Some(d) = &mut self.primary {
-            d.device = Some(d.manager.get_selection_device(qh, seat));
+        if let Some(SlotSource::X11 { inner, .. }) = &self.primary.source {
+            device.set_primary_selection(Some(inner));
         }
+        self.device = Some(device);
     }
-}
 
-enum SelectionData<S: X11Selection, T: SelectionType> {
-    X11 { inner: T::Source, data: Weak<S> },
-    Foreign(ForeignSelection<T>),
-}
-
-struct SelectionState<S: X11Selection, T: SelectionType> {
-    manager: T::Manager,
-    device: Option<T::DataDevice>,
-    source: Option<SelectionData<S, T>>,
-}
-
-impl<S: X11Selection, T: SelectionType> SelectionState<S, T> {
-    fn new(manager: T::Manager) -> Self {
-        Self {
-            manager,
-            device: None,
-            source: None,
+    fn slot_mut(&mut self, kind: SourceKind) -> &mut SlotState<S> {
+        match kind {
+            SourceKind::Clipboard => &mut self.clipboard,
+            SourceKind::Primary => &mut self.primary,
         }
     }
 }
 
 impl<S: X11Selection> InnerServerState<S> {
     pub(super) fn handle_selection_events(&mut self) {
-        self.handle_impl::<Clipboard>();
-        self.handle_impl::<Primary>();
+        self.handle_impl(SourceKind::Clipboard);
+        self.handle_impl(SourceKind::Primary);
     }
 
-    fn handle_impl<T: SelectionType>(&mut self) {
-        let Some(state) = T::selection_state(&mut self.selection_states) else {
+    fn handle_impl(&mut self, kind: SourceKind) {
+        if self.selection_states.manager.is_none() {
             return;
+        }
+
+        let events = match kind {
+            SourceKind::Clipboard => &mut self.world.clipboard,
+            SourceKind::Primary => &mut self.world.primary,
         };
 
-        let events = T::get_events(&mut self.world);
+        let requests = std::mem::take(&mut events.requests);
+        let cancelled = std::mem::replace(&mut events.cancelled, false);
+        let offer_taken = events.offer.take();
+        let slot = self.selection_states.slot_mut(kind);
 
-        for (mime_type, fd) in std::mem::take(&mut events.requests) {
-            let SelectionData::X11 { data, .. } = state.source.as_ref().unwrap() else {
-                unreachable!("Got selection request without having set the selection?")
-            };
-            if let Some(data) = data.upgrade() {
-                data.write_to(&mime_type, fd);
+        for (mime_type, fd) in requests {
+            if let Some(SlotSource::X11 { data, .. }) = slot.source.as_ref() {
+                if let Some(data) = data.upgrade() {
+                    data.write_to(&mime_type, fd);
+                }
             }
         }
 
-        if events.cancelled {
-            state.source = None;
-            events.cancelled = false;
+        if cancelled {
+            destroy_slot(slot.source.take());
         }
 
-        if state.source.is_none() {
-            if let Some(offer) = T::take_offer(&mut events.offer) {
-                let mime_types = T::get_mimes(&offer);
-                let foreign = ForeignSelection {
-                    mime_types,
-                    inner: offer,
-                };
-                state.source = Some(SelectionData::Foreign(foreign));
+        if let Some(offer) = offer_taken {
+            match slot.source.as_ref() {
+                Some(SlotSource::X11 { .. }) => {
+                    // Our X11-owned source is still active; the compositor will deliver a
+                    // Cancelled to it shortly. Drop this incoming foreign offer.
+                    offer.destroy();
+                }
+                _ => {
+                    // None or stale Foreign: replace with the new offer.
+                    destroy_slot(slot.source.take());
+                    let mime_types = offer_mimes(&offer);
+                    slot.source = Some(SlotSource::Foreign(AnyForeignSelection {
+                        mime_types: mime_types.into_boxed_slice(),
+                        inner: offer,
+                    }));
+                }
             }
         }
     }
 
     pub(crate) fn set_selection_source<T: SelectionType>(&mut self, selection: &Rc<S>) {
-        if let Some(state) = T::selection_state(&mut self.selection_states) {
-            let src = T::create_source(&state.manager, &self.qh, selection.mime_types());
-            let data = SelectionData::X11 {
-                inner: src,
-                data: Rc::downgrade(selection),
-            };
-            let SelectionData::X11 { inner, .. } = state.source.insert(data) else {
-                unreachable!();
-            };
-            if let Some(serial) = self
-                .last_kb_serial
-                .as_ref()
-                .map(|(_seat, serial)| serial)
-                .copied()
-            {
-                T::set_selection(inner, state.device.as_ref().unwrap(), serial);
-            }
+        let Some(manager) = self.selection_states.manager.as_ref() else {
+            return;
+        };
+        let kind = T::KIND;
+        let src = manager.create_data_source(&self.qh, kind);
+        for mime in selection.mime_types() {
+            src.offer(mime.to_owned());
         }
+        if let Some(device) = self.selection_states.device.as_ref() {
+            T::set_on_device(device, Some(&src));
+        }
+        let slot = self.selection_states.slot_mut(kind);
+        destroy_slot(slot.source.take());
+        slot.source = Some(SlotSource::X11 {
+            inner: src,
+            data: Rc::downgrade(selection),
+        });
     }
 
     pub(crate) fn new_selection<T: SelectionType>(&mut self) -> Option<ForeignSelection<T>> {
-        T::selection_state(&mut self.selection_states)
-            .as_mut()
-            .and_then(|state| {
-                state.source.take().and_then(|s| match s {
-                    SelectionData::Foreign(f) => Some(f),
-                    SelectionData::X11 { .. } => {
-                        state.source = Some(s);
-                        None
-                    }
-                })
-            })
+        let slot = self.selection_states.slot_mut(T::KIND);
+        match slot.source.take()? {
+            SlotSource::Foreign(f) => Some(ForeignSelection {
+                mime_types: f.mime_types,
+                inner: f.inner,
+                _kind: PhantomData,
+            }),
+            other => {
+                slot.source = Some(other);
+                None
+            }
+        }
     }
 }
 
 pub struct ForeignSelection<T: SelectionType> {
     pub mime_types: Box<[String]>,
-    inner: T::Offer,
+    inner: ExtDataControlOfferV1,
+    _kind: PhantomData<fn() -> T>,
 }
 
-#[allow(private_bounds)]
 impl<T: SelectionType> ForeignSelection<T> {
     pub(crate) fn receive(
         &self,
         mime_type: String,
         state: &ServerState<impl XConnection>,
     ) -> Vec<u8> {
-        let mut pipe = T::receive_offer(&self.inner, mime_type).unwrap();
+        let (read, write) = pipe_with(PipeFlags::CLOEXEC).unwrap();
+        self.inner.receive(mime_type, OwnedFd::from(write).as_fd());
         state.queue.flush().unwrap();
         let mut data = Vec::new();
-        pipe.read_to_end(&mut data).unwrap();
+        let mut read = std::fs::File::from(OwnedFd::from(read));
+        read.read_to_end(&mut data).unwrap();
         data
     }
 }
 
-#[allow(private_bounds, private_interfaces)]
-pub trait SelectionType: Sized {
-    type Source;
-    type Offer;
-    type Manager;
-    type DataDevice;
-
-    // The methods in this trait shouldn't be used outside of this file.
-
-    fn selection_state<S: X11Selection>(
-        state: &mut SelectionStates<S>,
-    ) -> &mut Option<SelectionState<S, Self>>;
-
-    fn create_source(
-        manager: &Self::Manager,
-        qh: &QueueHandle<MyWorld>,
-        mime_types: Vec<&str>,
-    ) -> Self::Source;
-
-    fn set_selection(source: &Self::Source, device: &Self::DataDevice, serial: u32);
-
-    fn get_events(world: &mut MyWorld) -> &mut SelectionEvents<Self::Offer>;
-
-    fn receive_offer(offer: &Self::Offer, mime_type: String) -> std::io::Result<ReadPipe>;
-
-    fn take_offer(offer: &mut Option<Self::Offer>) -> Option<Self::Offer> {
-        offer.take()
+impl<T: SelectionType> Drop for ForeignSelection<T> {
+    fn drop(&mut self) {
+        self.inner.destroy();
     }
+}
 
-    fn get_mimes(offer: &Self::Offer) -> Box<[String]>;
+#[allow(private_bounds, private_interfaces)]
+pub trait SelectionType: sealed::Sealed {
+    const KIND: SourceKind;
+    fn set_on_device(device: &ExtDataControlDeviceV1, source: Option<&ExtDataControlSourceV1>);
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::Clipboard {}
+    impl Sealed for super::Primary {}
 }
 
 pub enum Clipboard {}
 pub enum Primary {}
 
-#[allow(private_bounds, private_interfaces)]
+#[allow(private_interfaces)]
 impl SelectionType for Clipboard {
-    type Source = CopyPasteSource;
-    type Offer = WlSelectionOffer;
-    type Manager = DataDeviceManagerState;
-    type DataDevice = DataDevice;
+    const KIND: SourceKind = SourceKind::Clipboard;
 
-    fn selection_state<S: X11Selection>(
-        state: &mut SelectionStates<S>,
-    ) -> &mut Option<SelectionState<S, Self>> {
-        &mut state.clipboard
-    }
-
-    fn create_source(
-        manager: &Self::Manager,
-        qh: &QueueHandle<MyWorld>,
-        mime_types: Vec<&str>,
-    ) -> Self::Source {
-        manager.create_copy_paste_source(qh, mime_types)
-    }
-
-    fn set_selection(source: &Self::Source, device: &Self::DataDevice, serial: u32) {
-        source.set_selection(device, serial);
-    }
-
-    fn get_events(world: &mut MyWorld) -> &mut SelectionEvents<Self::Offer> {
-        &mut world.clipboard
-    }
-
-    fn take_offer(offer: &mut Option<Self::Offer>) -> Option<Self::Offer> {
-        offer.take().filter(|offer| offer.inner().is_alive())
-    }
-
-    fn get_mimes(offer: &Self::Offer) -> Box<[String]> {
-        offer.with_mime_types(|mimes| mimes.into())
-    }
-
-    fn receive_offer(offer: &Self::Offer, mime_type: String) -> std::io::Result<ReadPipe> {
-        offer.receive(mime_type).map_err(|e| {
-            use smithay_client_toolkit::data_device_manager::data_offer::DataOfferError;
-            match e {
-                DataOfferError::InvalidReceive => std::io::Error::from(std::io::ErrorKind::Other),
-                DataOfferError::Io(e) => e,
-            }
-        })
+    fn set_on_device(device: &ExtDataControlDeviceV1, source: Option<&ExtDataControlSourceV1>) {
+        device.set_selection(source);
     }
 }
 
-#[allow(private_bounds, private_interfaces)]
+#[allow(private_interfaces)]
 impl SelectionType for Primary {
-    type Source = PrimarySelectionSource;
-    type Offer = PrimarySelectionOffer;
-    type Manager = PrimarySelectionManagerState;
-    type DataDevice = PrimarySelectionDevice;
+    const KIND: SourceKind = SourceKind::Primary;
 
-    fn selection_state<S: X11Selection>(
-        state: &mut SelectionStates<S>,
-    ) -> &mut Option<SelectionState<S, Self>> {
-        &mut state.primary
-    }
-
-    fn create_source(
-        manager: &Self::Manager,
-        qh: &QueueHandle<MyWorld>,
-        mime_types: Vec<&str>,
-    ) -> Self::Source {
-        manager.create_selection_source(qh, mime_types)
-    }
-
-    fn set_selection(source: &Self::Source, device: &Self::DataDevice, serial: u32) {
-        source.set_selection(device, serial);
-    }
-
-    fn get_events(world: &mut MyWorld) -> &mut SelectionEvents<Self::Offer> {
-        &mut world.primary
-    }
-
-    fn receive_offer(offer: &Self::Offer, mime_type: String) -> std::io::Result<ReadPipe> {
-        offer.receive(mime_type)
-    }
-
-    fn get_mimes(offer: &Self::Offer) -> Box<[String]> {
-        offer.with_mime_types(|mimes| mimes.into())
+    fn set_on_device(device: &ExtDataControlDeviceV1, source: Option<&ExtDataControlSourceV1>) {
+        device.set_primary_selection(source);
     }
 }
