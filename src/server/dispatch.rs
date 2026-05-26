@@ -234,7 +234,7 @@ impl<S: X11Selection>
                         client,
                         server,
                         viewport,
-                        scale: SurfaceScaleFactor(1.0),
+                        scale: SurfaceScaleFactor(state.current_scale),
                     },
                 );
                 if let Some(f) = fractional {
