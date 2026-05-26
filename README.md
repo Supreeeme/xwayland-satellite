@@ -26,10 +26,14 @@ Some (most?) Java applications may present themselves as a blank screen by defau
 cargo build
 # release build
 cargo build --release
+```
 
-# run - will also build if not already built
+## Running
+```
+# will also build if not already built
 cargo run # --release
 ```
+If `satellite` is integrated into your compositor, the compositor's integration will take precedence over other running instances, even if its `satellite` instance is not running. To test latest commit and/or changes, either disable the integration, configure it to launch your built executable, or install `satellite` to the currently-configured location (likely `/usr/bin/xwayland-satellite`) and kill all running `satellite`. In all but the last case, you will need to restart the compositor for the changes to take effect.
 
 ## Systemd support
 xwayland-satellite can be built with systemd support - simply add `-F systemd` to your build command - i.e. `cargo build --release -F systemd`.
