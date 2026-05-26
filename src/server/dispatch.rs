@@ -537,7 +537,7 @@ impl<S: X11Selection>
                     client.get_relative_pointer(&client_pointer, &state.qh, entity)
                 };
                 let server = data_init.init(id, entity);
-                state.world.spawn_at(entity, (server, client));
+                state.world.spawn_at(entity, (server, client, PointerEntity(pointer_entity)));
             }
             _ => warn!("unhandled relative pointer request: {request:?}"),
         }
