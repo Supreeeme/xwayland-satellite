@@ -32,6 +32,20 @@ const BUTTON_HOVER_TRANSITION_DURATION: Duration = Duration::from_millis(500);
 const BUTTON_ACTIVE_TRANSITION_DURATION: Duration = Duration::from_millis(200);
 const UNFOCUS_TRANSITION_DURATION: Duration = Duration::from_millis(200);
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameExtents {
+    pub left: u32,
+    pub right: u32,
+    pub top: u32,
+    pub bottom: u32,
+}
+
+impl FrameExtents {
+    pub(crate) const fn as_ewmh_cardinals(self) -> [u32; 4] {
+        [self.left, self.right, self.top, self.bottom]
+    }
+}
+
 static DARK_DECORATION_THEME: LazyLock<DecorationTheme> =
     LazyLock::new(DecorationTheme::dark);
 static LIGHT_DECORATION_THEME: LazyLock<DecorationTheme> =
@@ -535,6 +549,25 @@ impl DecorationsDataSatellite {
 
     pub(crate) fn titlebar_height(&self) -> i32 {
         Self::titlebar_height_for(self.draw_titlebar)
+    }
+
+    pub(crate) fn frame_extents_for(
+        maximized: bool,
+        resizable: bool,
+        draw_titlebar: bool,
+    ) -> FrameExtents {
+        let border = Self::geometry_border_for(maximized, resizable).max(0) as u32;
+        let titlebar_height = Self::titlebar_height_for(draw_titlebar).max(0) as u32;
+        FrameExtents {
+            left: border,
+            right: border,
+            top: titlebar_height + border,
+            bottom: border,
+        }
+    }
+
+    pub(crate) fn frame_extents(&self) -> FrameExtents {
+        Self::frame_extents_for(self.maximized, self.resizable, self.draw_titlebar)
     }
 
     pub(crate) fn window_geometry_for(

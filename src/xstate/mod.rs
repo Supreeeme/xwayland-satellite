@@ -352,6 +352,19 @@ impl XState {
             .unwrap();
     }
 
+    fn set_frame_extents(&self, window: x::Window, extents: [u32; 4]) -> XResult<()> {
+        debug!("setting {window:?} _NET_FRAME_EXTENTS to {extents:?}");
+        self.connection.send_and_check_request(&x::ChangeProperty {
+            mode: x::PropMode::Replace,
+            window,
+            property: self.atoms.frame_extents,
+            r#type: x::ATOM_CARDINAL,
+            data: &extents,
+        })?;
+
+        Ok(())
+    }
+
     fn create_ewmh_window(&mut self) {
         self.connection
             .send_and_check_request(&x::CreateWindow {
@@ -376,6 +389,8 @@ impl XState {
             x::ATOM_ATOM,
             &[
                 self.atoms.active_win,
+                self.atoms.frame_extents,
+                self.atoms.request_frame_extents,
                 self.atoms.motif_wm_hints,
                 self.atoms.net_wm_state,
                 self.atoms.net_wm_allowed_actions,
@@ -709,6 +724,10 @@ impl XState {
             }
             x if x == self.atoms.active_win => {
                 server_state.activate_window(e.window());
+            }
+            x if x == self.atoms.request_frame_extents => {
+                let extents = server_state.frame_extents_for_window(e.window());
+                unwrap_or_skip_bad_window_ret!(self.set_frame_extents(e.window(), extents));
             }
             x if x == self.atoms.moveresize => {
                 let x::ClientMessageData::Data32(data) = e.data() else {
@@ -1226,6 +1245,8 @@ xcb::atoms_struct! {
         active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
         supported => b"_NET_SUPPORTED" only_if_exists = false,
+        frame_extents => b"_NET_FRAME_EXTENTS" only_if_exists = false,
+        request_frame_extents => b"_NET_REQUEST_FRAME_EXTENTS" only_if_exists = false,
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
         utf8_string => b"UTF8_STRING" only_if_exists = false,
         clipboard => b"CLIPBOARD" only_if_exists = false,

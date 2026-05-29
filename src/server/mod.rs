@@ -1456,6 +1456,50 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
+    pub fn frame_extents_for_window(&self, window: x::Window) -> [u32; 4] {
+        let Some(entity) = self.windows.get(&window).copied() else {
+            debug!("using zero frame extents for unknown window {window:?}");
+            return decoration::FrameExtents::default().as_ewmh_cardinals();
+        };
+
+        let Ok(data) = self.world.entity(entity) else {
+            debug!("using zero frame extents for stale window {window:?}");
+            return decoration::FrameExtents::default().as_ewmh_cardinals();
+        };
+
+        let Some(win) = data.get::<&WindowData>() else {
+            debug!("using zero frame extents for window without data {window:?}");
+            return decoration::FrameExtents::default().as_ewmh_cardinals();
+        };
+
+        let wants_satellite_decorations = win
+            .attrs
+            .decorations
+            .is_none_or(|decorations| decorations.is_serverside());
+
+        if !wants_satellite_decorations {
+            return decoration::FrameExtents::default().as_ewmh_cardinals();
+        }
+
+        if let Some(role) = data.get::<&SurfaceRole>() {
+            if let SurfaceRole::Toplevel(Some(toplevel)) = &*role {
+                if let Some(decoration) = toplevel.decoration.satellite.as_deref() {
+                    return decoration.frame_extents().as_ewmh_cardinals();
+                }
+            }
+
+            return decoration::FrameExtents::default().as_ewmh_cardinals();
+        }
+
+        if self.decoration_manager.is_some() {
+            return decoration::FrameExtents::default().as_ewmh_cardinals();
+        }
+
+        let resizable = decoration::toplevel_has_resize_border(&win, false, false, false);
+        DecorationsDataSatellite::frame_extents_for(false, resizable, wants_satellite_decorations)
+            .as_ewmh_cardinals()
+    }
+
     pub fn set_window_serial(&mut self, window: x::Window, serial: [u32; 2]) {
         let Some(id) = self.windows.get(&window).copied() else {
             warn!("Tried to set serial for unknown window {window:?}");
