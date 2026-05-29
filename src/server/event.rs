@@ -432,6 +432,15 @@ impl SurfaceEvents {
 
                 debug!("{} entered {}", surface.id(), output.id());
 
+                let frame_extents = data
+                    .get::<&x::Window>()
+                    .map(|window| {
+                        X11FrameExtents::from_ewmh_cardinals(
+                            state.frame_extents_for_window(*window),
+                        )
+                    })
+                    .unwrap_or_default();
+
                 let mut query = data.query::<(&x::Window, &mut WindowData)>();
                 if let Some((window, win_data)) = query.get() {
                     let Some(dimensions) = output_data.get::<&OutputDimensions>() else {
@@ -442,7 +451,12 @@ impl SurfaceEvents {
                         y: dimensions.y - state.global_output_offset.y.value,
                     };
 
-                    win_data.update_output_offset_on_enter(*window, offset, connection);
+                    win_data.update_output_offset_on_enter(
+                        *window,
+                        offset,
+                        frame_extents,
+                        connection,
+                    );
 
                     if previous_output.is_none() && state.last_focused_toplevel == Some(*window) {
                         let output = get_output_name(Some(&on_output), &state.world);
@@ -1543,7 +1557,7 @@ impl OutputDimensions {
         })
     }
 
-    fn x11_position(
+    pub(super) fn x11_position(
         &self,
         global_output_offset: &GlobalOutputOffset,
         x11_scale: f64,
@@ -1554,7 +1568,7 @@ impl OutputDimensions {
         )
     }
 
-    fn x11_logical_size(&self, x11_scale: f64) -> (i32, i32) {
+    pub(super) fn x11_logical_size(&self, x11_scale: f64) -> (i32, i32) {
         let (width, height) = self.effective_logical_size();
         (
             scale_x11_dimension(width, x11_scale),
@@ -1644,6 +1658,7 @@ fn update_window_output_offsets(
                 x: dimensions.x - global_output_offset.x.value,
                 y: dimensions.y - global_output_offset.y.value,
             },
+            X11FrameExtents::default(),
             connection,
         );
     }

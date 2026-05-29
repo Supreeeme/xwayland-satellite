@@ -594,20 +594,23 @@ impl XState {
                         width: e.width(),
                         height: e.height(),
                     };
-                    let mut list = Vec::new();
                     let mask = e.value_mask();
+                    let (accepted_dims, position_was_sanitized) =
+                        server_state.accepted_configure_request_dims(e.window(), mask, dims);
+                    let mut list = Vec::new();
                     let translated_move = mask.intersects(x::ConfigWindowMask::X | x::ConfigWindowMask::Y)
-                        && server_state.begin_configure_move(e.window(), dims, mask);
+                        && server_state.begin_configure_move(e.window(), accepted_dims, mask);
                     let translated_resize = mask
                         .intersects(x::ConfigWindowMask::WIDTH | x::ConfigWindowMask::HEIGHT)
-                        && server_state.begin_configure_resize(e.window(), dims, mask);
+                        && server_state.begin_configure_resize(e.window(), accepted_dims, mask);
                     server_state.handle_configure_request(
                         e.window(),
                         mask,
-                        e.x(),
-                        e.y(),
-                        e.width(),
-                        e.height(),
+                        accepted_dims.x,
+                        accepted_dims.y,
+                        accepted_dims.width,
+                        accepted_dims.height,
+                        position_was_sanitized,
                     );
 
                     let can_change_position =
@@ -615,17 +618,17 @@ impl XState {
 
                     if !translated_move && !translated_resize && can_change_position {
                         if mask.contains(x::ConfigWindowMask::X) {
-                            list.push(x::ConfigWindow::X(e.x().into()));
+                            list.push(x::ConfigWindow::X(accepted_dims.x.into()));
                         }
                         if mask.contains(x::ConfigWindowMask::Y) {
-                            list.push(x::ConfigWindow::Y(e.y().into()));
+                            list.push(x::ConfigWindow::Y(accepted_dims.y.into()));
                         }
                     }
                     if !translated_resize && mask.contains(x::ConfigWindowMask::WIDTH) {
-                        list.push(x::ConfigWindow::Width(e.width().into()));
+                        list.push(x::ConfigWindow::Width(accepted_dims.width.into()));
                     }
                     if !translated_resize && mask.contains(x::ConfigWindowMask::HEIGHT) {
-                        list.push(x::ConfigWindow::Height(e.height().into()));
+                        list.push(x::ConfigWindow::Height(accepted_dims.height.into()));
                     }
 
                     unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(

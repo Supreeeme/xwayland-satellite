@@ -168,6 +168,64 @@ enum ConfigureResizeDecision {
     StartWaylandResize(MoveResizeDirection),
 }
 
+#[derive(Debug, Copy, Clone)]
+struct X11PlacementBounds {
+    min_x: i32,
+    min_y: i32,
+    max_right: i32,
+    max_bottom: i32,
+}
+
+impl X11PlacementBounds {
+    fn clamp(self, dims: WindowDims, frame_extents: X11FrameExtents) -> WindowDims {
+        let width = i32::from(dims.width.max(1));
+        let height = i32::from(dims.height.max(1));
+        let min_x = self.min_x.saturating_add(frame_extents.left);
+        let min_y = self.min_y.saturating_add(frame_extents.top);
+        let max_x = self
+            .max_right
+            .saturating_sub(width)
+            .saturating_sub(frame_extents.right)
+            .max(min_x);
+        let max_y = self
+            .max_bottom
+            .saturating_sub(height)
+            .saturating_sub(frame_extents.bottom)
+            .max(min_y);
+
+        WindowDims {
+            x: clamp_i32_to_i16(i32::from(dims.x).clamp(min_x, max_x)),
+            y: clamp_i32_to_i16(i32::from(dims.y).clamp(min_y, max_y)),
+            width: dims.width,
+            height: dims.height,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+struct X11FrameExtents {
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+}
+
+impl X11FrameExtents {
+    fn from_ewmh_cardinals(extents: [u32; 4]) -> Self {
+        let to_i32 = |value: u32| value.min(i32::MAX as u32) as i32;
+        Self {
+            left: to_i32(extents[0]),
+            right: to_i32(extents[1]),
+            top: to_i32(extents[2]),
+            bottom: to_i32(extents[3]),
+        }
+    }
+}
+
+fn clamp_i32_to_i16(value: i32) -> i16 {
+    value.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+}
+
 #[derive(Debug)]
 struct WindowData {
     mapped: bool,
@@ -176,6 +234,7 @@ struct WindowData {
     output_offset_initialized: bool,
     activation_token: Option<String>,
     initial_toplevel_map_state: InitialToplevelMapState,
+    initial_position_sanitized: bool,
     configure_interaction: Option<ConfigureInteraction>,
 }
 
@@ -194,6 +253,7 @@ impl WindowData {
             output_offset_initialized: false,
             activation_token,
             initial_toplevel_map_state: InitialToplevelMapState::None,
+            initial_position_sanitized: false,
             configure_interaction: None,
         }
     }
@@ -215,13 +275,14 @@ impl WindowData {
         &mut self,
         window: x::Window,
         offset: WindowOutputOffset,
+        frame_extents: X11FrameExtents,
         connection: &mut C,
     ) {
-        if !self.is_popup() && self.has_output_offset() {
+        if !self.is_popup() && self.has_output_offset() && !self.initial_position_sanitized {
             return;
         }
 
-        self.update_output_offset(window, offset, connection);
+        self.update_output_offset(window, offset, frame_extents, connection);
     }
 
     fn should_defer_initial_toplevel_map(&self) -> bool {
@@ -230,8 +291,8 @@ impl WindowData {
                 .attrs
                 .decorations
                 .is_some_and(|decorations| decorations.is_serverside())
-            && self.attrs.dims.x == 0
-            && self.attrs.dims.y == 0
+            && (self.initial_position_sanitized
+                || self.attrs.dims.x == 0 && self.attrs.dims.y == 0)
             && matches!(self.initial_toplevel_map_state, InitialToplevelMapState::None)
     }
 
@@ -268,20 +329,23 @@ impl WindowData {
         &mut self,
         window: x::Window,
         offset: WindowOutputOffset,
+        frame_extents: X11FrameExtents,
         connection: &mut C,
     ) {
         log::trace!(target: "output_offset", "offset: {offset:?}");
-        if self.output_offset_initialized && offset == self.output_offset {
+        if self.output_offset_initialized && offset == self.output_offset && !self.initial_position_sanitized {
             return;
         }
 
         let previous_offset = self.output_offset;
+        let apply_initial_output_offset = self.initial_position_sanitized;
 
         // A non-zero startup position is already in global X11 coordinates when the
         // surface first enters an output. Record the output origin without shifting
         // the window again; later output moves should still apply deltas normally.
         if !self.output_offset_initialized
             && (self.attrs.dims.x != 0 || self.attrs.dims.y != 0)
+            && !apply_initial_output_offset
         {
             self.record_output_offset(offset);
             return;
@@ -289,17 +353,28 @@ impl WindowData {
 
         self.attrs.dims.x += (offset.x - previous_offset.x) as i16;
         self.attrs.dims.y += (offset.y - previous_offset.y) as i16;
-        let new_x = self.attrs.dims.x as i32;
-        let new_y = self.attrs.dims.y as i32;
         let width = self.attrs.dims.width as _;
         let height = self.attrs.dims.height as _;
         self.record_output_offset(offset);
+        if apply_initial_output_offset {
+            self.attrs.dims.x = self
+                .attrs
+                .dims
+                .x
+                .max(clamp_i32_to_i16(offset.x.saturating_add(frame_extents.left)));
+            self.attrs.dims.y = self
+                .attrs
+                .dims
+                .y
+                .max(clamp_i32_to_i16(offset.y.saturating_add(frame_extents.top)));
+            self.initial_position_sanitized = false;
+        }
 
         if connection.set_window_dims(
             window,
             PendingSurfaceState {
-                x: new_x,
-                y: new_y,
+                x: i32::from(self.attrs.dims.x),
+                y: i32::from(self.attrs.dims.y),
                 width,
                 height,
             },
@@ -1637,6 +1712,102 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
     }
 
+    fn x11_placement_bounds(&self) -> Option<X11PlacementBounds> {
+        let mut min_x = i32::MAX;
+        let mut min_y = i32::MAX;
+        let mut max_right = i32::MIN;
+        let mut max_bottom = i32::MIN;
+
+        for (_, dimensions) in self.world.query::<&OutputDimensions>().iter() {
+            let (x, y) = dimensions.x11_position(
+                &self.global_output_offset,
+                self.published_x11_scale,
+            );
+            let (width, height) = dimensions.x11_logical_size(self.published_x11_scale);
+            if width <= 0 || height <= 0 {
+                continue;
+            }
+
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_right = max_right.max(x.saturating_add(width));
+            max_bottom = max_bottom.max(y.saturating_add(height));
+        }
+
+        if min_x == i32::MAX || min_y == i32::MAX {
+            return None;
+        }
+
+        Some(X11PlacementBounds {
+            min_x,
+            min_y,
+            max_right,
+            max_bottom,
+        })
+    }
+
+    fn should_sanitize_initial_toplevel_position(
+        win: &WindowData,
+        requested_dims: WindowDims,
+        has_role: bool,
+        has_deferred_initial_map: bool,
+    ) -> bool {
+        !win.attrs.is_popup
+            && (!has_role || has_deferred_initial_map)
+            && (requested_dims.width > 1 || requested_dims.height > 1)
+    }
+
+    pub fn accepted_configure_request_dims(
+        &self,
+        window: x::Window,
+        mask: x::ConfigWindowMask,
+        dims: WindowDims,
+    ) -> (WindowDims, bool) {
+        let Some(entity) = self.windows.get(&window).copied() else {
+            return (dims, false);
+        };
+        let Ok(data) = self.world.entity(entity) else {
+            return (dims, false);
+        };
+        let Some(win) = data.get::<&WindowData>() else {
+            return (dims, false);
+        };
+
+        let current_dims = win.attrs.dims;
+        let requested_dims = Self::requested_dims_from_mask(current_dims, dims, mask);
+        let has_role = self.world.get::<&SurfaceRole>(entity).is_ok();
+        let has_deferred_initial_map = win.has_deferred_initial_toplevel_map();
+        let should_sanitize = Self::should_sanitize_initial_toplevel_position(
+            &win,
+            requested_dims,
+            has_role,
+            has_deferred_initial_map,
+        );
+        drop(win);
+
+        if !should_sanitize {
+            return (requested_dims, false);
+        }
+
+        let Some(bounds) = self.x11_placement_bounds() else {
+            return (requested_dims, false);
+        };
+
+        let frame_extents = X11FrameExtents::from_ewmh_cardinals(
+            self.frame_extents_for_window(window),
+        );
+        let accepted_dims = bounds.clamp(requested_dims, frame_extents);
+        let position_was_sanitized =
+            accepted_dims.x != requested_dims.x || accepted_dims.y != requested_dims.y;
+        if position_was_sanitized {
+            debug!(
+                "clamping initial toplevel ConfigureRequest for {window:?}: requested={requested_dims:?} accepted={accepted_dims:?} bounds={bounds:?} frame_extents={frame_extents:?}"
+            );
+        }
+
+        (accepted_dims, position_was_sanitized)
+    }
+
     pub fn handle_configure_request(
         &mut self,
         window: x::Window,
@@ -1645,6 +1816,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         y: i16,
         width: u16,
         height: u16,
+        position_was_sanitized: bool,
     ) {
         let Some(entity) = self.windows.get(&window).copied() else {
             return;
@@ -1671,6 +1843,11 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
         if mask.contains(x::ConfigWindowMask::Y) {
             win.attrs.dims.y = y;
+        }
+        if position_was_sanitized
+            && mask.intersects(x::ConfigWindowMask::X | x::ConfigWindowMask::Y)
+        {
+            win.initial_position_sanitized = true;
         }
         if mask.contains(x::ConfigWindowMask::WIDTH) {
             win.attrs.dims.width = width;
@@ -2106,6 +2283,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             }
             win.mapped = false;
             win.initial_toplevel_map_state = InitialToplevelMapState::None;
+            win.initial_position_sanitized = false;
         }
 
         if let Ok(mut role) = self.world.remove_one::<SurfaceRole>(entity.unwrap()) {
