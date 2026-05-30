@@ -1886,6 +1886,19 @@ fn remove_all_outputs() {
 }
 
 #[test]
+fn late_output_scale_after_remove_output() {
+    let (mut f, _) = TestFixture::new_with_compositor();
+
+    let (_, output) = f.new_output(0, 0);
+    f.run();
+
+    f.remove_output(output.clone());
+    output.scale(2);
+    output.done();
+    f.run();
+}
+
+#[test]
 fn output_offset_surface_positioning() {
     let (mut f, comp) = TestFixture::new_with_compositor();
 
