@@ -1026,7 +1026,10 @@ fn update_output_scale(
     mut output_scale: hecs::QueryOne<&mut OutputScaleFactor>,
     factor: OutputScaleFactor,
 ) -> bool {
-    let output_scale = output_scale.get().unwrap();
+    let Some(output_scale) = output_scale.get() else {
+        return false;
+    };
+
     if matches!(output_scale, OutputScaleFactor::Fractional(..))
         && matches!(factor, OutputScaleFactor::Output(..))
     {
