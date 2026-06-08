@@ -1272,7 +1272,6 @@ impl OutputEvent {
                     state,
                 );
                 let global_output_offset = state.global_output_offset;
-                let global_offset_updated = state.global_offset_updated;
 
                 let Ok((output, dimensions, xdg)) = state.world.query_one_mut::<(
                     &WlOutput,
@@ -1282,18 +1281,16 @@ impl OutputEvent {
                     return;
                 };
 
-                if !global_offset_updated {
-                    output.geometry(
-                        x - global_output_offset.x.value,
-                        y - global_output_offset.y.value,
-                        physical_width,
-                        physical_height,
-                        convert_wenum(subpixel),
-                        make,
-                        model,
-                        convert_wenum(transform),
-                    );
-                }
+                output.geometry(
+                    x - global_output_offset.x.value,
+                    y - global_output_offset.y.value,
+                    physical_width,
+                    physical_height,
+                    convert_wenum(subpixel),
+                    make,
+                    model,
+                    convert_wenum(transform),
+                );
                 dimensions.rotated_90 = transform.into_result().is_ok_and(|t| {
                     matches!(
                         t,

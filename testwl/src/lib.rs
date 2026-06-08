@@ -864,6 +864,10 @@ impl Server {
             .find_map(|(output, data)| (data.name == name).then_some(output.clone()))
     }
 
+    pub fn get_xdg_output(&mut self, output: &WlOutput) -> Option<ZxdgOutputV1> {
+        self.state.outputs[output].xdg.clone()
+    }
+
     pub fn move_output(&mut self, output: &WlOutput, x: i32, y: i32) {
         output.geometry(
             x,
@@ -1091,9 +1095,6 @@ impl Dispatch<ZxdgOutputManagerV1, ()> for State {
         match request {
             zxdg_output_manager_v1::Request::GetXdgOutput { id, output } => {
                 let xdg = data_init.init(id, output.clone());
-                xdg.logical_position(0, 0);
-                xdg.logical_size(1000, 1000);
-                xdg.done();
                 state.outputs.get_mut(&output).unwrap().xdg = Some(xdg);
             }
             other => todo!("unhandled request: {other:?}"),
@@ -1126,25 +1127,12 @@ impl GlobalDispatch<WlOutput, (i32, i32)> for State {
         _: &DisplayHandle,
         _: &Client,
         resource: wayland_server::New<WlOutput>,
-        &(x, y): &(i32, i32),
+        &(_x, _y): &(i32, i32),
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
         let output = data_init.init(resource, ());
-        output.geometry(
-            x,
-            y,
-            0,
-            0,
-            wl_output::Subpixel::None,
-            "xwls".to_string(),
-            "fake monitor".to_string(),
-            wl_output::Transform::Normal,
-        );
         state.output_counter += 1;
         let name = format!("WL-{}", state.output_counter);
-        output.name(name.clone());
-        output.mode(wl_output::Mode::Current, 1000, 1000, 0);
-        output.done();
         state.outputs.insert(
             output.clone(),
             Output {

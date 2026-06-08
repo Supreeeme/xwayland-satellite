@@ -1823,6 +1823,98 @@ fn negative_output_coordinates() {
 }
 
 #[test]
+fn output_offset_xdg_matches_crtcs() {
+    let mut f = Fixture::new_preset(|testwl| {
+        testwl.enable_xdg_output_manager();
+    });
+    let connection = Connection::new(&f.display);
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct OutputInfo {
+        name: String,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    }
+    let mut outputs = vec![
+        OutputInfo {
+            name: "WL-1".into(),
+            x: 2560,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        },
+        OutputInfo {
+            name: "WL-2".into(),
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        },
+    ];
+
+    // WL-1 is added first, then WL-2. They are positioned so the addition of WL-2 triggers a
+    // global output offset change. Additionally, they specify wl_output and zxdg_output
+    // simultaneously, meaning when the global offset change code is ran, they will always use the
+    // Xdg output codepath. This leaves only the required wl_output::geometry event sent at global
+    // binding to be forwarded to Xwayland.
+    for info in outputs.iter() {
+        let out = f.create_output(info.x, info.y);
+        out.geometry(
+            info.x,
+            info.y,
+            16,
+            9,
+            wl_output::Subpixel::Unknown,
+            "satellite".into(),
+            info.name.clone(),
+            wl_output::Transform::Normal,
+        );
+        out.mode(wl_output::Mode::Current, info.width, info.height, 60);
+        out.name(info.name.clone());
+        out.done();
+        let out_xdg = f.testwl.get_xdg_output(&out).unwrap();
+        out_xdg.logical_position(info.x, info.y);
+        out_xdg.logical_size(info.width, info.height);
+        out_xdg.done();
+        f.testwl.dispatch();
+    }
+
+    // Give Xwayland time to respond to all of the events
+    std::thread::sleep(Duration::from_millis(50));
+    // If the required wl_output::geometry event on binding is not sent, Xwayland will leave the
+    // cathode-ray tube controller (CRTC; a representation of the area to be sent to output(s) in
+    // RandR) with an uninitialized rotation, which swaps the width and height of the CRTC.
+    let resources = connection.get_reply(&xcb::randr::GetScreenResources {
+        window: connection.root,
+    });
+    assert_eq!(resources.outputs().len(), 2);
+    for output in resources.outputs().iter().copied() {
+        let output_reply = connection.get_reply(&xcb::randr::GetOutputInfo {
+            output,
+            config_timestamp: resources.config_timestamp(),
+        });
+        let name = std::str::from_utf8(output_reply.name()).unwrap();
+        let info_idx = outputs.iter().position(|o| o.name == name).unwrap();
+        let crtc_reply = connection.get_reply(&xcb::randr::GetCrtcInfo {
+            crtc: output_reply.crtc(),
+            config_timestamp: resources.config_timestamp(),
+        });
+        let crtc_info = OutputInfo {
+            name: name.into(),
+            x: crtc_reply.x() as _,
+            y: crtc_reply.y() as _,
+            width: crtc_reply.width() as _,
+            height: crtc_reply.height() as _,
+        };
+        assert_eq!(crtc_info, outputs[info_idx]);
+        assert_eq!(crtc_reply.rotation(), xcb::randr::Rotation::ROTATE_0);
+        outputs.swap_remove(info_idx);
+    }
+}
+
+#[test]
 fn xdg_decorations() {
     let mut f = Fixture::new();
     let mut connection = Connection::new(&f.display);
