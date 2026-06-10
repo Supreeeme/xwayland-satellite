@@ -581,10 +581,23 @@ impl Server {
     /// This function must be called after the globals have been dispatched in order to use the
     /// output on the server side created by `new_output` (this function's return value).
     #[track_caller]
-    pub fn finalize_output(&mut self) -> WlOutput {
+    pub fn finalize_output(&mut self, x: i32, y: i32) -> WlOutput {
         let output_s = self.state.last_output.take().expect("No new outputs");
         let output_data = self.state.outputs.get_mut(&output_s).unwrap();
         output_data.global_id = self.state.last_output_global.take();
+        output_s.geometry(
+            x,
+            y,
+            0,
+            0,
+            wl_output::Subpixel::None,
+            "xwls".to_string(),
+            "fake monitor".to_string(),
+            wl_output::Transform::Normal,
+        );
+        output_s.mode(wl_output::Mode::Current, 1000, 1000, 0);
+        output_s.done();
+        self.dispatch();
         output_s
     }
 
@@ -851,9 +864,8 @@ impl Server {
         self.display.flush_clients().unwrap();
     }
 
-    pub fn new_output(&mut self, x: i32, y: i32) {
-        self.state.last_output_global =
-            Some(self.dh.create_global::<State, WlOutput, _>(4, (x, y)));
+    pub fn new_output(&mut self) {
+        self.state.last_output_global = Some(self.dh.create_global::<State, WlOutput, _>(4, ()));
         self.display.flush_clients().unwrap();
     }
 
@@ -1121,18 +1133,20 @@ impl Dispatch<ZxdgOutputV1, WlOutput> for State {
     }
 }
 
-impl GlobalDispatch<WlOutput, (i32, i32)> for State {
+impl GlobalDispatch<WlOutput, ()> for State {
     fn bind(
         state: &mut Self,
         _: &DisplayHandle,
         _: &Client,
         resource: wayland_server::New<WlOutput>,
-        &(_x, _y): &(i32, i32),
+        _: &(),
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
         let output = data_init.init(resource, ());
         state.output_counter += 1;
         let name = format!("WL-{}", state.output_counter);
+        output.name(name.clone());
+        output.done();
         state.outputs.insert(
             output.clone(),
             Output {

@@ -316,9 +316,9 @@ impl Fixture {
     }
 
     fn create_output(&mut self, x: i32, y: i32) -> wayland_server::protocol::wl_output::WlOutput {
-        self.testwl.new_output(x, y);
+        self.testwl.new_output();
         self.wait_and_dispatch();
-        self.testwl.finalize_output()
+        self.testwl.finalize_output(x, y)
     }
 }
 
@@ -1501,8 +1501,8 @@ fn close_window() {
 #[test]
 fn primary_output() {
     let mut f = Fixture::new_preset(|testwl| {
-        testwl.new_output(0, 0); // WL-1
-        testwl.new_output(500, 500); // WL-2
+        testwl.new_output(); // WL-1
+        testwl.new_output(); // WL-2
     });
     let mut conn = Connection::new(&f.display);
 
@@ -1971,6 +1971,9 @@ fn forced_1x_scale_consistent_x11_size() {
     let mut f = Fixture::new();
     f.testwl.enable_xdg_output_manager();
     let output = f.create_output(0, 0);
+    let xdg_out = f.testwl.get_xdg_output(&output).unwrap();
+    xdg_out.logical_position(0, 0);
+    xdg_out.logical_size(1000, 1000);
     output.scale(2);
     output.done();
 
@@ -2290,9 +2293,8 @@ fn popup_heuristics() {
 
 #[test]
 fn xsettings_scale() {
-    let mut f = Fixture::new_preset(|testwl| {
-        testwl.new_output(0, 0); // WL-1
-    });
+    let mut f = Fixture::new();
+    f.create_output(0, 0);
     let connection = Connection::new(&f.display);
     f.testwl.enable_xdg_output_manager();
 
@@ -2339,13 +2341,11 @@ fn xsettings_scale() {
 #[test]
 fn xsettings_fractional_scale() {
     let mut f = Fixture::new_preset(|testwl| {
-        testwl.new_output(0, 0); // WL-1
         testwl.enable_fractional_scale();
     });
     let mut connection = Connection::new(&f.display);
     f.testwl.enable_xdg_output_manager();
-
-    let output = f.testwl.finalize_output();
+    let output = f.create_output(0, 0); // WL-1
 
     let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
     let surface = f.map_as_toplevel(&mut connection, window);
@@ -2476,7 +2476,7 @@ fn xsettings_switch_owner() {
 fn rotated_output() {
     let mut f = Fixture::new_preset(|testwl| {
         testwl.enable_xdg_output_manager();
-        testwl.new_output(0, 0);
+        testwl.new_output();
     });
     let mut connection = Connection::new(&f.display);
 
