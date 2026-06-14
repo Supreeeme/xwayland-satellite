@@ -1440,13 +1440,19 @@ fn bad_clipboard_data() {
     assert!(data.data.is_empty(), "Unexpected data: {:?}", data.data);
 }
 
-// issue #42
+// issue #42 for title + #441 for class
 #[test]
-fn funny_window_title() {
+fn funny_window_title_class() {
     let mut f = Fixture::new();
     let mut connection = Connection::new(&f.display);
     let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
     connection.set_property(window, x::ATOM_STRING, x::ATOM_WM_NAME, b"title\0\0\0\0");
+    connection.set_property(
+        window,
+        x::ATOM_STRING,
+        x::ATOM_WM_CLASS,
+        b"instance\0class\0\0\0\0",
+    );
     connection.map_window(window);
     f.wait_and_dispatch();
 
@@ -1457,6 +1463,7 @@ fn funny_window_title() {
     f.configure_and_verify_new_toplevel(&mut connection, window, surface);
     let data = f.testwl.get_surface_data(surface).unwrap();
     assert_eq!(data.toplevel().title, Some("title".into()));
+    assert_eq!(data.toplevel().app_id, Some("class".into()));
 
     connection.set_property(
         window,

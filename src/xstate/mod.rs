@@ -8,7 +8,6 @@ use crate::XConnection;
 use bitflags::bitflags;
 use log::{debug, trace, warn};
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::os::fd::BorrowedFd;
 use std::rc::Rc;
 use xcb::{Xid, XidNew, x};
@@ -835,18 +834,11 @@ impl XState {
             let data: &[u8] = reply.value();
             trace!("wm class data: {data:?}");
             // wm class (normally) is instance + class - ignore instance
-            let class_start = if let Some(p) = data.iter().copied().position(|b| b == 0u8) {
-                p + 1
-            } else {
-                0
-            };
-            let mut data = data[class_start..].to_vec();
-            if data.last().copied() != Some(0) {
-                data.push(0);
-            }
-            let class = CString::from_vec_with_nul(data).unwrap();
+            let mut fields = data.split(|b| *b == 0u8).filter(|s| !s.is_empty());
+            let instance = fields.next();
+            let class = fields.next().or(instance).unwrap_or(&[]);
             trace!("{window:?} class: {class:?}");
-            class.to_string_lossy().to_string()
+            String::from_utf8_lossy(class).to_string()
         };
         PropertyCookieWrapper {
             connection: &self.connection,
