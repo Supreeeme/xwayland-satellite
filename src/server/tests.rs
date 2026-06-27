@@ -2639,6 +2639,36 @@ fn toplevel_size_limits_scaled() {
     let toplevel = data.toplevel();
     assert_eq!(toplevel.min_size, Some(testwl::Vec2 { x: 20, y: 45 }));
     assert_eq!(toplevel.max_size, Some(testwl::Vec2 { x: 100, y: 125 }));
+
+    // Try unsetting size hints one after another
+    f.satellite.set_size_hints(
+        window,
+        super::WmNormalHints {
+            min_size: Some(WinSize {
+                width: 40,
+                height: 40,
+            }),
+            max_size: None,
+        },
+    );
+    f.run();
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let toplevel = data.toplevel();
+    assert_eq!(toplevel.min_size, Some(testwl::Vec2 { x: 20, y: 45 }));
+    assert_eq!(toplevel.max_size, None);
+
+    f.satellite.set_size_hints(
+        window,
+        super::WmNormalHints {
+            min_size: None,
+            max_size: None,
+        },
+    );
+    f.run();
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let toplevel = data.toplevel();
+    assert_eq!(toplevel.min_size, None);
+    assert_eq!(toplevel.max_size, None);
 }
 
 #[test]

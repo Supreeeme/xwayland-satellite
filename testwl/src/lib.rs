@@ -1544,20 +1544,28 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                 let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
                     unreachable!();
                 };
-                toplevel.min_size = Some(Vec2 {
-                    x: width,
-                    y: height,
-                });
+                toplevel.min_size = if width > 0 || height > 0 {
+                    Some(Vec2 {
+                        x: width,
+                        y: height,
+                    })
+                } else {
+                    None
+                };
             }
             xdg_toplevel::Request::SetMaxSize { width, height } => {
                 let data = state.surfaces.get_mut(surface_id).unwrap();
                 let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
                     unreachable!();
                 };
-                toplevel.max_size = Some(Vec2 {
-                    x: width,
-                    y: height,
-                });
+                toplevel.max_size = if width > 0 || height > 0 {
+                    Some(Vec2 {
+                        x: width,
+                        y: height,
+                    })
+                } else {
+                    None
+                };
             }
             xdg_toplevel::Request::SetFullscreen { .. } => {
                 let data = state.surfaces.get_mut(surface_id).unwrap();

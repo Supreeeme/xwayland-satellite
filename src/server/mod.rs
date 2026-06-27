@@ -1008,12 +1008,16 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                         (min_size.width as f64 / scale_factor.0) as i32,
                         (min_size.height as f64 / scale_factor.0) as i32 + decorations_height,
                     );
+                } else {
+                    data.toplevel.set_min_size(0, 0);
                 }
                 if let Some(max_size) = &hints.max_size {
                     data.toplevel.set_max_size(
                         (max_size.width as f64 / scale_factor.0) as i32,
                         (max_size.height as f64 / scale_factor.0) as i32 + decorations_height,
                     );
+                } else {
+                    data.toplevel.set_max_size(0, 0);
                 }
             }
             win.attrs.size_hints = Some(hints);
