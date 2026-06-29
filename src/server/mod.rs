@@ -1625,8 +1625,8 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         positioner.set_anchor_rect(
             0,
             0,
-            (parent_window.attrs.dims.width as f64 / initial_scale) as i32,
-            (parent_window.attrs.dims.height as f64 / initial_scale) as i32,
+            1.max((parent_window.attrs.dims.width as f64 / initial_scale) as i32),
+            1.max((parent_window.attrs.dims.height as f64 / initial_scale) as i32),
         );
         positioner
             .set_constraint_adjustment(ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY);
