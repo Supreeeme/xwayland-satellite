@@ -42,6 +42,8 @@ and be launched and enabled with `systemctl --user enable --now xwayland-satelli
 It will be started when the `graphical-session.target` is reached,
 which is likely after your compositor is started if it supports systemd.
 
+Note that you *do not* need the systemd service if the compositor already integrates xwayland-satellite (see below).
+
 ## Scaling/HiDPI
 For most GTK and Qt apps, xwayland-satellite should automatically scale them properly. Note that for mixed DPI monitor setups, satellite will choose
 the smallest monitor's DPI, meaning apps may have small text on other monitors.
