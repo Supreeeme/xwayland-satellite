@@ -36,7 +36,10 @@ use wayland_protocols::{
             zwp_locked_pointer_v1::ZwpLockedPointerV1,
             zwp_pointer_constraints_v1::{self, ZwpPointerConstraintsV1},
         },
-        relative_pointer::zv1::client::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+        relative_pointer::zv1::client::{
+            zwp_relative_pointer_manager_v1::{self, ZwpRelativePointerManagerV1},
+            zwp_relative_pointer_v1::ZwpRelativePointerV1,
+        },
         tablet::zv2::client::{
             zwp_tablet_manager_v2::{self, ZwpTabletManagerV2},
             zwp_tablet_pad_group_v2::{
@@ -114,6 +117,7 @@ struct Compositor {
     seat: TestObject<WlSeat>,
     tablet_man: TestObject<ZwpTabletManagerV2>,
     pointer_constraints: TestObject<ZwpPointerConstraintsV1>,
+    relative_pointer_man: TestObject<ZwpRelativePointerManagerV1>,
 } => CompositorOptional
 
 }
@@ -451,6 +455,9 @@ impl<C: XConnection> TestFixture<C> {
                     x if x == ZwpTabletManagerV2::interface().name => bind!(tablet_man),
                     x if x == ZwpPointerConstraintsV1::interface().name => {
                         bind!(pointer_constraints)
+                    }
+                    x if x == ZwpRelativePointerManagerV1::interface().name => {
+                        bind!(relative_pointer_man)
                     }
                     _ => {}
                 }
@@ -2981,6 +2988,90 @@ fn scaled_pointer_lock_position_hint() {
         lock_data.cursor_hint,
         Some(testwl::Vec2f { x: 50.0, y: 50.0 })
     );
+}
+
+#[test]
+fn scaled_relative_pointer_motion() {
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let comp = f.compositor();
+    let pointer =
+        TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+    let relative_pointer = TestObject::<ZwpRelativePointerV1>::from_request(
+        &comp.relative_pointer_man.obj,
+        zwp_relative_pointer_manager_v1::Request::GetRelativePointer {
+            pointer: pointer.obj.clone(),
+        },
+    );
+
+    let (_, output_unscaled) = f.new_output(0, 0);
+    let (_, output_scaled) = f.new_output(1000, 0);
+    let win = Window::new(1);
+    let (_, id) = f.create_toplevel(&comp, win);
+    let dx_in = 10.0;
+    let dy_in = -6.0;
+
+    f.testwl.move_surface_to_output(id, &output_unscaled);
+    f.testwl.move_pointer_to(id, 25.0, 25.0);
+    f.run();
+    f.run();
+    std::mem::take(&mut *relative_pointer.data.events.lock().unwrap());
+
+    f.testwl.relative_pointer_motion(dx_in, dy_in, dx_in, dy_in);
+    f.run();
+    f.run();
+
+    let mut events = std::mem::take(&mut *relative_pointer.data.events.lock().unwrap());
+    let event = events.pop().expect("No relative pointer event");
+    let Ev::<ZwpRelativePointerV1>::RelativeMotion {
+        dx,
+        dy,
+        dx_unaccel,
+        dy_unaccel,
+        ..
+    } = event
+    else {
+        panic!("Unexpected event: {event:?}");
+    };
+
+    assert_eq!(dx, dx_in);
+    assert_eq!(dy, dy_in);
+    assert_eq!(dx_unaccel, dx_in);
+    assert_eq!(dy_unaccel, dy_in);
+
+    let surface_data = f.testwl.get_surface_data(id).expect("No surface data");
+    let fractional = surface_data
+        .fractional
+        .as_ref()
+        .expect("No fractional scale for surface");
+    fractional.preferred_scale(180); // 1.5 scale
+    f.testwl.move_surface_to_output(id, &output_scaled);
+    f.testwl.move_pointer_to(id, 25.0, 25.0);
+    f.run();
+    f.run();
+
+    f.testwl.relative_pointer_motion(dx_in, dy_in, dx_in, dy_in);
+    f.run();
+    f.run();
+
+    let mut events = std::mem::take(&mut *relative_pointer.data.events.lock().unwrap());
+    let event = events.pop().expect("No relative pointer event");
+    let Ev::<ZwpRelativePointerV1>::RelativeMotion {
+        dx,
+        dy,
+        dx_unaccel,
+        dy_unaccel,
+        ..
+    } = event
+    else {
+        panic!("Unexpected event: {event:?}");
+    };
+
+    assert_eq!(dx, dx_in * 1.5);
+    assert_eq!(dy, dy_in * 1.5);
+    assert_eq!(dx_unaccel, dx_in);
+    assert_eq!(dy_unaccel, dy_in);
 }
 
 #[test]
