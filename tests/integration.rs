@@ -223,17 +223,21 @@ impl Fixture {
         window: x::Window,
         surface: testwl::SurfaceId,
     ) {
-        self.configure_and_verify_new_toplevel_with_size(connection, window, surface, 100, 100);
+        self.configure_and_verify_new_toplevel_with_scale(connection, window, surface, 1.0);
     }
 
-    fn configure_and_verify_new_toplevel_with_size(
+    fn configure_and_verify_new_toplevel_with_scale(
         &mut self,
         connection: &mut Connection,
         window: x::Window,
         surface: testwl::SurfaceId,
-        width: u16,
-        height: u16,
+        scale: f32,
     ) {
+        let unscaled_geo = connection.get_reply(&x::GetGeometry {
+            drawable: x::Drawable::Window(window),
+        });
+        let (u_width, u_height) = (unscaled_geo.width(), unscaled_geo.height());
+
         let data = self.testwl.get_surface_data(surface).unwrap();
         assert!(
             matches!(data.role, Some(testwl::SurfaceRole::Toplevel(_))),
@@ -241,18 +245,22 @@ impl Fixture {
             data.role
         );
 
-        self.testwl
-            .configure_toplevel(surface, 100, 100, vec![xdg_toplevel::State::Activated]);
+        self.testwl.configure_toplevel(
+            surface,
+            u_width as _,
+            u_height as _,
+            vec![xdg_toplevel::State::Activated],
+        );
         self.testwl.focus_toplevel(surface);
         self.wait_and_dispatch();
+
         let geometry = connection.get_reply(&x::GetGeometry {
             drawable: x::Drawable::Window(window),
         });
-
         assert_eq!(geometry.x(), 0);
         assert_eq!(geometry.y(), 0);
-        assert_eq!(geometry.width(), width);
-        assert_eq!(geometry.height(), height);
+        assert_eq!(geometry.width(), (u_width as f32 * scale) as _);
+        assert_eq!(geometry.height(), (u_height as f32 * scale) as _);
     }
 
     #[track_caller]
@@ -261,16 +269,15 @@ impl Fixture {
         connection: &mut Connection,
         window: x::Window,
     ) -> testwl::SurfaceId {
-        self.map_as_toplevel_with_size(connection, window, 100, 100)
+        self.map_as_toplevel_with_scale(connection, window, 1.0)
     }
 
     #[track_caller]
-    fn map_as_toplevel_with_size(
+    fn map_as_toplevel_with_scale(
         &mut self,
         connection: &mut Connection,
         window: x::Window,
-        width: u16,
-        height: u16,
+        scale: f32,
     ) -> testwl::SurfaceId {
         connection.map_window(window);
         self.wait_and_dispatch();
@@ -278,7 +285,7 @@ impl Fixture {
             .testwl
             .last_created_surface_id()
             .expect("No surface created");
-        self.configure_and_verify_new_toplevel_with_size(connection, window, surface, width, height);
+        self.configure_and_verify_new_toplevel_with_scale(connection, window, surface, scale);
         surface
     }
 
@@ -2008,7 +2015,7 @@ fn forced_1x_scale_consistent_x11_size() {
 
     let mut conn = Connection::new(&f.display);
     let window = conn.new_window(conn.root, 0, 0, 200, 200, false);
-    let surface = f.map_as_toplevel_with_size(&mut conn, window, 200, 200);
+    let surface = f.map_as_toplevel_with_scale(&mut conn, window, 2.0);
     f.testwl.move_surface_to_output(surface, &output);
     f.testwl.move_pointer_to(surface, 30.0, 40.0);
     f.wait_and_dispatch();
