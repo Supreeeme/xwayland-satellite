@@ -40,12 +40,17 @@ impl<S: X11Selection> SelectionStates<S> {
     }
 
     pub fn seat_created(&mut self, qh: &QueueHandle<MyWorld>, seat: &WlSeat) {
+        // Track a data device per seat rather than a single one: a compositor may expose more than
+        // one seat (e.g. niri's keyboard-only "injector" seat), and a later seat must not clobber
+        // the device for the seat the user actually copies/pastes on.
         if let Some(c) = &mut self.clipboard {
-            c.device = Some(c.manager.get_data_device(qh, seat));
+            c.devices
+                .push((seat.clone(), c.manager.get_data_device(qh, seat)));
         }
 
         if let Some(d) = &mut self.primary {
-            d.device = Some(d.manager.get_selection_device(qh, seat));
+            d.devices
+                .push((seat.clone(), d.manager.get_selection_device(qh, seat)));
         }
     }
 }
@@ -57,7 +62,8 @@ enum SelectionData<S: X11Selection, T: SelectionType> {
 
 struct SelectionState<S: X11Selection, T: SelectionType> {
     manager: T::Manager,
-    device: Option<T::DataDevice>,
+    /// One data device per seat, so an extra seat cannot displace the one carrying the selection.
+    devices: Vec<(WlSeat, T::DataDevice)>,
     source: Option<SelectionData<S, T>>,
 }
 
@@ -65,7 +71,7 @@ impl<S: X11Selection, T: SelectionType> SelectionState<S, T> {
     fn new(manager: T::Manager) -> Self {
         Self {
             manager,
-            device: None,
+            devices: Vec::new(),
             source: None,
         }
     }
@@ -120,13 +126,13 @@ impl<S: X11Selection> InnerServerState<S> {
             let SelectionData::X11 { inner, .. } = state.source.insert(data) else {
                 unreachable!();
             };
-            if let Some(serial) = self
-                .last_kb_serial
-                .as_ref()
-                .map(|(_seat, serial)| serial)
-                .copied()
-            {
-                T::set_selection(inner, state.device.as_ref().unwrap(), serial);
+            // Set the selection on the seat that produced the most recent keyboard serial (the
+            // seat the user is actually using). set_selection is ignored unless the device's seat
+            // matches the serial, so pick the matching device among the seats we know about.
+            if let Some((seat, serial)) = self.last_kb_serial.as_ref() {
+                if let Some((_, device)) = state.devices.iter().find(|(s, _)| s == seat) {
+                    T::set_selection(inner, device, *serial);
+                }
             }
         }
     }
