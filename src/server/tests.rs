@@ -2549,10 +2549,22 @@ fn fractional_scale_small_popup() {
         assert_eq!(viewport.height, 67);
     }
 
+    f.reconfigure_window(
+        toplevel,
+        WindowDims {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        },
+        false,
+    );
+    f.run();
+
     let popup = Window::new(2);
     let builder = PopupBuilder::new(popup, toplevel, toplevel_id)
-        .width(1)
-        .height(1)
+        .width(0)
+        .height(0)
         .check_size_and_pos(false);
 
     let (_, popup_id) = f.create_popup(&comp, builder);
@@ -2566,20 +2578,34 @@ fn fractional_scale_small_popup() {
         .expect("Missing popup data");
     let pos = &data.popup().positioner_state;
     assert_eq!(pos.size.unwrap(), testwl::Vec2 { x: 1, y: 1 });
+    assert_eq!(
+        pos.anchor_rect.as_ref().unwrap().size,
+        testwl::Vec2 { x: 1, y: 1 }
+    );
 
-    let dims = WindowDims {
-        x: 0,
-        y: 0,
-        width: 2,
-        height: 1,
-    };
-    f.reconfigure_window(popup, dims, true);
-    f.run();
+    f.reconfigure_window(
+        popup,
+        WindowDims {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 2,
+        },
+        true,
+    );
     f.run();
 
-    let dims = f.connection().window(popup).dims;
-    assert!(dims.width > 0);
-    assert!(dims.height > 0);
+    f.reconfigure_window(
+        popup,
+        WindowDims {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        },
+        true,
+    );
+    f.run();
 
     let data = f
         .testwl
