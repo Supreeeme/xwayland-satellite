@@ -1,4 +1,3 @@
-#![allow(clippy::needless_update)]
 use super::*;
 use xcb::{XidNew, x::Atom};
 
@@ -241,7 +240,6 @@ mod window_role_heuristics {
             window_types: vec![win_types.utility, win_types.normal],
             wm_class: Some("wechat".into()),
             wm_normal_hints: Some(wm_normal_hints.into()),
-            ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
@@ -263,7 +261,6 @@ mod window_role_heuristics {
             window_types: vec![win_types.utility],
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
             wm_class: Some("Godot".into()),
-            ..Default::default()
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
