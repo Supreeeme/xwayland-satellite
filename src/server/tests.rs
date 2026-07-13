@@ -815,8 +815,8 @@ impl TestFixture<FakeXConnection> {
                 assert_eq!(
                     pos.size.as_ref().unwrap(),
                     &testwl::Vec2 {
-                        x: (dims.width as f64 / scale) as i32,
-                        y: (dims.height as f64 / scale) as i32
+                        x: (dims.width as f64 / scale).ceil() as i32,
+                        y: (dims.height as f64 / scale).ceil() as i32
                     }
                 );
 
@@ -825,8 +825,8 @@ impl TestFixture<FakeXConnection> {
                     pos.anchor_rect.as_ref().unwrap(),
                     &testwl::Rect {
                         size: testwl::Vec2 {
-                            x: (parent_win.dims.width as f64 / scale) as i32,
-                            y: (parent_win.dims.height as f64 / scale) as i32
+                            x: (parent_win.dims.width as f64 / scale).ceil() as i32,
+                            y: (parent_win.dims.height as f64 / scale).ceil() as i32
                         },
                         offset: testwl::Vec2::default()
                     }
@@ -2476,8 +2476,8 @@ fn fractional_scale_popup() {
     let builder = PopupBuilder::new(popup, toplevel, toplevel_id)
         .x(60)
         .y(60)
-        .width(60)
-        .height(60)
+        .width(61)
+        .height(61)
         .scale(1.5);
     let initial_dims = builder.dims;
     f.create_popup(&comp, builder);
