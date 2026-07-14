@@ -1437,35 +1437,6 @@ impl XConnection for RealConnection {
         }) {
             debug!("ChangeProperty failed ({window:?}: {e:?})");
         }
-
-        if let Some(name) = output_name {
-            let Some(output) = self.outputs.get(&name).copied() else {
-                warn!("Couldn't find output {name}, primary output will be wrong");
-                return;
-            };
-            if output == self.primary_output {
-                debug!("primary output is already {name}");
-                return;
-            }
-
-            if let Err(e) = self
-                .connection
-                .send_and_check_request(&xcb::randr::SetOutputPrimary { window, output })
-            {
-                warn!("Couldn't set output {name} as primary: {e:?}");
-            } else {
-                debug!("set {name} as primary output");
-                self.primary_output = output;
-            }
-        } else {
-            let _ = self
-                .connection
-                .send_and_check_request(&xcb::randr::SetOutputPrimary {
-                    window,
-                    output: Xid::none(),
-                });
-            self.primary_output = Xid::none();
-        }
     }
 
     fn close_window(&mut self, window: x::Window) {
