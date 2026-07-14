@@ -55,7 +55,20 @@ impl Drop for DecorationsDataSatellite {
 }
 
 impl DecorationsDataSatellite {
-    pub const TITLEBAR_HEIGHT: i32 = 25;
+    pub fn calculate_titlebar_height() -> i32 {
+        static HEIGHT: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+        *HEIGHT.get_or_init(|| {
+            let px_scale = FONT.pt_to_px_scale(10.0).unwrap();
+            let font = FONT.as_scaled(px_scale);
+            let line_height = font.ascent() - font.descent() + font.line_gap();
+            let padding = 12.0;
+            (line_height + padding).round() as i32
+        })
+    }
+
+    pub fn titlebar_height(&self) -> i32 {
+        Self::calculate_titlebar_height()
+    }
 
     pub fn try_new(
         state: &InnerServerState<impl X11Selection>,
@@ -88,7 +101,8 @@ impl DecorationsDataSatellite {
                 .subcompositor
                 .get_subsurface(&surface, parent, &state.qh, ())
         };
-        subsurface.set_position(0, -Self::TITLEBAR_HEIGHT);
+        let start_height = Self::calculate_titlebar_height();
+        subsurface.set_position(0, -start_height);
         let viewport = state.viewporter.get_viewport(&surface, &state.qh, ());
 
         Some((
@@ -155,7 +169,7 @@ impl DecorationsDataSatellite {
 
         self.scale = parent_scale_factor;
         let mut drawn_width = (width as f32 * self.scale).ceil() as i32;
-        let drawn_height = (Self::TITLEBAR_HEIGHT as f32 * self.scale).ceil() as i32;
+        let drawn_height = (self.titlebar_height() as f32 * self.scale).ceil() as i32;
 
         let x = x_pixmap(drawn_height as u32, self.scale, self.x_data.hovered);
         if x.width() > drawn_width as u32 {
@@ -198,17 +212,18 @@ impl DecorationsDataSatellite {
         );
         self.x_data = DecorationsBox {
             rect: Rect::from_ltrb(
-                width as f32 - Self::TITLEBAR_HEIGHT as f32,
+                width as f32 - self.titlebar_height() as f32,
                 0.0,
                 width as f32,
-                Self::TITLEBAR_HEIGHT as f32,
+                self.titlebar_height() as f32,
             )
             .unwrap(),
             hovered: false,
         };
 
         self.pixmap = bar;
-        self.viewport.set_destination(width, Self::TITLEBAR_HEIGHT);
+        let bar_h = self.titlebar_height();
+        self.viewport.set_destination(width, bar_h);
         self.update_buffer(world);
     }
 

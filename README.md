@@ -83,7 +83,11 @@ Some Java applications may present themselves as a blank screen by default with 
 
 ### Scaling/HiDPI
 For most GTK and Qt apps, xwayland-satellite should automatically scale them properly. Note that for mixed DPI monitor setups, satellite will choose
-the smallest monitor's DPI, meaning apps may have small text on other monitors.
+the smallest monitor's DPI by default, meaning apps may have small text on other monitors.
+
+Alternatively, you can enable compositor-side scaling by setting the `XWAYLAND_SATELLITE_COMPOSITOR_SCALING` environment variable.
+In this mode, satellite will render X11 applications at the maximum monitor's DPI (HiDPI) and let the Wayland compositor downscale them on lower-DPI monitors.
+This ensures that apps do not look tiny or blurry on HiDPI displays in multi-monitor setups.
 
 Other miscellaneous apps (such as Wine apps) may have small text on HiDPI displays. It is application dependent on getting apps to scale properly with satellite,
 so you will have to figure out what app specific config needs to be set. See [the Arch Wiki on HiDPI](https://wiki.archlinux.org/title/HiDPI) for a good place start.

@@ -51,12 +51,16 @@ use wayland_server::protocol::{
 #[derive(Copy, Clone)]
 pub(super) struct SurfaceScaleFactor(pub f64);
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct EnteredOutputs(pub Vec<Entity>);
+
 #[derive(hecs::Bundle)]
 pub(super) struct SurfaceBundle {
     pub client: client::wl_surface::WlSurface,
     pub server: WlSurface,
     pub viewport: WpViewport,
     pub scale: SurfaceScaleFactor,
+    pub entered_outputs: EnteredOutputs,
 }
 
 #[derive(Debug)]
@@ -95,7 +99,12 @@ impl Event for SurfaceEvents {
                 wp_fractional_scale_v1::Event::PreferredScale { scale } => {
                     let state = state.deref_mut();
                     let entity = state.world.entity(target).unwrap();
-                    let factor = scale as f64 / 120.0;
+                    let true_fractional = scale as f64 / 120.0;
+                    let factor = if state.compositor_scaling {
+                        state.global_scale
+                    } else {
+                        true_fractional
+                    };
                     debug!(
                         "{} scale factor: {}",
                         entity.get::<&WlSurface>().unwrap().id(),
@@ -107,7 +116,9 @@ impl Event for SurfaceEvents {
                     if let Some(OnOutput(output)) = entity.get::<&OnOutput>().as_deref().copied() {
                         if update_output_scale(
                             state.world.query_one(output).unwrap(),
-                            OutputScaleFactor::Fractional(factor),
+                            OutputScaleFactor::Fractional(true_fractional),
+                            state.compositor_scaling,
+                            state.global_scale,
                         ) {
                             state.updated_outputs.push(output);
                         }
@@ -210,17 +221,29 @@ impl SurfaceEvents {
 
                 debug!("{} entered {}", surface.id(), output.id());
 
+                if let Ok(mut entered) = state.world.get::<&mut EnteredOutputs>(target) {
+                    if !entered.0.contains(&output_entity) {
+                        entered.0.push(output_entity);
+                    }
+                }
+
                 let mut query = data.query::<(&x::Window, &mut WindowData)>();
                 if let Some((window, win_data)) = query.get() {
                     let Some(dimensions) = output_data.get::<&OutputDimensions>() else {
                         return;
                     };
+                    let (ox, oy) =
+                        if let Ok(pos) = state.world.get::<&X11OutputPosition>(output_entity) {
+                            (pos.x, pos.y)
+                        } else {
+                            (
+                                dimensions.x - state.global_output_offset.x.value,
+                                dimensions.y - state.global_output_offset.y.value,
+                            )
+                        };
                     win_data.update_output_offset(
                         *window,
-                        WindowOutputOffset {
-                            x: dimensions.x - state.global_output_offset.x.value,
-                            y: dimensions.y - state.global_output_offset.y.value,
-                        },
+                        WindowOutputOffset { x: ox, y: oy },
                         connection,
                     );
                     if state.last_focused_toplevel == Some(*window) {
@@ -230,7 +253,16 @@ impl SurfaceEvents {
                     }
 
                     if state.fractional_scale.is_none() {
-                        let output_scale = output_data.get::<&OutputScaleFactor>().unwrap().get();
+                        let output_scale = if state.compositor_scaling {
+                            if state.global_scale == 1.0 {
+                                warn!(
+                                    "compositor scaling: global_scale not set yet, defaulting to 1.0"
+                                );
+                            }
+                            state.global_scale
+                        } else {
+                            output_data.get::<&OutputScaleFactor>().unwrap().get()
+                        };
                         data.get::<&mut SurfaceScaleFactor>().unwrap().0 = output_scale;
                         drop(query);
                         update_surface_viewport(
@@ -242,6 +274,8 @@ impl SurfaceEvents {
                         if update_output_scale(
                             state.world.query_one(on_output.0).unwrap(),
                             OutputScaleFactor::Fractional(scale.0),
+                            state.compositor_scaling,
+                            state.global_scale,
                         ) {
                             state.updated_outputs.push(on_output.0);
                         }
@@ -255,11 +289,33 @@ impl SurfaceEvents {
                     return;
                 };
                 surface.leave(&output);
+                if let Ok(mut entered) = state.world.get::<&mut EnteredOutputs>(target) {
+                    entered.0.retain(|&e| e != output_entity);
+                }
                 if data
                     .get::<&OnOutput>()
                     .is_some_and(|o| o.0 == output_entity)
                 {
                     cmd.remove_one::<OnOutput>(target);
+                    let mut fallback = None;
+                    if let Ok(entered) = state.world.get::<&EnteredOutputs>(target) {
+                        if let Some(&next_output) = entered.0.iter().find(|&&e| e != output_entity)
+                        {
+                            fallback = Some(next_output);
+                        }
+                    }
+                    if let Some(next_output) = fallback {
+                        cmd.insert_one(target, OnOutput(next_output));
+                        state.updated_outputs.push(next_output);
+                        let scale = data.get::<&SurfaceScaleFactor>().unwrap();
+                        // updated_outputs.push already happened above; just sync TrueOutputScaleFactor
+                        let _ = update_output_scale(
+                            state.world.query_one(next_output).unwrap(),
+                            OutputScaleFactor::Fractional(scale.0),
+                            state.compositor_scaling,
+                            state.global_scale,
+                        );
+                    }
                 }
             }
             Event::PreferredBufferScale { .. } => {}
@@ -311,6 +367,7 @@ impl SurfaceEvents {
                 "configuring {} ({window:?}): {x}x{y}, {width}x{height}",
                 data.get::<&WlSurface>().unwrap().id(),
             );
+
 
             window_data.attrs.dims = WindowDims {
                 x: x as i16,
@@ -473,11 +530,10 @@ pub(super) fn update_surface_viewport(
         if let Some(d) = &toplevel.decoration.satellite {
             let surface_width = (dims.width as f64 / scale_factor.0) as i32;
             if d.will_draw_decorations(surface_width) {
+                let bar_h = d.titlebar_height();
                 height = height
-                    .saturating_sub(
-                        (DecorationsDataSatellite::TITLEBAR_HEIGHT as f64 * scale_factor.0) as u16,
-                    )
-                    .max(DecorationsDataSatellite::TITLEBAR_HEIGHT as u16);
+                    .saturating_sub((bar_h as f64 * scale_factor.0) as u16)
+                    .max(bar_h as u16);
             }
         }
     }
@@ -506,11 +562,12 @@ pub(super) fn update_surface_viewport(
 }
 
 pub(super) fn update_size_hints(data: &ToplevelData, hints: &WmNormalHints, scale: f64) {
-    let decorations_height = if data.decoration.satellite.is_some() {
-        DecorationsDataSatellite::TITLEBAR_HEIGHT
-    } else {
-        0
-    };
+    let decorations_height = data
+        .decoration
+        .satellite
+        .as_ref()
+        .map(|s| s.titlebar_height())
+        .unwrap_or(0);
     if let Some(min_size) = &hints.min_size {
         data.toplevel.set_min_size(
             (min_size.width as f64 / scale) as i32,
@@ -549,6 +606,7 @@ impl Event for client::wl_seat::Event {
 }
 
 struct PendingEnter(client::wl_pointer::Event);
+#[derive(Clone, Copy)]
 enum CurrentSurface {
     Xwayland(Entity),
     Decoration(Entity),
@@ -649,9 +707,14 @@ impl Event for client::wl_pointer::Event {
                 cmd.insert(target, (*scale,));
 
                 let surface_is_popup = matches!(role, SurfaceRole::Popup(_));
+                let scales = if state.compositor_scaling {
+                    get_surface_input_scales(&state.world, surface_entity.unwrap())
+                } else {
+                    (scale.0, scale.0)
+                };
                 let mut do_enter = || {
                     debug!("pointer entering {} ({serial} {})", surface.id(), scale.0);
-                    server.enter(serial, surface, surface_x * scale.0, surface_y * scale.0);
+                    server.enter(serial, surface, surface_x * scales.0, surface_y * scales.1);
                     connection.raise_to_top(*window);
                     if !surface_is_popup {
                         state.last_hovered = Some(*window);
@@ -731,17 +794,33 @@ impl Event for client::wl_pointer::Event {
                         return;
                     }
                 }
-                let (server, scale) = state
+                let scale_factor = state
                     .world
-                    .query_one_mut::<(&WlPointer, &SurfaceScaleFactor)>(target)
-                    .unwrap();
+                    .get::<&CurrentSurface>(target)
+                    .ok()
+                    .and_then(|surf| match &*surf {
+                        CurrentSurface::Xwayland(e) => {
+                            if state.compositor_scaling {
+                                Some(get_surface_input_scales(&state.world, *e))
+                            } else {
+                                state
+                                    .world
+                                    .get::<&SurfaceScaleFactor>(*e)
+                                    .ok()
+                                    .map(|s| (s.0, s.0))
+                            }
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or((1.0, 1.0));
+                let server = state.world.get::<&WlPointer>(target).unwrap();
                 trace!(
                     target: "pointer_position",
                     "pointer motion {} {}",
-                    surface_x * scale.0,
-                    surface_y * scale.0
+                    surface_x * scale_factor.0,
+                    surface_y * scale_factor.1
                 );
-                server.motion(time, surface_x * scale.0, surface_y * scale.0);
+                server.motion(time, surface_x * scale_factor.0, surface_y * scale_factor.1);
             }
             Self::Button {
                 serial,
@@ -944,18 +1023,32 @@ impl Event for client::wl_touch::Event {
                     let connection = &mut state.connection;
                     let world = &mut state.inner.world;
                     let s_entity = surface.data().copied();
+                    let scales = if let Some(key) = s_entity {
+                        if state.inner.compositor_scaling {
+                            get_surface_input_scales(world, key)
+                        } else {
+                            let scale = world
+                                .get::<&SurfaceScaleFactor>(key)
+                                .ok()
+                                .map(|s| s.0)
+                                .unwrap_or(1.0);
+                            (scale, scale)
+                        }
+                    } else {
+                        (1.0, 1.0)
+                    };
                     let mut s_query = s_entity.and_then(|key| {
                         world
                             .query_one::<(&WlSurface, &SurfaceScaleFactor, &x::Window)>(key)
                             .ok()
                     });
-                    if let Some((s_surface, s_factor, window)) =
+                    if let Some((s_surface, _s_factor, window)) =
                         s_query.as_mut().and_then(|q| q.get())
                     {
-                        cmd.insert_one(target, *s_factor);
+                        cmd.insert_one(target, CurrentSurface::Xwayland(s_entity.unwrap()));
                         connection.raise_to_top(*window);
                         let touch = world.get::<&WlTouch>(target).unwrap();
-                        touch.down(serial, time, s_surface, id, x * s_factor.0, y * s_factor.0);
+                        touch.down(serial, time, s_surface, id, x * scales.0, y * scales.1);
                     } else if let Some(&DecorationMarker { parent }) = surface.data() {
                         drop(s_query);
                         let seat = {
@@ -970,21 +1063,47 @@ impl Event for client::wl_touch::Event {
                 cmd.run_on(&mut state.world);
             }
             Self::Motion { time, id, x, y } => {
-                let Ok((touch, scale)) = state
-                    .world
-                    .query_one_mut::<(&WlTouch, &SurfaceScaleFactor)>(target)
+                let Some(CurrentSurface::Xwayland(e)) =
+                    state.world.get::<&CurrentSurface>(target).ok().map(|s| *s)
                 else {
                     return;
                 };
-                touch.motion(time, id, x * scale.0, y * scale.0);
+                let scales = if state.inner.compositor_scaling {
+                    get_surface_input_scales(&state.world, e)
+                } else {
+                    state
+                        .world
+                        .get::<&SurfaceScaleFactor>(e)
+                        .ok()
+                        .map(|s| (s.0, s.0))
+                        .unwrap_or((1.0, 1.0))
+                };
+                let touch = state.world.get::<&WlTouch>(target).unwrap();
+                touch.motion(time, id, x * scales.0, y * scales.1);
+            }
+            Self::Up { serial, time, id } => {
+                let mut cmd = CommandBuffer::new();
+                cmd.remove_one::<CurrentSurface>(target);
+                {
+                    let touch = state.world.get::<&WlTouch>(target).unwrap();
+                    touch.up(serial, time, id);
+                }
+                cmd.run_on(&mut state.world);
+            }
+            Self::Cancel => {
+                let mut cmd = CommandBuffer::new();
+                cmd.remove_one::<CurrentSurface>(target);
+                {
+                    let touch = state.world.get::<&WlTouch>(target).unwrap();
+                    touch.cancel();
+                }
+                cmd.run_on(&mut state.world);
             }
             _ => {
                 let touch = state.world.get::<&WlTouch>(target).unwrap();
                 simple_event_shunt! {
                     touch, self => [
-                        Up { serial, time, id },
                         Frame,
-                        Cancel,
                         Shape { id, major, minor },
                         Orientation { id, orientation }
                     ]
@@ -1007,6 +1126,195 @@ pub(super) enum OutputScaleFactor {
     Fractional(f64),
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct TrueOutputScaleFactor(pub OutputScaleFactor);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct X11OutputPosition {
+    pub x: i32,
+    pub y: i32,
+}
+
+pub(super) fn recalculate_x11_output_positions(
+    world: &mut World,
+    compositor_scaling: bool,
+    global_scale: f64,
+) {
+    if !compositor_scaling {
+        return;
+    }
+
+    struct OutputNode {
+        entity: Entity,
+        lx: f64,
+        ly: f64,
+        scale: f64,
+        rx: Option<i32>,
+        ry: Option<i32>,
+    }
+
+    // layout coordinates as 2D nodes
+    let mut nodes: Vec<_> = world
+        .query::<(&OutputDimensions, &TrueOutputScaleFactor)>()
+        .iter()
+        .map(|(e, (d, s))| {
+            let scale = s.0.get();
+            OutputNode {
+                entity: e,
+                lx: d.x as f64,
+                ly: d.y as f64,
+                scale,
+                rx: None,
+                ry: None,
+            }
+        })
+        .collect();
+
+    if nodes.is_empty() {
+        return;
+    }
+
+    // We build a 2D spanning tree of outputs starting from the one closest to (0, 0).
+    // In each step, we connect the closest unpositioned output to the tree, scaling
+    // the relative offset between them by the scale factor of the boundary monitor.
+    // This resolves global output coordinates while respecting independent monitor scaling.
+    let root_idx = nodes
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            let dist_a = a.lx * a.lx + a.ly * a.ly;
+            let dist_b = b.lx * b.lx + b.ly * b.ly;
+            dist_a.total_cmp(&dist_b)
+        })
+        .map(|(i, _)| i)
+        .unwrap();
+
+    nodes[root_idx].rx = Some(0);
+    nodes[root_idx].ry = Some(0);
+
+    // build 2D spanning tree by finding closest positioned node
+    loop {
+        let mut progress = false;
+        let mut best_transition = None;
+
+        for (u_idx, u_node) in nodes.iter().enumerate() {
+            if u_node.rx.is_some() {
+                continue;
+            }
+            for (r_idx, r_node) in nodes.iter().enumerate() {
+                if r_node.rx.is_none() {
+                    continue;
+                }
+                let dx = u_node.lx - r_node.lx;
+                let dy = u_node.ly - r_node.ly;
+                let dist = dx * dx + dy * dy;
+
+                match best_transition {
+                    None => {
+                        best_transition = Some((u_idx, r_idx, dist));
+                    }
+                    Some((_, _, min_dist)) if dist < min_dist => {
+                        best_transition = Some((u_idx, r_idx, dist));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some((u_idx, r_idx, _)) = best_transition {
+            let u_node = &nodes[u_idx];
+            let r_node = &nodes[r_idx];
+
+            let dx = u_node.lx - r_node.lx;
+            let dy = u_node.ly - r_node.ly;
+
+            // scale relative offset by transition boundary scale
+            let scale_x = if dx >= 0.0 {
+                r_node.scale
+            } else {
+                u_node.scale
+            };
+            let scale_y = if dy >= 0.0 {
+                r_node.scale
+            } else {
+                u_node.scale
+            };
+
+            let rx = r_node.rx.unwrap() + (dx * scale_x * global_scale).round() as i32;
+            let ry = r_node.ry.unwrap() + (dy * scale_y * global_scale).round() as i32;
+
+            nodes[u_idx].rx = Some(rx);
+            nodes[u_idx].ry = Some(ry);
+            progress = true;
+        }
+
+        if !progress {
+            break;
+        }
+    }
+
+    for node in nodes {
+        if node.rx.is_none() {
+            warn!(
+                "Failed to calculate relative X11 position for output {:?}, falling back to (0, 0)",
+                node.entity
+            );
+        }
+        let rx = node.rx.unwrap_or(0);
+        let ry = node.ry.unwrap_or(0);
+        world
+            .insert_one(node.entity, X11OutputPosition { x: rx, y: ry })
+            .unwrap();
+    }
+}
+
+pub(super) fn get_surface_input_scales(world: &World, e: Entity) -> (f64, f64) {
+    let scale = world
+        .get::<&SurfaceScaleFactor>(e)
+        .ok()
+        .map(|s| s.0)
+        .unwrap_or(1.0);
+    let win_data = world.get::<&WindowData>(e).ok();
+
+    let is_fullscreen = world
+        .get::<&SurfaceRole>(e)
+        .ok()
+        .map(|r| match &*r {
+            SurfaceRole::Toplevel(Some(toplevel)) => toplevel.fullscreen,
+            _ => false,
+        })
+        .unwrap_or(false);
+
+    if is_fullscreen {
+        if let Ok(on_output) = world.get::<&OnOutput>(e) {
+            if let Ok(dims) = world.get::<&OutputDimensions>(on_output.0) {
+                // swap width and height if rotated
+                let (w, h) = if dims.rotated_90 {
+                    (dims.height, dims.width)
+                } else {
+                    (dims.width, dims.height)
+                };
+                // under compositor scaling host doesn't scale outputs so logical == physical
+                let logical_w = w as f64;
+                let logical_h = h as f64;
+                if logical_w > 0.0 && logical_h > 0.0 {
+                    let scale_x = win_data
+                        .as_ref()
+                        .map(|d| d.attrs.dims.width as f64 / logical_w)
+                        .unwrap_or(scale);
+                    let scale_y = win_data
+                        .as_ref()
+                        .map(|d| d.attrs.dims.height as f64 / logical_h)
+                        .unwrap_or(scale);
+                    return (scale_x, scale_y);
+                }
+            }
+        }
+    }
+
+    (scale, scale)
+}
+
 impl OutputScaleFactor {
     pub(super) fn get(&self) -> f64 {
         match *self {
@@ -1017,29 +1325,43 @@ impl OutputScaleFactor {
 }
 
 #[must_use]
-fn update_output_scale(
-    mut output_scale: hecs::QueryOne<&mut OutputScaleFactor>,
+pub(super) fn update_output_scale(
+    mut output: hecs::QueryOne<(&mut OutputScaleFactor, &mut TrueOutputScaleFactor)>,
     factor: OutputScaleFactor,
+    compositor_scaling: bool,
+    global_scale: f64,
 ) -> bool {
-    let Some(output_scale) = output_scale.get() else {
+    let Some((output_scale, true_output_scale)) = output.get() else {
         return false;
     };
 
-    if matches!(output_scale, OutputScaleFactor::Fractional(..))
+    if matches!(true_output_scale.0, OutputScaleFactor::Fractional(..))
         && matches!(factor, OutputScaleFactor::Output(..))
     {
         return false;
     }
 
-    if *output_scale != factor {
-        *output_scale = factor;
-        return true;
+    let mut changed = false;
+    if true_output_scale.0 != factor {
+        true_output_scale.0 = factor;
+        changed = true;
     }
 
-    false
+    let effective = if compositor_scaling {
+        OutputScaleFactor::Fractional(global_scale)
+    } else {
+        factor
+    };
+
+    if *output_scale != effective {
+        *output_scale = effective;
+        changed = true;
+    }
+
+    changed
 }
 
-enum OutputDimensionsSource {
+pub(super) enum OutputDimensionsSource {
     // The data in this variant is the values needed for the wl_output.geometry event.
     Wl {
         physical_width: i32,
@@ -1053,12 +1375,14 @@ enum OutputDimensionsSource {
 }
 
 pub(super) struct OutputDimensions {
-    source: OutputDimensionsSource,
+    pub source: OutputDimensionsSource,
     pub x: i32,
     pub y: i32,
     pub width: i32,
     pub height: i32,
-    rotated_90: bool,
+    pub refresh: i32,
+    pub mode_flags: WEnum<client::wl_output::Mode>,
+    pub rotated_90: bool,
 }
 
 impl Default for OutputDimensions {
@@ -1076,6 +1400,8 @@ impl Default for OutputDimensions {
             y: 0,
             width: 0,
             height: 0,
+            refresh: 60000,
+            mode_flags: WEnum::Value(client::wl_output::Mode::Current),
             rotated_90: false,
         }
     }
@@ -1127,6 +1453,11 @@ fn update_output_offset(
         );
     }
 
+    recalculate_x11_output_positions(
+        &mut state.world,
+        state.compositor_scaling,
+        state.global_scale,
+    );
     update_window_output_offsets(
         output,
         &state.global_output_offset,
@@ -1135,7 +1466,7 @@ fn update_output_offset(
     );
 }
 
-fn update_window_output_offsets(
+pub(super) fn update_window_output_offsets(
     output: Entity,
     global_output_offset: &GlobalOutputOffset,
     world: &World,
@@ -1144,20 +1475,45 @@ fn update_window_output_offsets(
     let Ok(dimensions) = world.get::<&OutputDimensions>(output) else {
         return;
     };
-    let mut query = world.query::<(&x::Window, &mut WindowData, &OnOutput)>();
+    let (ox, oy) = if let Ok(pos) = world.get::<&X11OutputPosition>(output) {
+        (pos.x, pos.y)
+    } else {
+        (
+            dimensions.x - global_output_offset.x.value,
+            dimensions.y - global_output_offset.y.value,
+        )
+    };
+    let new_offset = WindowOutputOffset { x: ox, y: oy };
 
+    let mut updated_windows: Vec<x::Window> = vec![];
+    let mut query = world.query::<(&x::Window, &mut WindowData, &OnOutput)>();
     for (_, (window, data, _)) in query
         .into_iter()
         .filter(|(_, (_, _, on_output))| on_output.0 == output)
     {
-        data.update_output_offset(
-            *window,
-            WindowOutputOffset {
-                x: dimensions.x - global_output_offset.x.value,
-                y: dimensions.y - global_output_offset.y.value,
-            },
-            connection,
-        );
+        data.update_output_offset(*window, new_offset, connection);
+        updated_windows.push(*window);
+    }
+    drop(query);
+
+    // propagate offset to transient/popup windows since they don't have OnOutput
+    // otherwise stale offset causes wrong positioner calculation on next configure
+    if !updated_windows.is_empty() {
+        let mut popup_query =
+            world.query::<(&x::Window, &mut WindowData, &mut SurfaceScaleFactor)>();
+        for (_, (window, data, scale)) in popup_query.into_iter().filter(|(_, (_, data, _))| {
+            data.attrs.role.is_popup()
+                && data
+                    .attrs
+                    .transient_for
+                    .map(|p| updated_windows.contains(&p))
+                    .unwrap_or(false)
+        }) {
+            data.update_output_offset(*window, new_offset, connection);
+            if let Ok(out_scale) = world.get::<&OutputScaleFactor>(output) {
+                scale.0 = out_scale.get();
+            }
+        }
     }
 }
 
@@ -1166,6 +1522,8 @@ pub(super) fn update_global_output_offset(
     global_output_offset: &GlobalOutputOffset,
     world: &World,
     connection: &mut impl XConnection,
+    global_scale: f64,
+    compositor_scaling: bool,
 ) {
     let entity = world.entity(output).unwrap();
     let mut query = entity.query::<(&OutputDimensions, &WlOutput)>();
@@ -1175,6 +1533,17 @@ pub(super) fn update_global_output_offset(
 
     let x = dimensions.x - global_output_offset.x.value;
     let y = dimensions.y - global_output_offset.y.value;
+    let (scaled_x, scaled_y) = if compositor_scaling {
+        let pos = world.get::<&X11OutputPosition>(output).ok();
+        pos.map(|p| (p.x, p.y)).unwrap_or_else(|| {
+            (
+                (x as f64 * global_scale).round() as i32,
+                (y as f64 * global_scale).round() as i32,
+            )
+        })
+    } else {
+        (x, y)
+    };
 
     match &dimensions.source {
         OutputDimensionsSource::Wl {
@@ -1185,11 +1554,19 @@ pub(super) fn update_global_output_offset(
             model,
             transform,
         } => {
+            let (pw, ph) = if compositor_scaling {
+                (
+                    (*physical_width as f64 * global_scale).round() as i32,
+                    (*physical_height as f64 * global_scale).round() as i32,
+                )
+            } else {
+                (*physical_width, *physical_height)
+            };
             server.geometry(
-                x,
-                y,
-                *physical_width,
-                *physical_height,
+                scaled_x,
+                scaled_y,
+                pw,
+                ph,
                 convert_wenum(*subpixel),
                 make.clone(),
                 model.clone(),
@@ -1200,7 +1577,7 @@ pub(super) fn update_global_output_offset(
             entity
                 .get::<&XdgOutputServer>()
                 .unwrap()
-                .logical_position(x, y);
+                .logical_position(scaled_x, scaled_y);
         }
     }
 
@@ -1270,6 +1647,18 @@ impl OutputEvent {
                     state,
                 );
                 let global_output_offset = state.global_output_offset;
+                let compositor_scaling = state.compositor_scaling;
+                let global_scale = state.global_scale;
+
+                let pos = if compositor_scaling {
+                    state
+                        .world
+                        .get::<&X11OutputPosition>(target)
+                        .ok()
+                        .map(|p| *p)
+                } else {
+                    None
+                };
 
                 let Ok((output, dimensions, xdg)) = state.world.query_one_mut::<(
                     &WlOutput,
@@ -1279,11 +1668,34 @@ impl OutputEvent {
                     return;
                 };
 
+                let (scaled_x, scaled_y) = if compositor_scaling {
+                    pos.map(|p| (p.x, p.y)).unwrap_or_else(|| {
+                        (
+                            ((x - global_output_offset.x.value) as f64 * global_scale).round()
+                                as i32,
+                            ((y - global_output_offset.y.value) as f64 * global_scale).round()
+                                as i32,
+                        )
+                    })
+                } else {
+                    (
+                        x - global_output_offset.x.value,
+                        y - global_output_offset.y.value,
+                    )
+                };
+                let (pw, ph) = if compositor_scaling {
+                    (
+                        (physical_width as f64 * global_scale).round() as i32,
+                        (physical_height as f64 * global_scale).round() as i32,
+                    )
+                } else {
+                    (physical_width, physical_height)
+                };
                 output.geometry(
-                    x - global_output_offset.x.value,
-                    y - global_output_offset.y.value,
-                    physical_width,
-                    physical_height,
+                    scaled_x,
+                    scaled_y,
+                    pw,
+                    ph,
                     convert_wenum(subpixel),
                     make,
                     model,
@@ -1299,11 +1711,20 @@ impl OutputEvent {
                     )
                 });
                 if let Some(xdg) = xdg {
-                    if dimensions.rotated_90 {
-                        xdg.logical_size(dimensions.height, dimensions.width);
+                    let (w, h) = if dimensions.rotated_90 {
+                        (dimensions.height, dimensions.width)
                     } else {
-                        xdg.logical_size(dimensions.width, dimensions.height);
-                    }
+                        (dimensions.width, dimensions.height)
+                    };
+                    let (sw, sh) = if compositor_scaling {
+                        (
+                            (w as f64 * global_scale).round() as i32,
+                            (h as f64 * global_scale).round() as i32,
+                        )
+                    } else {
+                        (w, h)
+                    };
+                    xdg.logical_size(sw, sh);
                 }
             }
             Event::Mode {
@@ -1312,6 +1733,8 @@ impl OutputEvent {
                 height,
                 refresh,
             } => {
+                let compositor_scaling = state.compositor_scaling;
+                let global_scale = state.global_scale;
                 let Ok((output, dimensions)) = state
                     .world
                     .query_one_mut::<(&WlOutput, &mut OutputDimensions)>(target)
@@ -1325,9 +1748,19 @@ impl OutputEvent {
                 {
                     dimensions.width = width;
                     dimensions.height = height;
+                    dimensions.refresh = refresh;
+                    dimensions.mode_flags = convert_wenum(flags);
                     debug!("{} dimensions: {width}x{height}", output.id());
                 }
-                output.mode(convert_wenum(flags), width, height, refresh);
+                let (w, h) = if compositor_scaling {
+                    (
+                        (width as f64 * global_scale).round() as i32,
+                        (height as f64 * global_scale).round() as i32,
+                    )
+                } else {
+                    (width, height)
+                };
+                output.mode(convert_wenum(flags), w, h, refresh);
             }
             Event::Scale { factor } => {
                 debug!(
@@ -1337,11 +1770,18 @@ impl OutputEvent {
                 if update_output_scale(
                     state.world.query_one(target).unwrap(),
                     OutputScaleFactor::Output(factor),
+                    state.compositor_scaling,
+                    state.global_scale,
                 ) {
                     state.updated_outputs.push(target);
                 }
                 if state.fractional_scale.is_none() {
-                    state.world.get::<&WlOutput>(target).unwrap().scale(factor);
+                    let send_factor = if state.compositor_scaling { 1 } else { factor };
+                    state
+                        .world
+                        .get::<&WlOutput>(target)
+                        .unwrap()
+                        .scale(send_factor);
                 }
             }
             Event::Name { name } => {
@@ -1373,28 +1813,54 @@ impl OutputEvent {
             Event::LogicalPosition { x, y } => {
                 update_output_offset(target, OutputDimensionsSource::Xdg, x, y, state);
                 if !state.global_offset_updated {
+                    let (scaled_x, scaled_y) = if state.inner.compositor_scaling {
+                        let pos = state.world.get::<&X11OutputPosition>(target).ok();
+                        pos.map(|p| (p.x, p.y)).unwrap_or_else(|| {
+                            (
+                                ((x - state.inner.global_output_offset.x.value) as f64
+                                    * state.inner.global_scale)
+                                    .round() as i32,
+                                ((y - state.inner.global_output_offset.y.value) as f64
+                                    * state.inner.global_scale)
+                                    .round() as i32,
+                            )
+                        })
+                    } else {
+                        (
+                            x - state.inner.global_output_offset.x.value,
+                            y - state.inner.global_output_offset.y.value,
+                        )
+                    };
                     state
                         .world
                         .get::<&XdgOutputServer>(target)
                         .unwrap()
-                        .logical_position(
-                            x - state.global_output_offset.x.value,
-                            y - state.global_output_offset.y.value,
-                        );
+                        .logical_position(scaled_x, scaled_y);
                 }
             }
             Event::LogicalSize { .. } => {
+                let compositor_scaling = state.inner.compositor_scaling;
+                let global_scale = state.inner.global_scale;
                 let Ok((xdg, dimensions)) = state
                     .world
                     .query_one_mut::<(&XdgOutputServer, &OutputDimensions)>(target)
                 else {
                     return;
                 };
-                if dimensions.rotated_90 {
-                    xdg.logical_size(dimensions.height, dimensions.width);
+                let (w, h) = if dimensions.rotated_90 {
+                    (dimensions.height, dimensions.width)
                 } else {
-                    xdg.logical_size(dimensions.width, dimensions.height);
-                }
+                    (dimensions.width, dimensions.height)
+                };
+                let (sw, sh) = if compositor_scaling {
+                    (
+                        (w as f64 * global_scale).round() as i32,
+                        (h as f64 * global_scale).round() as i32,
+                    )
+                } else {
+                    (w, h)
+                };
+                xdg.logical_size(sw, sh);
             }
             _ => simple_event_shunt! {
                 state.world.get::<&XdgOutputServer>(target).unwrap(),
@@ -1605,8 +2071,9 @@ impl Event for zwp_tablet_tool_v2::Event {
                         warn!("tablet tool proximity_in failed: stale surface");
                         return;
                     };
-                    let (surface, scale, window) = query.get().unwrap();
-                    cmd.insert(target, (*scale,));
+                    let s_entity = surface.data().copied().unwrap();
+                    let (surface, _, window) = query.get().unwrap();
+                    cmd.insert(target, (CurrentSurface::Xwayland(s_entity),));
 
                     let Some(s_tablet) =
                         tablet
@@ -1629,24 +2096,39 @@ impl Event for zwp_tablet_tool_v2::Event {
                 cmd.run_on(&mut state.world);
             }
             Self::Motion { x, y } => {
-                let (tool, scale) = state
+                let scales = state
                     .world
-                    .query_one_mut::<(&TabletToolServer, Option<&SurfaceScaleFactor>)>(target)
-                    .unwrap();
-                let scale = scale.map(|s| s.0).unwrap_or(1.0);
-                tool.motion(x * scale, y * scale);
+                    .get::<&CurrentSurface>(target)
+                    .ok()
+                    .and_then(|surf| match &*surf {
+                        CurrentSurface::Xwayland(e) => {
+                            Some(get_surface_input_scales(&state.world, *e))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or((1.0, 1.0));
+                let tool = state.world.get::<&TabletToolServer>(target).unwrap();
+                tool.motion(x * scales.0, y * scales.1);
             }
-            _ => {
+            Self::ProximityOut => {
+                let mut cmd = CommandBuffer::new();
+                cmd.remove_one::<CurrentSurface>(target);
+                {
+                    let tool = state.world.get::<&TabletToolServer>(target).unwrap();
+                    tool.proximity_out();
+                }
+                cmd.run_on(&mut state.world);
+            }
+            other => {
                 let tool = state.world.get::<&TabletToolServer>(target).unwrap();
                 simple_event_shunt! {
-                    tool, self => [
+                    tool, other: zwp_tablet_tool_v2::Event => [
                         Type { |tool_type| convert_wenum(tool_type) },
                         HardwareSerial { hardware_serial_hi, hardware_serial_lo },
                         HardwareIdWacom { hardware_id_hi, hardware_id_lo },
                         Capability { |capability| convert_wenum(capability) },
                         Done,
                         Removed,
-                        ProximityOut,
                         Down { serial },
                         Up,
                         Distance { distance },

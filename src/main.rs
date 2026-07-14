@@ -11,6 +11,7 @@ struct RealData {
     display: Option<String>,
     listenfds: Vec<OwnedFd>,
     flags: Vec<String>,
+    compositor_scaling: bool,
 }
 impl xwayland_satellite::RunData for RealData {
     fn display(&self) -> Option<&str> {
@@ -23,6 +24,10 @@ impl xwayland_satellite::RunData for RealData {
 
     fn flags(&self) -> &[String] {
         &self.flags
+    }
+
+    fn compositor_scaling(&self) -> bool {
+        self.compositor_scaling
     }
 }
 
@@ -240,6 +245,7 @@ fn parse_args() -> RealData {
             }
         }
     }
+    data.compositor_scaling = std::env::var("XWAYLAND_SATELLITE_COMPOSITOR_SCALING").is_ok();
     data.flags = flags.to_vec();
 
     data
