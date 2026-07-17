@@ -2461,6 +2461,49 @@ fn fractional_scale_popup() {
 }
 
 #[test]
+fn fractional_scale_popup_inexact_size() {
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let comp = f.compositor();
+    let (_, output) = f.new_output(0, 0);
+
+    let toplevel = Window::new(1);
+    let (_, toplevel_id) = f.create_toplevel(&comp, toplevel);
+    let surface_data = f
+        .testwl
+        .get_surface_data(toplevel_id)
+        .expect("No surface data");
+    let fractional = surface_data
+        .fractional
+        .as_ref()
+        .expect("No fractional scale for surface");
+
+    fractional.preferred_scale(180); // 1.5 scale
+    f.testwl.move_surface_to_output(toplevel_id, &output);
+    f.run();
+    f.run();
+
+    // 61 is not divisible by 1.5: floor(61 / 1.5) = 40, but floor(40 * 1.5) = 60,
+    // so a naive logical -> native round-trip loses a pixel.
+    let popup = Window::new(2);
+    let builder = PopupBuilder::new(popup, toplevel, toplevel_id)
+        .x(61)
+        .y(61)
+        .width(61)
+        .height(61)
+        .scale(1.5);
+    let initial_dims = builder.dims;
+    f.create_popup(&comp, builder);
+    f.run();
+    assert_eq!(
+        initial_dims,
+        f.connection().window(popup).dims,
+        "X11 dimensions changed after configure round-trip"
+    );
+}
+
+#[test]
 fn scaled_output_small_popup() {
     let (mut f, comp) = TestFixture::new_with_compositor();
 

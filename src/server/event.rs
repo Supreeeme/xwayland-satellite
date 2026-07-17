@@ -300,17 +300,37 @@ impl SurfaceEvents {
             let (scale_factor, window, window_data, role) = query.get().unwrap();
 
             let window = *window;
-            let x = (pending.x.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.x;
-            let y = (pending.y.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.y;
-            let width = if pending.width > 0 {
-                (pending.width as f64 * scale_factor.0) as u16
+
+            // A configure exactly echoing a popup's positioner request resolves
+            // from its exact X11 pixel values (see PopupData::requested).
+            let exact = if let SurfaceRole::Popup(Some(p)) = &*role {
+                p.requested.filter(|requested| requested.logical == pending)
             } else {
-                window_data.attrs.dims.width
+                None
             };
-            let mut height = if pending.height > 0 {
-                (pending.height as f64 * scale_factor.0) as u16
+
+            let (x, y, width, mut height) = if let Some(requested) = exact {
+                (
+                    requested.native_offset.0 + window_data.output_offset.x,
+                    requested.native_offset.1 + window_data.output_offset.y,
+                    requested.native_size.0,
+                    requested.native_size.1,
+                )
             } else {
-                window_data.attrs.dims.height
+                (
+                    (pending.x.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.x,
+                    (pending.y.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.y,
+                    if pending.width > 0 {
+                        (pending.width as f64 * scale_factor.0) as u16
+                    } else {
+                        window_data.attrs.dims.width
+                    },
+                    if pending.height > 0 {
+                        (pending.height as f64 * scale_factor.0) as u16
+                    } else {
+                        window_data.attrs.dims.height
+                    },
+                )
             };
             debug!(
                 "configuring {} ({window:?}): {x}x{y}, {width}x{height}",
