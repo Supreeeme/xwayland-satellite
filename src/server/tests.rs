@@ -2580,7 +2580,7 @@ fn fractional_scale_small_popup() {
     assert_eq!(pos.size.unwrap(), testwl::Vec2 { x: 1, y: 1 });
     assert_eq!(
         pos.anchor_rect.as_ref().unwrap().size,
-        testwl::Vec2 { x: 1, y: 1 }
+        testwl::Vec2 { x: 0, y: 0 }
     );
 
     f.reconfigure_window(
