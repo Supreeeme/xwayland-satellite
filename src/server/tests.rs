@@ -3260,6 +3260,41 @@ fn decorations_with_title_on_thin_window() {
         .set_win_title(window, WmName::WmName("window".into()));
 }
 
+#[test]
+fn decorations_max_height_int_max() {
+    let (mut f, compositor) = TestFixture::new_with_compositor();
+    let window = Window::new(1);
+    let (_, id) = f.create_toplevel(&compositor, window);
+    f.testwl
+        .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ClientSide);
+    f.testwl.configure_toplevel(id, 1, 100, vec![]);
+    f.run();
+
+    // When calculating the Wayland max size from the X size hints, the titlebar height is added to
+    // the height hint, but obviously this should not overflow the size hint.
+    f.satellite.set_size_hints(
+        window,
+        super::WmNormalHints {
+            min_size: None,
+            max_size: Some(WinSize {
+                width: i32::MAX,
+                height: i32::MAX,
+            }),
+        },
+    );
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let toplevel = data.toplevel();
+    assert_eq!(
+        toplevel.max_size,
+        Some(testwl::Vec2 {
+            x: i32::MAX,
+            y: i32::MAX
+        })
+    );
+}
+
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}
