@@ -518,17 +518,17 @@ pub(super) fn update_surface_viewport(
         if let Some(min) = hints.min_size {
             debug!(
                 "updated min height: {}",
-                (min.height as f64 / scale_factor.0) as i32 + decorations_height
+                ((min.height as f64 / scale_factor.0) as i32).saturating_add(decorations_height)
             );
             data.toplevel.set_min_size(
                 (min.width as f64 / scale_factor.0) as i32,
-                (min.height as f64 / scale_factor.0) as i32 + decorations_height,
+                ((min.height as f64 / scale_factor.0) as i32).saturating_add(decorations_height),
             );
         }
         if let Some(max) = hints.max_size {
             data.toplevel.set_max_size(
                 (max.width as f64 / scale_factor.0) as i32,
-                (max.height as f64 / scale_factor.0) as i32 + decorations_height,
+                ((max.height as f64 / scale_factor.0) as i32).saturating_add(decorations_height),
             );
         }
     }
