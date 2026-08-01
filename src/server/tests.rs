@@ -2583,16 +2583,13 @@ fn fractional_scale_small_popup() {
         testwl::Vec2 { x: 1, y: 1 }
     );
 
-    f.reconfigure_window(
-        popup,
-        WindowDims {
-            x: 0,
-            y: 0,
-            width: 2,
-            height: 1,
-        },
-        true,
-    );
+    let dims = WindowDims {
+        x: 0,
+        y: 0,
+        width: 2,
+        height: 1,
+    };
+    f.reconfigure_window(popup, dims, true);
     f.run();
 
     let dims = f.connection().window(popup).dims;
