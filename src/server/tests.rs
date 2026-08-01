@@ -2595,6 +2595,10 @@ fn fractional_scale_small_popup() {
     );
     f.run();
 
+    let dims = f.connection().window(popup).dims;
+    assert!(dims.width > 0);
+    assert!(dims.height > 0);
+
     let data = f
         .testwl
         .get_surface_data(popup_id)
