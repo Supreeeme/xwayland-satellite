@@ -923,6 +923,27 @@ impl Server {
         self.display.flush_clients().unwrap();
     }
 
+    /// Send `wl_surface.enter` for an additional output, leaving the surface
+    /// on every output it is already on.
+    ///
+    /// This models a surface straddling two outputs - a window overlapping a
+    /// boundary, or a bounding box sweeping across one during an animation.
+    /// [`Self::move_surface_to_output`] cannot express it, because it leaves
+    /// every other output by design.
+    pub fn add_surface_to_output(&mut self, surface: SurfaceId, output: &WlOutput) {
+        let data = self
+            .state
+            .surfaces
+            .get_mut(&surface)
+            .expect("No such surface");
+        if data.entered.iter().any(|o| o.id() == output.id()) {
+            return;
+        }
+        data.surface.enter(output);
+        data.entered.push(output.clone());
+        self.display.flush_clients().unwrap();
+    }
+
     pub fn remove_output(&mut self, output: WlOutput) {
         let output = self.state.outputs.remove(&output).unwrap();
         self.dh.remove_global::<State>(output.global_id.unwrap());

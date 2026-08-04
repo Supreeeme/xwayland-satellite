@@ -1793,6 +1793,66 @@ fn popup_done() {
     assert_eq!(reply.map_state(), x::MapState::Unmapped);
 }
 
+/// A window that merely overlaps a second output must keep the anchor - and
+/// so the X11 position - it already had, and only re-anchor once it actually
+/// leaves the output it was anchored to.
+///
+/// Without this, every `wl_surface.enter` re-anchored the window and rewrote
+/// its X11 offset, so a transient overlap (a window straddling a boundary, a
+/// bounding box sweeping past during an animation) moved the window out from
+/// under the pointer: clicks land offset, and regions of the window stop
+/// responding.
+#[test]
+fn transient_output_overlap_keeps_anchor() {
+    let mut f = Fixture::new();
+    let output1 = f.create_output(0, 0);
+    let output2 = f.create_output(1000, 0);
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 200, 200, false);
+    let surface = f.map_as_toplevel(&mut connection, window);
+
+    let root_position = |connection: &Connection| {
+        let tree = connection.get_reply(&x::QueryTree { window });
+        let geo = connection.get_reply(&x::GetGeometry {
+            drawable: x::Drawable::Window(window),
+        });
+        let reply = connection.get_reply(&x::TranslateCoordinates {
+            src_window: tree.parent(),
+            dst_window: connection.root,
+            src_x: geo.x(),
+            src_y: geo.y(),
+        });
+        assert!(reply.same_screen());
+        (reply.dst_x(), reply.dst_y())
+    };
+
+    // Anchored to output1.
+    f.testwl.move_surface_to_output(surface, &output1);
+    f.wait_and_dispatch();
+    let anchored = root_position(&connection);
+
+    // Now also on output2, without leaving output1. The anchor is still
+    // valid, so nothing should move.
+    f.testwl.add_surface_to_output(surface, &output2);
+    f.wait_and_dispatch();
+    assert_eq!(
+        root_position(&connection),
+        anchored,
+        "window re-anchored to an output it had only transiently entered"
+    );
+
+    // Leaving output1 invalidates the anchor for real, so the window
+    // re-anchors to the output it is still on.
+    f.testwl.move_surface_to_output(surface, &output2);
+    f.wait_and_dispatch();
+    assert_eq!(
+        root_position(&connection),
+        (anchored.0 + 1000, anchored.1),
+        "window did not re-anchor after leaving the output it was anchored to"
+    );
+}
+
 #[test]
 fn negative_output_coordinates() {
     let mut f = Fixture::new();
