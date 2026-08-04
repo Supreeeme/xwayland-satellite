@@ -2563,7 +2563,7 @@ fn fractional_scale_small_popup() {
 
     let popup = Window::new(2);
     let builder = PopupBuilder::new(popup, toplevel, toplevel_id)
-        .width(0)
+        .width(1)
         .height(1)
         .check_size_and_pos(false);
 
