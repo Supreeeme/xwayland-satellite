@@ -277,11 +277,45 @@ impl SurfaceEvents {
                     return;
                 };
                 surface.leave(&output);
-                if data
+
+                if let Some(mut entered) = data.get::<&mut EnteredOutputs>() {
+                    entered.0.retain(|e| *e != output_entity);
+                }
+
+                let anchored_here = data
                     .get::<&OnOutput>()
-                    .is_some_and(|o| o.0 == output_entity)
-                {
-                    cmd.remove_one::<OnOutput>(target);
+                    .is_some_and(|o| o.0 == output_entity);
+                if anchored_here {
+                    // The anchor output is gone for real: re-anchor to the
+                    // most recently entered output the surface is still on.
+                    let next = data.get::<&EnteredOutputs>().and_then(|entered| {
+                        entered.0.iter().rev().copied().find(|e| {
+                            state
+                                .world
+                                .entity(*e)
+                                .is_ok_and(|en| en.has::<OutputDimensions>())
+                        })
+                    });
+                    match next {
+                        Some(next_output) => {
+                            let mut query = data.query::<(&x::Window, &mut WindowData)>();
+                            if let Some((window, win_data)) = query.get() {
+                                anchor_window_to_output(
+                                    &state.world,
+                                    *window,
+                                    win_data,
+                                    next_output,
+                                    &state.global_output_offset,
+                                    state.last_focused_toplevel,
+                                    connection,
+                                );
+                            }
+                            cmd.insert_one(target, OnOutput(next_output));
+                        }
+                        None => {
+                            cmd.remove_one::<OnOutput>(target);
+                        }
+                    }
                 }
             }
             Event::PreferredBufferScale { .. } => {}
