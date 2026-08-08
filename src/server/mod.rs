@@ -247,6 +247,36 @@ struct PopupData {
     popup: XdgPopup,
     positioner: XdgPositioner,
     xdg: XdgSurfaceData,
+    /// The last positioner request, for resolving an exactly echoed configure
+    /// without the lossy X11 -> logical -> X11 pixel round-trip.
+    requested: Option<PopupRequest>,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct PopupRequest {
+    logical: PendingSurfaceState,
+    native_offset: (i32, i32),
+    native_size: (u16, u16),
+}
+
+impl PopupRequest {
+    fn new(native_offset: (i32, i32), native_size: (u16, u16), scale: f64) -> Self {
+        Self {
+            logical: PendingSurfaceState {
+                x: (native_offset.0 as f64 / scale) as i32,
+                y: (native_offset.1 as f64 / scale) as i32,
+                width: 1.max((native_size.0 as f64 / scale) as i32),
+                height: 1.max((native_size.1 as f64 / scale) as i32),
+            },
+            native_offset,
+            native_size,
+        }
+    }
+
+    fn apply(&self, positioner: &XdgPositioner) {
+        positioner.set_offset(self.logical.x, self.logical.y);
+        positioner.set_size(self.logical.width, self.logical.height);
+    }
 }
 
 trait Event {
@@ -1116,14 +1146,16 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         match role {
             SurfaceRole::Popup(Some(popup)) => {
-                popup.positioner.set_offset(
-                    ((event.x() as i32 - win.output_offset.x) as f64 / scale_factor.0) as i32,
-                    ((event.y() as i32 - win.output_offset.y) as f64 / scale_factor.0) as i32,
+                let request = PopupRequest::new(
+                    (
+                        event.x() as i32 - win.output_offset.x,
+                        event.y() as i32 - win.output_offset.y,
+                    ),
+                    (event.width(), event.height()),
+                    scale_factor.0,
                 );
-                popup.positioner.set_size(
-                    1.max((event.width() as f64 / scale_factor.0) as i32),
-                    1.max((event.height() as f64 / scale_factor.0) as i32),
-                );
+                request.apply(&popup.positioner);
+                popup.requested = Some(request);
                 popup.popup.reposition(&popup.positioner, 0);
             }
             SurfaceRole::Toplevel(Some(_)) => {
@@ -1616,13 +1648,15 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         );
 
         let positioner = self.xdg_wm_base.create_positioner(&self.qh, ());
-        positioner.set_size(
-            1.max((window.attrs.dims.width as f64 / initial_scale) as i32),
-            1.max((window.attrs.dims.height as f64 / initial_scale) as i32),
+        let request = PopupRequest::new(
+            (
+                (window.attrs.dims.x - parent_dims.x) as i32,
+                (window.attrs.dims.y - parent_dims.y) as i32,
+            ),
+            (window.attrs.dims.width, window.attrs.dims.height),
+            initial_scale,
         );
-        let x = ((window.attrs.dims.x - parent_dims.x) as f64 / initial_scale) as i32;
-        let y = ((window.attrs.dims.y - parent_dims.y) as f64 / initial_scale) as i32;
-        positioner.set_offset(x, y);
+        request.apply(&positioner);
         positioner.set_anchor(Anchor::TopLeft);
         positioner.set_gravity(Gravity::BottomRight);
         positioner.set_anchor_rect(
@@ -1643,6 +1677,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         PopupData {
             popup,
             positioner,
+            requested: Some(request),
             xdg: XdgSurfaceData {
                 surface: xdg,
                 configured: false,
@@ -1652,7 +1687,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     }
 }
 
-#[derive(Default, Debug, Copy, Clone)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub struct PendingSurfaceState {
     pub x: i32,
     pub y: i32,
