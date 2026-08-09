@@ -303,12 +303,12 @@ impl SurfaceEvents {
             let x = (pending.x.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.x;
             let y = (pending.y.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.y;
             let width = if pending.width > 0 {
-                (pending.width as f64 * scale_factor.0) as u16
+                (pending.width as f64 * scale_factor.0).round() as u16
             } else {
                 window_data.attrs.dims.width
             };
             let mut height = if pending.height > 0 {
-                (pending.height as f64 * scale_factor.0) as u16
+                (pending.height as f64 * scale_factor.0).round() as u16
             } else {
                 window_data.attrs.dims.height
             };
@@ -486,8 +486,8 @@ pub(super) fn update_surface_viewport(
     let dims = &window_data.attrs.dims;
     let size_hints = &window_data.attrs.size_hints;
 
-    let width = (dims.width as f64 / scale_factor.0).ceil() as i32;
-    let height = (dims.height as f64 / scale_factor.0).ceil() as i32;
+    let width = (dims.width as f64 / scale_factor.0).round() as i32;
+    let height = (dims.height as f64 / scale_factor.0).round() as i32;
     if width > 0 && height > 0 {
         viewport.set_destination(width, height);
     }
@@ -518,17 +518,17 @@ pub(super) fn update_surface_viewport(
         if let Some(min) = hints.min_size {
             debug!(
                 "updated min height: {}",
-                (min.height as f64 / scale_factor.0) as i32 + decorations_height
+                (min.height as f64 / scale_factor.0).round() as i32 + decorations_height
             );
             data.toplevel.set_min_size(
-                (min.width as f64 / scale_factor.0) as i32,
-                (min.height as f64 / scale_factor.0) as i32 + decorations_height,
+                (min.width as f64 / scale_factor.0).round() as i32,
+                (min.height as f64 / scale_factor.0).round() as i32 + decorations_height,
             );
         }
         if let Some(max) = hints.max_size {
             data.toplevel.set_max_size(
-                (max.width as f64 / scale_factor.0) as i32,
-                (max.height as f64 / scale_factor.0) as i32 + decorations_height,
+                (max.width as f64 / scale_factor.0).round() as i32,
+                (max.height as f64 / scale_factor.0).round() as i32 + decorations_height,
             );
         }
     }
