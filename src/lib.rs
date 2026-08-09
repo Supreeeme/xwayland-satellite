@@ -23,6 +23,7 @@ pub trait XConnection: Sized + 'static {
     fn close_window(&mut self, window: x::Window);
     fn unmap_window(&mut self, window: x::Window);
     fn raise_to_top(&mut self, window: x::Window);
+    fn update_desktop_properties(&self, _outputs: &[(i32, i32, i32, i32)]) {}
 }
 
 pub trait X11Selection {

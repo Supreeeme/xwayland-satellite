@@ -656,6 +656,8 @@ impl<C: XConnection> ServerState<C> {
                 .unwrap();
         }
 
+        let mut outputs_changed = false;
+
         if self.global_output_offset.x.owner.is_none()
             || self.global_output_offset.y.owner.is_none()
         {
@@ -663,6 +665,7 @@ impl<C: XConnection> ServerState<C> {
             self.global_offset_updated = true;
         }
         if self.global_offset_updated {
+            outputs_changed = true;
             debug!(
                 target: "output_offset",
                 "updated global output offset: {}x{}",
@@ -681,6 +684,7 @@ impl<C: XConnection> ServerState<C> {
         }
 
         if !self.updated_outputs.is_empty() {
+            outputs_changed = true;
             for output in std::mem::take(&mut self.updated_outputs).iter() {
                 let Ok(output_scale) = self.world.get::<&OutputScaleFactor>(*output) else {
                     continue;
@@ -732,6 +736,21 @@ impl<C: XConnection> ServerState<C> {
                 debug!("Using new scale {scale}");
                 self.new_scale = Some(scale);
             }
+        }
+
+        // Update _NET_DESKTOP_GEOMETRY and _NET_WORKAREA when outputs change
+        if outputs_changed {
+            let outputs: Vec<_> = self
+                .world
+                .query::<&OutputDimensions>()
+                .iter()
+                .map(|(_, d)| {
+                    let x = d.x - self.global_output_offset.x.value;
+                    let y = d.y - self.global_output_offset.y.value;
+                    (x, y, d.width, d.height)
+                })
+                .collect();
+            self.connection.update_desktop_properties(&outputs);
         }
 
         {
