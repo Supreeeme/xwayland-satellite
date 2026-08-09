@@ -1465,28 +1465,22 @@ impl XConnection for RealConnection {
                 warn!("Couldn't find output {name}, primary output will be wrong");
                 return;
             };
-            if output == self.primary_output {
-                debug!("primary output is already {name}");
-                return;
+            // Set primary once on first focus, then leave it alone.
+            // Rotating the primary on every focus change shifts the Xinerama
+            // origin and breaks cursor coordinate translation in Wine/Proton.
+            if self.primary_output == Xid::none() {
+                if let Err(e) = self
+                    .connection
+                    .send_and_check_request(&xcb::randr::SetOutputPrimary { window, output })
+                {
+                    warn!("Couldn't set output {name} as primary: {e:?}");
+                } else {
+                    debug!("set initial primary output to {name}");
+                    self.primary_output = output;
+                }
+            } else if output != self.primary_output {
+                debug!("focused window on {name} (primary remains {:?})", self.primary_output);
             }
-
-            if let Err(e) = self
-                .connection
-                .send_and_check_request(&xcb::randr::SetOutputPrimary { window, output })
-            {
-                warn!("Couldn't set output {name} as primary: {e:?}");
-            } else {
-                debug!("set {name} as primary output");
-                self.primary_output = output;
-            }
-        } else {
-            let _ = self
-                .connection
-                .send_and_check_request(&xcb::randr::SetOutputPrimary {
-                    window,
-                    output: Xid::none(),
-                });
-            self.primary_output = Xid::none();
         }
     }
 
