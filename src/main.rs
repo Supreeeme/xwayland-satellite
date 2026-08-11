@@ -251,6 +251,17 @@ fn init_logger(integrated: bool) {
             Ok(syslog) => {
                 log::set_boxed_logger(Box::new(syslog::BasicLogger::new(syslog))).unwrap();
                 log::set_max_level(log::LevelFilter::Debug);
+                std::panic::set_hook(Box::new(|info| {
+                    let thread = std::thread::current();
+                    let name = thread.name().unwrap_or("<unnamed");
+                    let location = info.location().unwrap();
+                    log::error!("thread '{name}' panicked at {location}:");
+                    if let Some(s) = info.payload().downcast_ref::<&str>() {
+                        log::error!("{s}");
+                    } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                        log::error!("{s}");
+                    }
+                }));
                 return;
             }
             Err(e) => {
