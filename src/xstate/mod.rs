@@ -4,6 +4,7 @@ mod selection;
 use selection::{Selection, SelectionState};
 #[cfg(test)]
 mod tests;
+mod xresources;
 
 use crate::XConnection;
 use bitflags::bitflags;
@@ -917,6 +918,7 @@ xcb::atoms_struct! {
         incr => b"INCR" only_if_exists = false,
         xsettings => b"_XSETTINGS_S0" only_if_exists = false,
         xsettings_settings => b"_XSETTINGS_SETTINGS" only_if_exists = false,
+        resource_manager => b"RESOURCE_MANAGER" only_if_exists = false,
         primary => b"PRIMARY" only_if_exists = false,
         primary_targets => b"_primary_targets" only_if_exists = false,
         moveresize => b"_NET_WM_MOVERESIZE" only_if_exists = false,
