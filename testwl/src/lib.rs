@@ -116,6 +116,7 @@ pub struct SurfaceData {
     pub viewport: Option<Viewport>,
     pub moving: bool,
     pub resizing: Option<xdg_toplevel::ResizeEdge>,
+    pub minimized: bool,
 }
 
 impl SurfaceData {
@@ -1599,6 +1600,39 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                 let states = toplevel.states.clone();
                 state.configure_toplevel(*surface_id, 100, 100, states);
             }
+            xdg_toplevel::Request::SetMaximized => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
+                    unreachable!();
+                };
+                if toplevel.states.contains(&xdg_toplevel::State::Maximized) {
+                    return;
+                }
+                toplevel.states.push(xdg_toplevel::State::Maximized);
+                let states = toplevel.states.clone();
+                state.configure_toplevel(*surface_id, 100, 100, states);
+            }
+            xdg_toplevel::Request::UnsetMaximized => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
+                    unreachable!();
+                };
+                let Some(pos) = toplevel
+                    .states
+                    .iter()
+                    .copied()
+                    .position(|p| p == xdg_toplevel::State::Maximized)
+                else {
+                    return;
+                };
+                toplevel.states.swap_remove(pos);
+                let states = toplevel.states.clone();
+                state.configure_toplevel(*surface_id, 100, 100, states);
+            }
+            xdg_toplevel::Request::SetMinimized => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                data.minimized = true;
+            }
             xdg_toplevel::Request::Destroy => {}
             xdg_toplevel::Request::SetTitle { title } => {
                 let data = state.surfaces.get_mut(surface_id).unwrap();
@@ -1969,6 +2003,7 @@ impl Dispatch<WlCompositor, ()> for State {
                         viewport: None,
                         moving: false,
                         resizing: None,
+                        minimized: false,
                     },
                 );
                 state.last_surface_id = Some(SurfaceId(id));
