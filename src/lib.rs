@@ -110,6 +110,8 @@ pub fn main(mut data: impl RunData) -> Option<()> {
 
     // Now that Xwayland spawned and got the listenfds, we can close them here.
     drop(fds);
+    // Close our copy of the WM socket so Xwayland exiting produces EOF on xsock_wl.
+    drop(xsock_xwl);
 
     let xwl_pid = xwayland.id();
 
