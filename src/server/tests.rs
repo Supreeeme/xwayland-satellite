@@ -3083,16 +3083,11 @@ fn client_side_decorations() {
     f.testwl.configure_toplevel(id, 100, 100, vec![]);
     f.run();
 
-    let data = f.connection().window(window);
-    assert_eq!(
-        data.dims,
-        WindowDims {
-            x: 0,
-            y: 0,
-            width: 100,
-            height: 75
-        }
-    );
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let viewport = data.viewport.as_ref().unwrap();
+    assert_eq!(viewport.width, 100);
+    assert_eq!(viewport.height, 75);
+
     let subsurface_id = f.testwl.last_created_surface_id().unwrap();
     assert_ne!(subsurface_id, id);
     let data = f.testwl.get_surface_data(subsurface_id).unwrap();
@@ -3107,16 +3102,11 @@ fn client_side_decorations() {
     f.testwl
         .configure_toplevel(id, 100, 100, vec![xdg_toplevel::State::Fullscreen]);
     f.run();
-    let data = f.connection().window(window);
-    assert_eq!(
-        data.dims,
-        WindowDims {
-            x: 0,
-            y: 0,
-            width: 100,
-            height: 100
-        }
-    );
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let viewport = data.viewport.as_ref().unwrap();
+    assert_eq!(viewport.width, 100);
+    assert_eq!(viewport.height, 100);
+
     let data = f.testwl.get_surface_data(subsurface_id).unwrap();
     assert!(data.buffer.is_none());
 
@@ -3132,16 +3122,10 @@ fn client_side_decorations() {
     f.testwl.configure_toplevel(id, 100, 100, vec![]);
     f.run();
 
-    let data = f.connection().window(window);
-    assert_eq!(
-        data.dims,
-        WindowDims {
-            x: 0,
-            y: 0,
-            width: 100,
-            height: 100
-        }
-    );
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let viewport = data.viewport.as_ref().unwrap();
+    assert_eq!(viewport.width, 100);
+    assert_eq!(viewport.height, 100);
     assert!(f.testwl.get_surface_data(subsurface_id).is_none());
     assert!(!subsurface.is_alive());
 }
@@ -3205,16 +3189,11 @@ fn resize_decorations_on_reconfigure() {
     f.testwl.configure_toplevel(id, 100, 100, vec![]);
     f.run();
 
-    let data = f.connection().window(window);
-    assert_eq!(
-        data.dims,
-        WindowDims {
-            x: 0,
-            y: 0,
-            width: 100,
-            height: 75
-        }
-    );
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let viewport = data.viewport.as_ref().unwrap();
+    assert_eq!(viewport.width, 100);
+    assert_eq!(viewport.height, 75);
+
     let subsurface_id = f.testwl.last_created_surface_id().unwrap();
     assert_ne!(subsurface_id, id);
     let data = f.testwl.get_surface_data(subsurface_id).unwrap();
@@ -3227,6 +3206,15 @@ fn resize_decorations_on_reconfigure() {
         "surface was not a subsurface: {:?}",
         data.role
     );
+
+    // Weston seems to do this when a window is deactivated. Since the stored window data's height
+    // is used as a fallback in this case, do not reapply the height reduction from the titlebar.
+    f.testwl.configure_toplevel(id, 0, 0, vec![]);
+    f.run();
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let viewport = data.viewport.as_ref().unwrap();
+    assert_eq!(viewport.width, 100);
+    assert_eq!(viewport.height, 75);
 
     let dims = WindowDims {
         x: 0,
@@ -3258,6 +3246,41 @@ fn decorations_with_title_on_thin_window() {
     // Asserts no panics occur with not enough space for even a single character of the title
     f.satellite
         .set_win_title(window, WmName::WmName("window".into()));
+}
+
+#[test]
+fn decorations_max_height_int_max() {
+    let (mut f, compositor) = TestFixture::new_with_compositor();
+    let window = Window::new(1);
+    let (_, id) = f.create_toplevel(&compositor, window);
+    f.testwl
+        .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ClientSide);
+    f.testwl.configure_toplevel(id, 1, 100, vec![]);
+    f.run();
+
+    // When calculating the Wayland max size from the X size hints, the titlebar height is added to
+    // the height hint, but obviously this should not overflow the size hint.
+    f.satellite.set_size_hints(
+        window,
+        super::WmNormalHints {
+            min_size: None,
+            max_size: Some(WinSize {
+                width: i32::MAX,
+                height: i32::MAX,
+            }),
+        },
+    );
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    let toplevel = data.toplevel();
+    assert_eq!(
+        toplevel.max_size,
+        Some(testwl::Vec2 {
+            x: i32::MAX,
+            y: i32::MAX
+        })
+    );
 }
 
 /// See Pointer::handle_event for an explanation.

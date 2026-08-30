@@ -291,13 +291,8 @@ impl SurfaceEvents {
         drop(xdg);
 
         if let Some(pending) = pending {
-            let mut query = data.query::<(
-                &SurfaceScaleFactor,
-                &x::Window,
-                &mut WindowData,
-                &mut SurfaceRole,
-            )>();
-            let (scale_factor, window, window_data, role) = query.get().unwrap();
+            let mut query = data.query::<(&SurfaceScaleFactor, &x::Window, &mut WindowData)>();
+            let (scale_factor, window, window_data) = query.get().unwrap();
 
             let window = *window;
             let x = (pending.x.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.x;
@@ -307,7 +302,7 @@ impl SurfaceEvents {
             } else {
                 window_data.attrs.dims.width
             };
-            let mut height = if pending.height > 0 {
+            let height = if pending.height > 0 {
                 (pending.height as f64 * scale_factor.0) as u16
             } else {
                 window_data.attrs.dims.height
@@ -316,20 +311,6 @@ impl SurfaceEvents {
                 "configuring {} ({window:?}): {x}x{y}, {width}x{height}",
                 data.get::<&WlSurface>().unwrap().id(),
             );
-
-            if let SurfaceRole::Toplevel(Some(toplevel)) = &*role {
-                if let Some(d) = &toplevel.decoration.satellite {
-                    let surface_width = (width as f64 / scale_factor.0) as i32;
-                    if d.will_draw_decorations(surface_width) {
-                        height = height
-                            .saturating_sub(
-                                (DecorationsDataSatellite::TITLEBAR_HEIGHT as f64 * scale_factor.0)
-                                    as u16,
-                            )
-                            .max(DecorationsDataSatellite::TITLEBAR_HEIGHT as u16);
-                    }
-                }
-            }
 
             window_data.attrs.dims = WindowDims {
                 x: x as i16,
@@ -487,7 +468,20 @@ pub(super) fn update_surface_viewport(
     let size_hints = &window_data.attrs.size_hints;
 
     let width = (dims.width as f64 / scale_factor.0).ceil() as i32;
-    let height = (dims.height as f64 / scale_factor.0).ceil() as i32;
+    let mut height = dims.height;
+    if let Some(SurfaceRole::Toplevel(Some(toplevel))) = role {
+        if let Some(d) = &toplevel.decoration.satellite {
+            let surface_width = (dims.width as f64 / scale_factor.0) as i32;
+            if d.will_draw_decorations(surface_width) {
+                height = height
+                    .saturating_sub(
+                        (DecorationsDataSatellite::TITLEBAR_HEIGHT as f64 * scale_factor.0) as u16,
+                    )
+                    .max(DecorationsDataSatellite::TITLEBAR_HEIGHT as u16);
+            }
+        }
+    }
+    let height = (height as f64 / scale_factor.0).ceil() as i32;
     if width > 0 && height > 0 {
         viewport.set_destination(width, height);
     }
@@ -505,32 +499,33 @@ pub(super) fn update_surface_viewport(
     debug!("{} viewport: {width}x{height}", surface.id());
 
     if let Some(hints) = size_hints {
-        let Some(data) = toplevel_data else {
-            return;
+        if let Some(data) = toplevel_data {
+            update_size_hints(data, hints, scale_factor.0);
         };
+    }
+}
 
-        let decorations_height = if data.decoration.satellite.is_some() {
-            DecorationsDataSatellite::TITLEBAR_HEIGHT
-        } else {
-            0
-        };
-
-        if let Some(min) = hints.min_size {
-            debug!(
-                "updated min height: {}",
-                (min.height as f64 / scale_factor.0) as i32 + decorations_height
-            );
-            data.toplevel.set_min_size(
-                (min.width as f64 / scale_factor.0) as i32,
-                (min.height as f64 / scale_factor.0) as i32 + decorations_height,
-            );
-        }
-        if let Some(max) = hints.max_size {
-            data.toplevel.set_max_size(
-                (max.width as f64 / scale_factor.0) as i32,
-                (max.height as f64 / scale_factor.0) as i32 + decorations_height,
-            );
-        }
+pub(super) fn update_size_hints(data: &ToplevelData, hints: &WmNormalHints, scale: f64) {
+    let decorations_height = if data.decoration.satellite.is_some() {
+        DecorationsDataSatellite::TITLEBAR_HEIGHT
+    } else {
+        0
+    };
+    if let Some(min_size) = &hints.min_size {
+        data.toplevel.set_min_size(
+            (min_size.width as f64 / scale) as i32,
+            ((min_size.height as f64 / scale) as i32).saturating_add(decorations_height),
+        );
+    } else {
+        data.toplevel.set_min_size(0, 0);
+    }
+    if let Some(max_size) = &hints.max_size {
+        data.toplevel.set_max_size(
+            (max_size.width as f64 / scale) as i32,
+            ((max_size.height as f64 / scale) as i32).saturating_add(decorations_height),
+        );
+    } else {
+        data.toplevel.set_max_size(0, 0);
     }
 }
 
