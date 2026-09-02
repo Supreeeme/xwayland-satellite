@@ -35,16 +35,16 @@ impl XState {
                 .iter()
                 .position(|byte| *byte == b':')
                 .map(|separator| line[..separator].trim_ascii());
-            if resource_name == Some(b"Xft.dpi") {
-                if !replaced {
-                    updated.extend_from_slice(xft_dpi.as_bytes());
-                    if line.ends_with(b"\n") {
-                        updated.push(b'\n');
-                    }
-                    replaced = true;
+            match resource_name {
+                Some(b"Xft.dpi") => {
+                      if !replaced {
+                      updated.extend_from_slice(xft_dpi.as_bytes());
+                      if line.ends_with(b"\n") {
+                          updated.push(b'\n');
+                      }
+                      replaced = true;
                 }
-            } else {
-                updated.extend_from_slice(line);
+                _ => { updated.extend_from_slice(line); }
             }
         }
 
