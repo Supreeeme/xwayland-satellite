@@ -20,8 +20,16 @@ body:
     id: problem
     attributes:
       label: Describe the issue.
-      value: |
-        **Please attach a log if applicable.**
+      description: |
+        Provide a debug log file.
+        If integrated with the compositor with `systemd` as the init system, logs can be retrieved by running 
+
+        `journalctl --grep=xwayland-sat --output=short-iso-precise -b > "$(date -Iseconds).log"`.
+
+        If integrated with a different init system, the logs will be collected by the configured `syslog` daemon.
+        See your distribution's/`syslog` daemon's documentation for where the logs are kept (likely somewhere in `/var/log`).
+
+        If run directly, the logs are output to the console.
     validations:
       required: true
   - type: textarea
@@ -30,7 +38,14 @@ body:
       label: Steps to reproduce
   - type: checkboxes
     attributes:
-      label: Please confirm you have reproduced this on the latest commit.
+      label: Confirm you have reproduced this on the latest commit and attached log files.
+      description: "
+        To test the latest commit, build it according to the directions in the README, then launch it manually with
+        ```
+        ./xwayland-satellite -- :12
+        DISPLAY=:12 your-application
+        ```
+        "
       options:
         - label: I have reproduced this on the latest commit
           required: true

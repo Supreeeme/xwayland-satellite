@@ -999,27 +999,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             debug!("setting {window:?} hints {hints:?}");
             let mut query = data.query::<(&SurfaceRole, &SurfaceScaleFactor)>();
             if let Some((SurfaceRole::Toplevel(Some(data)), scale_factor)) = query.get() {
-                let decorations_height = if data.decoration.satellite.is_some() {
-                    DecorationsDataSatellite::TITLEBAR_HEIGHT
-                } else {
-                    0
-                };
-                if let Some(min_size) = &hints.min_size {
-                    data.toplevel.set_min_size(
-                        (min_size.width as f64 / scale_factor.0) as i32,
-                        (min_size.height as f64 / scale_factor.0) as i32 + decorations_height,
-                    );
-                } else {
-                    data.toplevel.set_min_size(0, 0);
-                }
-                if let Some(max_size) = &hints.max_size {
-                    data.toplevel.set_max_size(
-                        (max_size.width as f64 / scale_factor.0) as i32,
-                        (max_size.height as f64 / scale_factor.0) as i32 + decorations_height,
-                    );
-                } else {
-                    data.toplevel.set_max_size(0, 0);
-                }
+                event::update_size_hints(data, &hints, scale_factor.0);
             }
             win.attrs.size_hints = Some(hints);
         }

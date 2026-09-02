@@ -1,11 +1,9 @@
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 fn main() {
-    pretty_env_logger::formatted_timed_builder()
-        .filter_level(log::LevelFilter::Info)
-        .parse_default_env()
-        .init();
-    xwayland_satellite::main(parse_args());
+    let arg_data = parse_args();
+    init_logger(!arg_data.listenfds.is_empty());
+    xwayland_satellite::main(arg_data);
 }
 
 #[derive(Default)]
@@ -245,4 +243,34 @@ fn parse_args() -> RealData {
     data.flags = flags.to_vec();
 
     data
+}
+
+fn init_logger(integrated: bool) {
+    if integrated {
+        match syslog::unix(syslog::Formatter3164::default()) {
+            Ok(syslog) => {
+                log::set_boxed_logger(Box::new(syslog::BasicLogger::new(syslog))).unwrap();
+                log::set_max_level(log::LevelFilter::Debug);
+                std::panic::set_hook(Box::new(|info| {
+                    let thread = std::thread::current();
+                    let name = thread.name().unwrap_or("<unnamed");
+                    let location = info.location().unwrap();
+                    log::error!("thread '{name}' panicked at {location}:");
+                    if let Some(s) = info.payload().downcast_ref::<&str>() {
+                        log::error!("{s}");
+                    } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                        log::error!("{s}");
+                    }
+                }));
+                return;
+            }
+            Err(e) => {
+                eprintln!("failed to start syslog: {e:?}");
+            }
+        };
+    }
+    pretty_env_logger::formatted_timed_builder()
+        .filter_level(log::LevelFilter::Info)
+        .parse_default_env()
+        .init();
 }
