@@ -1576,10 +1576,13 @@ fn primary_output() {
     let reply = conn.get_reply(&xcb::randr::GetOutputPrimary { window: conn.root });
     assert_eq!(reply.output(), output1);
 
+    // Primary should NOT change when focus moves to a different output.
+    // Rotating the primary on every focus change shifts the Xinerama origin
+    // and breaks cursor coordinate translation in Wine/Proton.
     f.testwl.focus_toplevel(surface2);
     std::thread::sleep(std::time::Duration::from_millis(10));
     let reply = conn.get_reply(&xcb::randr::GetOutputPrimary { window: conn.root });
-    assert_eq!(reply.output(), output2);
+    assert_eq!(reply.output(), output1, "primary should remain stable after focus change");
 
     let wl_output3 = f.create_output(24, 46);
     f.testwl.move_surface_to_output(surface2, &wl_output3);
@@ -1594,7 +1597,10 @@ fn primary_output() {
         .find(|o| ![output1, output2].contains(o))
         .unwrap();
     let reply = conn.get_reply(&xcb::randr::GetOutputPrimary { window: conn.root });
-    assert_eq!(reply.output(), output3);
+    assert_eq!(
+        reply.output(), output1,
+        "primary should remain stable after output hotplug"
+    );
 }
 
 #[test]

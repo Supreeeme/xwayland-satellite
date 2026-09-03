@@ -293,6 +293,8 @@ impl XState {
                 self.atoms.net_wm_state,
                 self.atoms.wm_fullscreen,
                 self.atoms.moveresize,
+                self.atoms.net_desktop_geometry,
+                self.atoms.net_workarea,
             ],
         );
 
@@ -920,6 +922,8 @@ xcb::atoms_struct! {
         primary => b"PRIMARY" only_if_exists = false,
         primary_targets => b"_primary_targets" only_if_exists = false,
         moveresize => b"_NET_WM_MOVERESIZE" only_if_exists = false,
+        net_desktop_geometry => b"_NET_DESKTOP_GEOMETRY" only_if_exists = false,
+        net_workarea => b"_NET_WORKAREA" only_if_exists = false,
     }
 }
 
@@ -1328,6 +1332,63 @@ impl RealConnection {
 
 impl XConnection for RealConnection {
     type X11Selection = Selection;
+    fn update_desktop_properties(
+        &self,
+        outputs: &[(i32, i32, i32, i32)],
+    ) {
+        // Compute bounding box of all outputs
+        let mut min_x = 0i32;
+        let mut min_y = 0i32;
+        let mut max_x = 0i32;
+        let mut max_y = 0i32;
+        if let Some(first) = outputs.first() {
+            min_x = first.0;
+            min_y = first.1;
+            max_x = first.0 + first.2;
+            max_y = first.1 + first.3;
+            for &(x, y, w, h) in &outputs[1..] {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x + w);
+                max_y = max_y.max(y + h);
+            }
+        }
+        let width = (max_x - min_x) as u32;
+        let height = (max_y - min_y) as u32;
+
+        let root = self.root_window();
+
+        // _NET_DESKTOP_GEOMETRY: width, height
+        let _ = self.connection.send_and_check_request(&x::ChangeProperty::<u32> {
+            mode: x::PropMode::Replace,
+            window: root,
+            property: self.atoms.net_desktop_geometry,
+            r#type: x::ATOM_CARDINAL,
+            data: &[width, height],
+        });
+
+        // _NET_WORKAREA: x, y, width, height for each desktop area
+        // Report each output's full geometry as a work area
+        let mut workareas = Vec::with_capacity(outputs.len() * 4);
+        for &(x, y, w, h) in outputs {
+            workareas.push(x as u32);
+            workareas.push(y as u32);
+            workareas.push(w as u32);
+            workareas.push(h as u32);
+        }
+        let _ = self.connection.send_and_check_request(&x::ChangeProperty::<u32> {
+            mode: x::PropMode::Replace,
+            window: root,
+            property: self.atoms.net_workarea,
+            r#type: x::ATOM_CARDINAL,
+            data: &workareas,
+        });
+
+        debug!(
+            "desktop geometry: {width}x{height}, work areas: {outputs:?}"
+        );
+    }
+
     fn set_window_dims(
         &mut self,
         window: x::Window,
@@ -1404,28 +1465,22 @@ impl XConnection for RealConnection {
                 warn!("Couldn't find output {name}, primary output will be wrong");
                 return;
             };
-            if output == self.primary_output {
-                debug!("primary output is already {name}");
-                return;
+            // Set primary once on first focus, then leave it alone.
+            // Rotating the primary on every focus change shifts the Xinerama
+            // origin and breaks cursor coordinate translation in Wine/Proton.
+            if self.primary_output == Xid::none() {
+                if let Err(e) = self
+                    .connection
+                    .send_and_check_request(&xcb::randr::SetOutputPrimary { window, output })
+                {
+                    warn!("Couldn't set output {name} as primary: {e:?}");
+                } else {
+                    debug!("set initial primary output to {name}");
+                    self.primary_output = output;
+                }
+            } else if output != self.primary_output {
+                debug!("focused window on {name} (primary remains {:?})", self.primary_output);
             }
-
-            if let Err(e) = self
-                .connection
-                .send_and_check_request(&xcb::randr::SetOutputPrimary { window, output })
-            {
-                warn!("Couldn't set output {name} as primary: {e:?}");
-            } else {
-                debug!("set {name} as primary output");
-                self.primary_output = output;
-            }
-        } else {
-            let _ = self
-                .connection
-                .send_and_check_request(&xcb::randr::SetOutputPrimary {
-                    window,
-                    output: Xid::none(),
-                });
-            self.primary_output = Xid::none();
         }
     }
 
