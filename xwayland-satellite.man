@@ -66,6 +66,7 @@ X-Resource
 Force the use of the given rendering API for Glamor acceleration. Valid parameters are \fIgl\fR to use OpenGL, \fIes\fR to use GL ES, and \fInone\fR to use the shared memory backend. For maximum compatibility with
 .BR Xwayland (1)
 builds without the Glamor backend, the \fInone\fR option is converted to the \fI\-shm\fR flag under the hood.
+.TP
 \fB\-help\fR
 Prints a basic usage message and list of accepted flags and returns 0.
 .TP
