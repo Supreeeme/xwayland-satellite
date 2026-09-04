@@ -103,6 +103,8 @@ impl WmName {
 
 pub struct XState {
     connection: Rc<xcb::Connection>,
+    /// An event xcb had already queued when [`XState::stash_queued_event`] looked.
+    queued_event: Option<xcb::Event>,
     atoms: Atoms,
     window_atoms: WindowTypes,
     root: x::Window,
@@ -227,6 +229,7 @@ impl XState {
             root,
             atoms,
             window_atoms,
+            queued_event: None,
             selection_state,
             settings,
             max_req_bytes,
@@ -333,6 +336,24 @@ impl XState {
             .unwrap();
     }
 
+    fn next_event(&mut self) -> Option<xcb::Event> {
+        if let Some(event) = self.queued_event.take() {
+            return Some(event);
+        }
+        self.connection.poll_for_event().unwrap()
+    }
+
+    /// Whether xcb already holds an event that arrived while a request was waiting for its
+    /// reply. Such an event was read off the socket into xcb's queue, so the socket is not
+    /// readable for it and a poll would sleep through it. The event is stashed so that the
+    /// next [`XState::handle_events`] handles it first.
+    pub fn stash_queued_event(&mut self) -> bool {
+        if self.queued_event.is_none() {
+            self.queued_event = self.connection.poll_for_queued_event().unwrap();
+        }
+        self.queued_event.is_some()
+    }
+
     pub fn handle_events(&mut self, server_state: &mut super::RealServerState) {
         macro_rules! unwrap_or_skip_bad_window_cont {
             ($err:expr) => {
@@ -341,7 +362,7 @@ impl XState {
         }
 
         let mut ignored_windows = Vec::new();
-        while let Some(event) = self.connection.poll_for_event().unwrap() {
+        while let Some(event) = self.next_event() {
             trace!("x11 event: {event:?}");
 
             if self.handle_selection_event(&event, server_state) {
