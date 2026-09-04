@@ -1571,30 +1571,41 @@ fn primary_output() {
     assert_ne!(surface1, surface2);
     f.wait_and_dispatch();
 
+    // satellite must no longer drive the RANDR primary output from focus (#209):
+    // focusing windows, including across outputs, must leave the primary untouched.
     f.testwl.focus_toplevel(surface1);
     std::thread::sleep(std::time::Duration::from_millis(10));
     let reply = conn.get_reply(&xcb::randr::GetOutputPrimary { window: conn.root });
-    assert_eq!(reply.output(), output1);
+    assert_eq!(
+        reply.output(),
+        Xid::none(),
+        "focusing a window must not set the primary output"
+    );
 
     f.testwl.focus_toplevel(surface2);
     std::thread::sleep(std::time::Duration::from_millis(10));
     let reply = conn.get_reply(&xcb::randr::GetOutputPrimary { window: conn.root });
-    assert_eq!(reply.output(), output2);
+    assert_eq!(
+        reply.output(),
+        Xid::none(),
+        "focusing a window on another output must not set the primary output"
+    );
 
-    let wl_output3 = f.create_output(24, 46);
-    f.testwl.move_surface_to_output(surface2, &wl_output3);
+    // A primary chosen explicitly (as `xrandr --primary` does) must persist across
+    // focus changes instead of being overwritten on the next focus.
+    conn.send_and_check_request(&xcb::randr::SetOutputPrimary {
+        window: conn.root,
+        output: output1,
+    })
+    .unwrap();
+    f.testwl.focus_toplevel(surface2); // surface2 lives on output2
     std::thread::sleep(std::time::Duration::from_millis(10));
-
-    let reply = conn.get_reply(&xcb::randr::GetScreenResources { window: conn.root });
-    assert_eq!(reply.outputs().len(), 3);
-    let output3 = reply
-        .outputs()
-        .iter()
-        .copied()
-        .find(|o| ![output1, output2].contains(o))
-        .unwrap();
     let reply = conn.get_reply(&xcb::randr::GetOutputPrimary { window: conn.root });
-    assert_eq!(reply.output(), output3);
+    assert_eq!(
+        reply.output(),
+        output1,
+        "an explicitly set primary must not be overridden by focusing a window on {output2:?}"
+    );
 }
 
 #[test]
