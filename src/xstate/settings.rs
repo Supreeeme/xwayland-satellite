@@ -38,6 +38,7 @@ impl XState {
                 data: &self.settings.as_data(),
             })
             .unwrap();
+        self.update_xft_dpi_resource(self.settings.xft_dpi());
     }
 }
 
@@ -184,5 +185,10 @@ impl Settings {
                 value: scale as i32,
                 last_change_serial: self.serial,
             });
+    }
+
+    fn xft_dpi(&self) -> i32 {
+        let setting = self.settings.get(XFT_DPI).unwrap();
+        (setting.value as f64 / DPI_SCALE_FACTOR as f64).round() as i32
     }
 }
