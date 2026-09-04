@@ -37,14 +37,15 @@ impl XState {
                 .map(|separator| line[..separator].trim_ascii());
             match resource_name {
                 Some(b"Xft.dpi") => {
-                      if !replaced {
-                      updated.extend_from_slice(xft_dpi.as_bytes());
-                      if line.ends_with(b"\n") {
-                          updated.push(b'\n');
-                      }
-                      replaced = true;
+                    if !replaced {
+                        updated.extend_from_slice(xft_dpi.as_bytes());
+                        if line.ends_with(b"\n") {
+                            updated.push(b'\n');
+                        }
+                        replaced = true;
+                    }
                 }
-                _ => { updated.extend_from_slice(line); }
+                _ => updated.extend_from_slice(line),
             }
         }
 
