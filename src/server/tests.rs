@@ -819,8 +819,8 @@ impl TestFixture<FakeXConnection> {
                 assert_eq!(
                     pos.size.as_ref().unwrap(),
                     &testwl::Vec2 {
-                        x: (dims.width as f64 / scale) as i32,
-                        y: (dims.height as f64 / scale) as i32
+                        x: (dims.width as f64 / scale).ceil() as i32,
+                        y: (dims.height as f64 / scale).ceil() as i32
                     }
                 );
 
@@ -829,8 +829,8 @@ impl TestFixture<FakeXConnection> {
                     pos.anchor_rect.as_ref().unwrap(),
                     &testwl::Rect {
                         size: testwl::Vec2 {
-                            x: (parent_win.dims.width as f64 / scale) as i32,
-                            y: (parent_win.dims.height as f64 / scale) as i32
+                            x: (parent_win.dims.width as f64 / scale).ceil() as i32,
+                            y: (parent_win.dims.height as f64 / scale).ceil() as i32
                         },
                         offset: testwl::Vec2::default()
                     }
@@ -2480,8 +2480,8 @@ fn fractional_scale_popup() {
     let builder = PopupBuilder::new(popup, toplevel, toplevel_id)
         .x(60)
         .y(60)
-        .width(60)
-        .height(60)
+        .width(61)
+        .height(61)
         .scale(1.5);
     let initial_dims = builder.dims;
     f.create_popup(&comp, builder);
@@ -2553,6 +2553,18 @@ fn fractional_scale_small_popup() {
         assert_eq!(viewport.height, 67);
     }
 
+    f.reconfigure_window(
+        toplevel,
+        WindowDims {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        },
+        false,
+    );
+    f.run();
+
     let popup = Window::new(2);
     let builder = PopupBuilder::new(popup, toplevel, toplevel_id)
         .width(1)
@@ -2570,6 +2582,10 @@ fn fractional_scale_small_popup() {
         .expect("Missing popup data");
     let pos = &data.popup().positioner_state;
     assert_eq!(pos.size.unwrap(), testwl::Vec2 { x: 1, y: 1 });
+    assert_eq!(
+        pos.anchor_rect.as_ref().unwrap().size,
+        testwl::Vec2 { x: 1, y: 1 }
+    );
 
     let dims = WindowDims {
         x: 0,
@@ -2578,7 +2594,6 @@ fn fractional_scale_small_popup() {
         height: 1,
     };
     f.reconfigure_window(popup, dims, true);
-    f.run();
     f.run();
 
     let dims = f.connection().window(popup).dims;
@@ -2590,7 +2605,7 @@ fn fractional_scale_small_popup() {
         .get_surface_data(popup_id)
         .expect("Missing popup data");
     let pos = &data.popup().positioner_state;
-    assert_eq!(pos.size.unwrap(), testwl::Vec2 { x: 1, y: 1 });
+    assert_eq!(pos.size.unwrap(), testwl::Vec2 { x: 2, y: 1 });
 }
 
 #[test]

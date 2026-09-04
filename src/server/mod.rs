@@ -1101,8 +1101,8 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                     ((event.y() as i32 - win.output_offset.y) as f64 / scale_factor.0) as i32,
                 );
                 popup.positioner.set_size(
-                    1.max((event.width() as f64 / scale_factor.0) as i32),
-                    1.max((event.height() as f64 / scale_factor.0) as i32),
+                    1.max((event.width() as f64 / scale_factor.0).ceil() as i32),
+                    1.max((event.height() as f64 / scale_factor.0).ceil() as i32),
                 );
                 popup.popup.reposition(&popup.positioner, 0);
             }
@@ -1597,8 +1597,8 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         let positioner = self.xdg_wm_base.create_positioner(&self.qh, ());
         positioner.set_size(
-            1.max((window.attrs.dims.width as f64 / initial_scale) as i32),
-            1.max((window.attrs.dims.height as f64 / initial_scale) as i32),
+            1.max((window.attrs.dims.width as f64 / initial_scale).ceil() as i32),
+            1.max((window.attrs.dims.height as f64 / initial_scale).ceil() as i32),
         );
         let x = ((window.attrs.dims.x - parent_dims.x) as f64 / initial_scale) as i32;
         let y = ((window.attrs.dims.y - parent_dims.y) as f64 / initial_scale) as i32;
@@ -1608,8 +1608,8 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         positioner.set_anchor_rect(
             0,
             0,
-            (parent_window.attrs.dims.width as f64 / initial_scale) as i32,
-            (parent_window.attrs.dims.height as f64 / initial_scale) as i32,
+            (parent_window.attrs.dims.width as f64 / initial_scale).ceil() as i32,
+            (parent_window.attrs.dims.height as f64 / initial_scale).ceil() as i32,
         );
         positioner
             .set_constraint_adjustment(ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY);
