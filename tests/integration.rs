@@ -570,6 +570,14 @@ impl Connection {
     }
 
     #[track_caller]
+    fn await_button_press(&mut self) -> x::ButtonPressEvent {
+        match self.await_event() {
+            xcb::Event::X(x::Event::ButtonPress(e)) => e,
+            other => panic!("Didn't get button press event, instead got {other:?}"),
+        }
+    }
+
+    #[track_caller]
     fn await_selection_notify(&mut self) -> x::SelectionNotifyEvent {
         match self.await_event() {
             xcb::Event::X(x::Event::SelectionNotify(r)) => r,
@@ -2362,6 +2370,12 @@ fn client_init_move() {
 
     let win_toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
     let surface = f.map_as_toplevel(&mut connection, win_toplevel);
+    connection
+        .send_and_check_request(&x::ChangeWindowAttributes {
+            window: win_toplevel,
+            value_list: &[x::Cw::EventMask(x::EventMask::BUTTON_PRESS)],
+        })
+        .unwrap();
     f.testwl.move_pointer_to(surface, 10., 10.);
     let ptr = f.testwl.pointer();
     ptr.motion(10, 10.0, 10.0);
@@ -2369,6 +2383,9 @@ fn client_init_move() {
     ptr.button(10, 20, BTN_LEFT, wl_pointer::ButtonState::Pressed);
     ptr.frame();
     f.testwl.dispatch();
+    // A real client only asks for this in response to the button press it received, so wait for
+    // the satellite to forward it before sending the request.
+    connection.await_button_press();
 
     connection.send_client_message(&x::ClientMessageEvent::new(
         win_toplevel,
@@ -2388,6 +2405,12 @@ fn client_init_resize() {
 
     let win_toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
     let surface = f.map_as_toplevel(&mut connection, win_toplevel);
+    connection
+        .send_and_check_request(&x::ChangeWindowAttributes {
+            window: win_toplevel,
+            value_list: &[x::Cw::EventMask(x::EventMask::BUTTON_PRESS)],
+        })
+        .unwrap();
     f.testwl.move_pointer_to(surface, 10., 10.);
     let ptr = f.testwl.pointer();
     ptr.motion(10, 10.0, 10.0);
@@ -2395,6 +2418,9 @@ fn client_init_resize() {
     ptr.button(10, 20, BTN_LEFT, wl_pointer::ButtonState::Pressed);
     ptr.frame();
     f.testwl.dispatch();
+    // A real client only asks for this in response to the button press it received, so wait for
+    // the satellite to forward it before sending the request.
+    connection.await_button_press();
 
     connection.send_client_message(&x::ClientMessageEvent::new(
         win_toplevel,

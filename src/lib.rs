@@ -243,6 +243,13 @@ pub fn main(mut data: impl RunData) -> Option<()> {
             xstate.update_global_scale(scale);
         }
 
+        // Anything above that waited for an X11 reply (the XConnection calls made while
+        // dispatching, ConvertSelection in the paste path, selection ownership, XSETTINGS) may
+        // have pulled events into xcb's queue. Those never make the socket readable, so instead
+        // of sleeping in poll go round again and let handle_events take them first.
+        if xstate.stash_queued_event() {
+            continue;
+        }
         match poll(&mut fds, None) {
             Ok(_) => {
                 if !fds[3].revents().is_empty() {
