@@ -473,6 +473,33 @@ mod window_role_heuristics {
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
 
+    // https://github.com/Supreeeme/xwayland-satellite/issues/470
+    // A DIALOG with TRANSIENT_FOR and no Motif decorations which is resizable
+    // (min_size != max_size) should be a top-level, mirroring the UTILITY fix in #383.
+    // Otherwise the popup parent resolves to a hidden WM_CLIENT_LEADER and the
+    // window never appears (e.g. DaVinci Resolve's Project Manager).
+    // Window attributes are taken from the full xprop posted in #470 (DIALOG +
+    // NORMAL window types, _MOTIF_WM_HINTS decorations=0, resizable normal hints).
+    #[test]
+    fn davinci_resolve_project_manager() {
+        let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .user_pos(978, 270)
+            .user_size(1884, 1620)
+            .min_size(910, 640)
+            .max_size(2880, 1620)
+            .win_gravity(Gravity::Static);
+        let win = WindowRoleHeuristics {
+            has_transient_for: true,
+            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0x1, 0, 0, 0].as_slice())),
+            window_types: vec![win_types.dialog, win_types.normal],
+            wm_normal_hints: Some(wm_normal_hints.into()),
+            wm_class: Some("resolve".into()),
+            ..Default::default()
+        };
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
+    }
+
     // https://github.com/Supreeeme/xwayland-satellite/pull/390
     // With Motif decorations, even a dialog with TRANSIENT_FOR is better treated as a top-level
     #[test]
