@@ -40,6 +40,7 @@ Specify a file with authorization records. This flag can be passed a maximum of 
 and
 .BR Xsecurity (7)
 man pages.
+
 .TP
 \fB\-core\fR
 Cause Xwayland to generate a core dump on fatal errors. Note this does not generate a core dump on fatal
@@ -96,6 +97,9 @@ for more information on how to set this variable.
 .TP
 \fBWAYLAND_DISPLAY\fR
 Name of the Wayland server's display.
+.TP
+\fBXWAYLAND_SATELLITE_COMPOSITOR_SCALING\fR
+If set, enables compositor-side scaling.
 .TP
 \fBXDG_RUNTIME_DIR\fR
 The directory used by \fBxwayland\-satellite\fR to both look for the Wayland socket to connect to and to create the Wayland socket \fBXwayland\fR will connect to.

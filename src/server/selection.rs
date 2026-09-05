@@ -16,7 +16,10 @@ use smithay_client_toolkit::primary_selection::device::PrimarySelectionDevice;
 use smithay_client_toolkit::primary_selection::offer::PrimarySelectionOffer;
 use smithay_client_toolkit::primary_selection::selection::PrimarySelectionSource;
 use std::io::Read;
+use std::os::fd::AsFd;
 use std::rc::{Rc, Weak};
+
+pub const MAX_CLIPBOARD_SIZE: usize = 16 * 1024 * 1024;
 
 pub(super) struct SelectionStates<S: X11Selection> {
     clipboard: Option<SelectionState<S, Clipboard>>,
@@ -153,15 +156,68 @@ pub struct ForeignSelection<T: SelectionType> {
 
 #[allow(private_bounds)]
 impl<T: SelectionType> ForeignSelection<T> {
+    pub(crate) fn receive_async(&self, mime_type: String) -> std::io::Result<ReadPipe> {
+        let pipe = T::receive_offer(&self.inner, mime_type)?;
+        if let Err(e) = rustix::fs::fcntl_setfl(&pipe, rustix::fs::OFlags::NONBLOCK) {
+            warn!("Failed to set non-blocking mode on clipboard pipe: {:?}", e);
+        }
+        Ok(pipe)
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn receive(
         &self,
         mime_type: String,
         state: &ServerState<impl XConnection>,
     ) -> Vec<u8> {
         let mut pipe = T::receive_offer(&self.inner, mime_type).unwrap();
+        if let Err(e) = rustix::fs::fcntl_setfl(&pipe, rustix::fs::OFlags::NONBLOCK) {
+            warn!("Failed to set non-blocking mode on clipboard pipe: {:?}", e);
+        }
         state.queue.flush().unwrap();
         let mut data = Vec::new();
-        pipe.read_to_end(&mut data).unwrap();
+        // Blocking read with a timeout is acceptable here as this method is only used for synchronous testing.
+        let timeout = rustix::event::Timespec {
+            tv_sec: 2,
+            tv_nsec: 0,
+        };
+        loop {
+            let ready = {
+                let borrowed_fd = pipe.as_fd();
+                let poll_fd =
+                    rustix::event::PollFd::new(&borrowed_fd, rustix::event::PollFlags::IN);
+                let mut fds = [poll_fd];
+                rustix::event::poll(&mut fds, Some(&timeout))
+            };
+            match ready {
+                Ok(0) => {
+                    warn!("Clipboard read timeout");
+                    break;
+                }
+                Ok(_) => {
+                    let mut buf = [0u8; 4096];
+                    match pipe.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            data.extend_from_slice(&buf[..n]);
+                            if data.len() > MAX_CLIPBOARD_SIZE {
+                                warn!("Clipboard size exceeds 16MB limit, aborting transfer");
+                                return Vec::new();
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                        Err(e) => {
+                            warn!("Clipboard read error: {e:?}");
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Clipboard poll error: {e:?}");
+                    break;
+                }
+            }
+        }
         data
     }
 }

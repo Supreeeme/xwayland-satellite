@@ -1,12 +1,15 @@
 use super::{XState, get_atom_name};
-use crate::server::selection::{Clipboard, ForeignSelection, Primary, SelectionType};
+use crate::server::selection::{
+    Clipboard, ForeignSelection, MAX_CLIPBOARD_SIZE, Primary, SelectionType,
+};
 use crate::{RealServerState, X11Selection};
 use log::{debug, error, warn};
 use rustix::event::{PollFd, PollFlags, poll};
-use smithay_client_toolkit::data_device_manager::WritePipe;
+use smithay_client_toolkit::data_device_manager::{ReadPipe, WritePipe};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{Error, ErrorKind, Result, Write};
+use std::os::fd::AsFd;
 use std::rc::Rc;
 use xcb::x;
 
@@ -224,12 +227,12 @@ impl Selection {
 }
 
 pub struct WaylandIncrInfo {
-    data: Vec<u8>,
-    start: usize,
-    property: x::Atom,
-    target_window: x::Window,
-    target_type: x::Atom,
-    max_req_bytes: usize,
+    pub(crate) data: Vec<u8>,
+    pub(crate) start: usize,
+    pub(crate) property: x::Atom,
+    pub(crate) target_window: x::Window,
+    pub(crate) target_type: x::Atom,
+    pub(crate) max_req_bytes: usize,
 }
 
 pub struct WaylandSelection<T: SelectionType> {
@@ -297,6 +300,24 @@ struct SelectionData<T: SelectionType> {
     current_selection: Option<CurrentSelection<T>>,
 }
 
+pub(super) enum RequestResult {
+    Success,
+    Refuse,
+    Async(ReadPipe),
+}
+
+pub(crate) struct PendingTransfer {
+    pub(crate) pipe: ReadPipe,
+    pub(crate) data: Vec<u8>,
+    pub(crate) requestor: x::Window,
+    pub(crate) property: x::Atom,
+    pub(crate) target: x::Atom,
+    pub(crate) selection: x::Atom,
+    pub(crate) time: x::Timestamp,
+    pub(crate) max_req_bytes: usize,
+    pub(crate) expires_at: std::time::Instant,
+}
+
 // This is a trait so that we can use &dyn
 trait SelectionDataImpl {
     fn set_owner(&self, connection: &xcb::Connection, wm_window: x::Window) -> bool;
@@ -323,11 +344,12 @@ trait SelectionDataImpl {
         connection: &xcb::Connection,
         atoms: &super::Atoms,
         request: &x::SelectionRequestEvent,
-        max_req_bytes: usize,
-        server_state: &mut RealServerState,
-    ) -> bool;
+        _max_req_bytes: usize,
+        _server_state: &mut RealServerState,
+    ) -> RequestResult;
     fn atom(&self) -> x::Atom;
     fn selection_clear(&mut self);
+    fn start_incr(&mut self, incr_info: WaylandIncrInfo);
 }
 
 impl<T: SelectionType> SelectionData<T> {
@@ -350,6 +372,11 @@ impl<T: SelectionType> SelectionData<T> {
 impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
     fn atom(&self) -> x::Atom {
         self.atom
+    }
+    fn start_incr(&mut self, incr_info: WaylandIncrInfo) {
+        if let Some(wayland_sel) = self.wayland_selection_mut() {
+            wayland_sel.incr_data = Some(incr_info);
+        }
     }
     fn set_owner(&self, connection: &xcb::Connection, wm_window: x::Window) -> bool {
         if let Err(e) = connection.send_and_check_request(&x::SetSelectionOwner {
@@ -526,17 +553,17 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
         connection: &xcb::Connection,
         atoms: &super::Atoms,
         request: &x::SelectionRequestEvent,
-        max_req_bytes: usize,
-        server_state: &mut RealServerState,
-    ) -> bool {
+        _max_req_bytes: usize,
+        _server_state: &mut RealServerState,
+    ) -> RequestResult {
         let Some(CurrentSelection::Wayland(WaylandSelection {
             mimes,
             inner,
-            incr_data,
+            incr_data: _,
         })) = &mut self.current_selection
         else {
             warn!("Got selection request, but we don't seem to be the selection owner");
-            return false;
+            return RequestResult::Refuse;
         };
 
         let req_target = request.target();
@@ -550,10 +577,10 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
                 r#type: x::ATOM_ATOM,
                 data: &atoms,
             }) {
-                Ok(_) => true,
+                Ok(_) => RequestResult::Success,
                 Err(e) => {
                     warn!("Failed to set targets for selection request: {e:?}");
-                    false
+                    RequestResult::Refuse
                 }
             }
         } else {
@@ -564,7 +591,7 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
                         "refusing selection request because given atom could not be found ({name})"
                     );
                 }
-                return false;
+                return RequestResult::Refuse;
             };
 
             let mime_name = target
@@ -572,51 +599,11 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
                 .as_ref()
                 .cloned()
                 .unwrap_or_else(|| target.name.clone());
-            let data = inner.receive(mime_name, server_state);
-            if data.len() > max_req_bytes {
-                if let Err(e) = connection.send_and_check_request(&x::ChangeWindowAttributes {
-                    window: request.requestor(),
-                    value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
-                }) {
-                    warn!("Failed to set up property change notifications: {e:?}");
-                    return false;
-                }
-                if let Err(e) = connection.send_and_check_request(&x::ChangeProperty {
-                    mode: x::PropMode::Replace,
-                    window: request.requestor(),
-                    property: request.property(),
-                    r#type: atoms.incr,
-                    data: &[data.len() as u32],
-                }) {
-                    warn!("Failed to set incr property for large transfer: {e:?}");
-                    return false;
-                }
-                debug!(
-                    "beginning incr for {}",
-                    get_atom_name(connection, target.target)
-                );
-                *incr_data = Some(WaylandIncrInfo {
-                    data,
-                    start: 0,
-                    target_window: request.requestor(),
-                    property: request.property(),
-                    target_type: target.target,
-                    max_req_bytes,
-                });
-                true
-            } else {
-                match connection.send_and_check_request(&x::ChangeProperty {
-                    mode: x::PropMode::Replace,
-                    window: request.requestor(),
-                    property: request.property(),
-                    r#type: target.target,
-                    data: &data,
-                }) {
-                    Ok(_) => true,
-                    Err(e) => {
-                        warn!("Failed setting selection property: {e:?}");
-                        false
-                    }
+            match inner.receive_async(mime_name) {
+                Ok(pipe) => RequestResult::Async(pipe),
+                Err(e) => {
+                    warn!("Failed to receive selection from Wayland: {e:?}");
+                    RequestResult::Refuse
                 }
             }
         }
@@ -627,6 +614,7 @@ pub(super) struct SelectionState {
     clipboard: SelectionData<Clipboard>,
     primary: SelectionData<Primary>,
     target_window: x::Window,
+    pub(crate) pending_transfers: Vec<PendingTransfer>,
 }
 
 impl SelectionState {
@@ -652,6 +640,7 @@ impl SelectionState {
             target_window,
             clipboard: SelectionData::new(atoms.clipboard, atoms.clipboard_targets),
             primary: SelectionData::new(atoms.primary, atoms.primary_targets),
+            pending_transfers: Vec::new(),
         }
     }
 }
@@ -887,16 +876,31 @@ impl XState {
                     return true;
                 }
 
-                if data.handle_selection_request(
+                match data.handle_selection_request(
                     &self.connection,
                     &self.atoms,
                     e,
                     self.max_req_bytes,
                     server_state,
                 ) {
-                    success()
-                } else {
-                    refuse()
+                    RequestResult::Success => success(),
+                    RequestResult::Refuse => refuse(),
+                    RequestResult::Async(pipe) => {
+                        self.selection_state
+                            .pending_transfers
+                            .push(PendingTransfer {
+                                pipe,
+                                data: Vec::new(),
+                                requestor: e.requestor(),
+                                property: e.property(),
+                                target: e.target(),
+                                selection: e.selection(),
+                                time: e.time(),
+                                max_req_bytes: self.max_req_bytes,
+                                expires_at: std::time::Instant::now()
+                                    + std::time::Duration::from_secs(2),
+                            });
+                    }
                 }
             }
 
@@ -969,5 +973,188 @@ impl XState {
         }
         inner(&self.connection, event, &mut self.selection_state.primary)
             || inner(&self.connection, event, &mut self.selection_state.clipboard)
+    }
+
+    fn send_selection_notify(
+        connection: &xcb::Connection,
+        transfer: &PendingTransfer,
+        property: x::Atom,
+    ) {
+        if let Err(e) = connection.send_and_check_request(&x::SendEvent {
+            propagate: false,
+            destination: x::SendEventDest::Window(transfer.requestor),
+            event_mask: x::EventMask::empty(),
+            event: &x::SelectionNotifyEvent::new(
+                transfer.time,
+                transfer.requestor,
+                transfer.selection,
+                transfer.target,
+                property,
+            ),
+        }) {
+            warn!("Failed to send selection request notify: {e:?}");
+        }
+    }
+
+    fn complete_transfer(&mut self, mut transfer: PendingTransfer) {
+        let data_len = transfer.data.len();
+        let data = std::mem::take(&mut transfer.data);
+
+        if data_len > transfer.max_req_bytes {
+            if let Err(e) = self
+                .connection
+                .send_and_check_request(&x::ChangeWindowAttributes {
+                    window: transfer.requestor,
+                    value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
+                })
+            {
+                warn!("Failed to set up property change notifications: {e:?}");
+                Self::send_selection_notify(&self.connection, &transfer, x::ATOM_NONE);
+            } else if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty {
+                mode: x::PropMode::Replace,
+                window: transfer.requestor,
+                property: transfer.property,
+                r#type: self.atoms.incr,
+                data: &[data_len as u32],
+            }) {
+                warn!("Failed to set incr property for large transfer: {e:?}");
+                Self::send_selection_notify(&self.connection, &transfer, x::ATOM_NONE);
+            } else {
+                debug!(
+                    "beginning incr for {}",
+                    get_atom_name(&self.connection, transfer.target)
+                );
+                let is_clipboard = transfer.selection == self.atoms.clipboard;
+                let sel_data = if is_clipboard {
+                    &mut self.selection_state.clipboard as &mut dyn SelectionDataImpl
+                } else {
+                    &mut self.selection_state.primary as &mut dyn SelectionDataImpl
+                };
+                sel_data.start_incr(WaylandIncrInfo {
+                    data,
+                    start: 0,
+                    target_window: transfer.requestor,
+                    property: transfer.property,
+                    target_type: transfer.target,
+                    max_req_bytes: transfer.max_req_bytes,
+                });
+                Self::send_selection_notify(&self.connection, &transfer, transfer.property);
+            }
+        } else {
+            match self.connection.send_and_check_request(&x::ChangeProperty {
+                mode: x::PropMode::Replace,
+                window: transfer.requestor,
+                property: transfer.property,
+                r#type: transfer.target,
+                data: &data,
+            }) {
+                Ok(_) => {
+                    Self::send_selection_notify(&self.connection, &transfer, transfer.property);
+                }
+                Err(e) => {
+                    warn!("Failed setting selection property: {e:?}");
+                    Self::send_selection_notify(&self.connection, &transfer, x::ATOM_NONE);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn process_pending_clipboard_transfers(&mut self, events: &[PollFlags]) {
+        let mut pending = std::mem::take(&mut self.selection_state.pending_transfers);
+        let pending_len = pending.len();
+        let mut i = 0;
+        let mut orig_i = 0;
+        let now = std::time::Instant::now();
+
+        while i < pending.len() {
+            let fd_idx = events.len() - pending_len + orig_i;
+            let expired = now > pending[i].expires_at;
+            let is_readable = fd_idx < events.len() && !events[fd_idx].is_empty();
+
+            if expired {
+                let transfer = pending.remove(i);
+                warn!("Clipboard transfer timed out");
+                Self::send_selection_notify(&self.connection, &transfer, x::ATOM_NONE);
+                orig_i += 1;
+                continue;
+            }
+
+            if is_readable {
+                use std::io::Read;
+                let mut buf = [0u8; 4096];
+                let mut done = false;
+                let mut err = false;
+                loop {
+                    match pending[i].pipe.read(&mut buf) {
+                        Ok(0) => {
+                            done = true;
+                            break;
+                        }
+                        Ok(n) => {
+                            pending[i].data.extend_from_slice(&buf[..n]);
+                            if pending[i].data.len() > MAX_CLIPBOARD_SIZE {
+                                warn!("Clipboard limit exceeded 16MB, aborting transfer");
+                                // The sender receives SIGPIPE/EPIPE once we remove PendingTransfer,
+                                // which drops ReadPipe and implicitly closes the file descriptor.
+                                err = true;
+                                break;
+                            }
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("Error reading clipboard pipe: {e:?}");
+                            err = true;
+                            break;
+                        }
+                    }
+                }
+
+                if done {
+                    let transfer = pending.remove(i);
+                    self.complete_transfer(transfer);
+                    orig_i += 1;
+                    continue;
+                } else if err {
+                    let transfer = pending.remove(i);
+                    Self::send_selection_notify(&self.connection, &transfer, x::ATOM_NONE);
+                    orig_i += 1;
+                    continue;
+                }
+            }
+
+            i += 1;
+            orig_i += 1;
+        }
+
+        self.selection_state.pending_transfers = pending;
+    }
+
+    pub(crate) fn has_pending_transfers(&self) -> bool {
+        !self.selection_state.pending_transfers.is_empty()
+    }
+
+    pub(crate) fn collect_poll_fds<'a>(&'a self, base: &mut Vec<PollFd<'a>>) {
+        for t in &self.selection_state.pending_transfers {
+            base.push(PollFd::from_borrowed_fd(t.pipe.as_fd(), PollFlags::IN));
+        }
+    }
+
+    pub(crate) fn poll_timeout(&self) -> Option<rustix::event::Timespec> {
+        let now = std::time::Instant::now();
+        let mut min_duration = None;
+        for t in &self.selection_state.pending_transfers {
+            let duration = t.expires_at.saturating_duration_since(now);
+            match min_duration {
+                None => min_duration = Some(duration),
+                Some(min) if duration < min => min_duration = Some(duration),
+                _ => {}
+            }
+        }
+        min_duration.map(|d| rustix::event::Timespec {
+            tv_sec: d.as_secs() as _,
+            tv_nsec: d.subsec_nanos() as _,
+        })
     }
 }
