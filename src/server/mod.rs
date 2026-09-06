@@ -99,9 +99,13 @@ where
     u32::from(wenum).try_into().unwrap()
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct WindowAttributes {
+    /// `WM_HINTS.input`. Windows without `WM_HINTS` are assumed to accept input; ICCCM 4.1.2.4
+    /// leaves window managers "free to assume convenient values for all fields of the WM_HINTS
+    /// property if a window is mapped without one".
     accepts_input: bool,
+    /// Whether `WM_TAKE_FOCUS` is in `WM_PROTOCOLS`.
     has_take_focus: bool,
     role: WindowRole,
     override_redirect: bool,
@@ -112,6 +116,24 @@ struct WindowAttributes {
     group: Option<x::Window>,
     decorations: Option<Decorations>,
     transient_for: Option<x::Window>,
+}
+
+impl Default for WindowAttributes {
+    fn default() -> Self {
+        Self {
+            accepts_input: true,
+            has_take_focus: false,
+            role: WindowRole::default(),
+            override_redirect: false,
+            dims: WindowDims::default(),
+            size_hints: None,
+            title: None,
+            class: None,
+            group: None,
+            decorations: None,
+            transient_for: None,
+        }
+    }
 }
 
 impl WindowAttributes {
