@@ -3293,3 +3293,185 @@ fn decorations_max_height_int_max() {
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}
+
+/// Changes the current mode of a testwl output, with the xdg output's logical size (if any)
+/// sent either before the wl_output mode event (like smithay based compositors do) or after it.
+fn change_output_mode(
+    f: &mut TestFixture<FakeXConnection>,
+    output: &wayland_server::protocol::wl_output::WlOutput,
+    width: i32,
+    height: i32,
+    xdg_first: bool,
+) {
+    use wayland_server::protocol::wl_output::Mode;
+    let xdg = f.testwl.get_xdg_output(output);
+    if xdg_first {
+        if let Some(xdg) = &xdg {
+            xdg.logical_size(width, height);
+        }
+    }
+    output.mode(Mode::Current, width, height, 0);
+    if !xdg_first {
+        if let Some(xdg) = &xdg {
+            xdg.logical_size(width, height);
+        }
+    }
+    output.done();
+    f.testwl.dispatch();
+    f.run();
+    f.run();
+}
+
+#[track_caller]
+fn check_xdg_logical_size(
+    xdg_out: &TestObject<ZxdgOutputV1>,
+    out: &TestObject<WlOutput>,
+    size: (i32, i32),
+) {
+    let events = std::mem::take(&mut *xdg_out.data.events.lock().unwrap());
+    let last_size = events.into_iter().rev().find_map(|e| match e {
+        zxdg_output_v1::Event::LogicalSize { width, height } => Some((width, height)),
+        _ => None,
+    });
+    assert_eq!(
+        last_size,
+        Some(size),
+        "Did not get expected zxdg_output_v1 logical_size"
+    );
+    let events = std::mem::take(&mut *out.data.events.lock().unwrap());
+    assert!(
+        events.iter().any(|e| matches!(e, wl_output::Event::Done)),
+        "Did not get wl_output done event"
+    );
+}
+
+#[test]
+fn output_mode_change_xdg_logical_size_before_mode() {
+    // smithay based compositors send the xdg output's logical size before the new current mode.
+    // The logical size we report to Xwayland must still be that of the new mode.
+    let (mut f, _) = TestFixture::new_with_compositor();
+    let man = f.enable_xdg_output();
+    let (output_obj, output) = f.new_output(0, 0);
+    let output_xdg = f.create_xdg_output(&man, output_obj.obj.clone());
+    f.run();
+
+    for (width, height) in [(3840, 2160), (2560, 1440), (1920, 1080), (3840, 2160)] {
+        change_output_mode(&mut f, &output, width, height, true);
+        check_xdg_logical_size(&output_xdg, &output_obj, (width, height));
+    }
+}
+
+#[test]
+fn output_mode_change_xdg_logical_size_after_mode() {
+    let (mut f, _) = TestFixture::new_with_compositor();
+    let man = f.enable_xdg_output();
+    let (output_obj, output) = f.new_output(0, 0);
+    let output_xdg = f.create_xdg_output(&man, output_obj.obj.clone());
+    f.run();
+
+    for (width, height) in [(3840, 2160), (2560, 1440), (1920, 1080), (3840, 2160)] {
+        change_output_mode(&mut f, &output, width, height, false);
+        check_xdg_logical_size(&output_xdg, &output_obj, (width, height));
+    }
+}
+
+#[test]
+fn output_mode_change_before_xdg_output() {
+    // The mode may be received before an xdg output exists for the output.
+    let (mut f, _) = TestFixture::new_with_compositor();
+    let man = f.enable_xdg_output();
+    let (output_obj, output) = f.new_output(0, 0);
+    change_output_mode(&mut f, &output, 2560, 1440, true);
+
+    let output_xdg = f.create_xdg_output(&man, output_obj.obj.clone());
+    f.run();
+    f.testwl
+        .get_xdg_output(&output)
+        .unwrap()
+        .logical_size(2560, 1440);
+    output.done();
+    f.testwl.dispatch();
+    f.run();
+    f.run();
+    check_xdg_logical_size(&output_xdg, &output_obj, (2560, 1440));
+
+    change_output_mode(&mut f, &output, 1920, 1080, true);
+    check_xdg_logical_size(&output_xdg, &output_obj, (1920, 1080));
+}
+
+#[test]
+fn output_mode_change_rotated() {
+    use wayland_server::protocol::wl_output::{Subpixel, Transform};
+    let (mut f, _) = TestFixture::new_with_compositor();
+    let man = f.enable_xdg_output();
+    let (output_obj, output) = f.new_output(0, 0);
+    let output_xdg = f.create_xdg_output(&man, output_obj.obj.clone());
+    f.run();
+
+    change_output_mode(&mut f, &output, 2560, 1440, true);
+    check_xdg_logical_size(&output_xdg, &output_obj, (2560, 1440));
+
+    // Rotating swaps the logical size.
+    let xdg = f.testwl.get_xdg_output(&output).unwrap();
+    xdg.logical_size(1440, 2560);
+    output.geometry(
+        0,
+        0,
+        0,
+        0,
+        Subpixel::None,
+        "".into(),
+        "".into(),
+        Transform::_90,
+    );
+    output.done();
+    f.testwl.dispatch();
+    f.run();
+    f.run();
+    check_xdg_logical_size(&output_xdg, &output_obj, (1440, 2560));
+
+    // Mode changes while rotated keep the swapped logical size.
+    let xdg = f.testwl.get_xdg_output(&output).unwrap();
+    xdg.logical_size(1080, 1920);
+    output.mode(
+        wayland_server::protocol::wl_output::Mode::Current,
+        1920,
+        1080,
+        0,
+    );
+    output.done();
+    f.testwl.dispatch();
+    f.run();
+    f.run();
+    check_xdg_logical_size(&output_xdg, &output_obj, (1080, 1920));
+}
+
+#[test]
+fn output_mode_change_scaled() {
+    // Satellite reports the native mode size as the logical size regardless of the output's
+    // scale, so Xwayland renders at native resolution.
+    let (mut f, _) = TestFixture::new_with_compositor();
+    let man = f.enable_xdg_output();
+    let (output_obj, output) = f.new_output(0, 0);
+    let output_xdg = f.create_xdg_output(&man, output_obj.obj.clone());
+    f.run();
+    output.scale(2);
+    output.done();
+    f.run();
+
+    for (width, height) in [(3840, 2160), (2560, 1440), (3840, 2160)] {
+        let xdg = f.testwl.get_xdg_output(&output).unwrap();
+        xdg.logical_size(width / 2, height / 2);
+        output.mode(
+            wayland_server::protocol::wl_output::Mode::Current,
+            width,
+            height,
+            0,
+        );
+        output.done();
+        f.testwl.dispatch();
+        f.run();
+        f.run();
+        check_xdg_logical_size(&output_xdg, &output_obj, (width, height));
+    }
+}
