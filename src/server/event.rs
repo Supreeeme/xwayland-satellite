@@ -291,8 +291,13 @@ impl SurfaceEvents {
         drop(xdg);
 
         if let Some(pending) = pending {
-            let mut query = data.query::<(&SurfaceScaleFactor, &x::Window, &mut WindowData)>();
-            let (scale_factor, window, window_data) = query.get().unwrap();
+            let mut query = data.query::<(
+                &SurfaceScaleFactor,
+                &x::Window,
+                &mut WindowData,
+                &SurfaceRole,
+            )>();
+            let (scale_factor, window, window_data, role) = query.get().unwrap();
 
             let window = *window;
             let x = (pending.x.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.x;
@@ -303,8 +308,28 @@ impl SurfaceEvents {
                 window_data.attrs.dims.width
             };
             let height = if pending.height > 0 {
-                (pending.height as f64 * scale_factor.0) as u16
+                let mut height = (pending.height as f64 * scale_factor.0) as u16;
+                // The titlebar drawn by satellite is part of the configured toplevel size, so
+                // the X window only gets the remaining height. The viewport must then match the
+                // X window size exactly, or pointer coordinates end up offset.
+                if let SurfaceRole::Toplevel(Some(toplevel)) = role {
+                    if let Some(d) = &toplevel.decoration.satellite {
+                        let surface_width = (width as f64 / scale_factor.0) as i32;
+                        if d.will_draw_decorations(surface_width) {
+                            height = height
+                                .saturating_sub(
+                                    (DecorationsDataSatellite::TITLEBAR_HEIGHT as f64
+                                        * scale_factor.0)
+                                        as u16,
+                                )
+                                .max(DecorationsDataSatellite::TITLEBAR_HEIGHT as u16);
+                        }
+                    }
+                }
+                height
             } else {
+                // A zero height means we keep our current size. The stored height already
+                // excludes the titlebar, so it must not be subtracted again.
                 window_data.attrs.dims.height
             };
             debug!(
@@ -469,20 +494,7 @@ pub(super) fn update_surface_viewport(
     let size_hints = &window_data.attrs.size_hints;
 
     let width = (dims.width as f64 / scale_factor.0).ceil() as i32;
-    let mut height = dims.height;
-    if let Some(SurfaceRole::Toplevel(Some(toplevel))) = role {
-        if let Some(d) = &toplevel.decoration.satellite {
-            let surface_width = (dims.width as f64 / scale_factor.0) as i32;
-            if d.will_draw_decorations(surface_width) {
-                height = height
-                    .saturating_sub(
-                        (DecorationsDataSatellite::TITLEBAR_HEIGHT as f64 * scale_factor.0) as u16,
-                    )
-                    .max(DecorationsDataSatellite::TITLEBAR_HEIGHT as u16);
-            }
-        }
-    }
-    let height = (height as f64 / scale_factor.0).ceil() as i32;
+    let height = (dims.height as f64 / scale_factor.0).ceil() as i32;
     if width > 0 && height > 0 {
         viewport.set_destination(width, height);
     }
