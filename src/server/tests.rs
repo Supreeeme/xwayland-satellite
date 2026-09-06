@@ -160,6 +160,7 @@ struct WindowData {
 #[derive(Default)]
 struct FakeXConnection {
     focused_window: Option<Window>,
+    active_window: Option<Window>,
     send_take_focus_window: Option<Window>,
     windows: HashMap<Window, WindowData>,
     set_window_dims_counter: usize,
@@ -233,6 +234,16 @@ impl super::XConnection for FakeXConnection {
             "Unknown window: {window:?}"
         );
         self.focused_window = window.into();
+        self.active_window = window.into();
+    }
+
+    #[track_caller]
+    fn activate_window(&mut self, window: Window, _output_name: Option<String>) {
+        assert!(
+            self.windows.contains_key(&window),
+            "Unknown window: {window:?}"
+        );
+        self.active_window = window.into();
     }
 
     #[track_caller]

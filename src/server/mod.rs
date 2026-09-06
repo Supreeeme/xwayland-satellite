@@ -424,6 +424,9 @@ impl<S: X11Selection> XConnection for NoConnection<S> {
     fn focus_window(&mut self, _: x::Window, _: Option<String>) {
         debug!("could not focus window without XWayland initialized");
     }
+    fn activate_window(&mut self, _: x::Window, _: Option<String>) {
+        debug!("could not activate window without XWayland initialized");
+    }
     fn send_take_focus(&mut self, _: x::Window) {
         debug!("could not send take focus without XWayland initialized");
     }

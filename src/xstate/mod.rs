@@ -1388,6 +1388,10 @@ impl XConnection for RealConnection {
             debug!("SetInputFocus failed ({window:?}: {e:?})");
             return;
         }
+        self.activate_window(window, output_name);
+    }
+
+    fn activate_window(&mut self, window: x::Window, output_name: Option<String>) {
         if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty {
             mode: x::PropMode::Replace,
             window: self.root_window(),
