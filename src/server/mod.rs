@@ -137,9 +137,32 @@ impl Default for WindowAttributes {
 }
 
 impl WindowAttributes {
-    fn require_wm_focus(&self) -> bool {
-        !self.override_redirect && (self.has_take_focus || self.accepts_input)
+    /// The window's ICCCM input model (section 4.1.7), from `WM_HINTS.input` and `WM_TAKE_FOCUS`.
+    fn focus_action(&self) -> FocusAction {
+        match (self.accepts_input, self.has_take_focus) {
+            (false, false) => FocusAction::None,
+            (true, false) => FocusAction::Direct,
+            (true, true) => FocusAction::DirectAndOffer,
+            (false, true) => FocusAction::Offer,
+        }
     }
+}
+
+/// How a window is given keyboard focus, one per ICCCM 4.1.7 input model. Passive and Locally
+/// Active windows (`input` = True) "require window manager assistance in acquiring the input
+/// focus"; No Input and Globally Active windows (`input` = False) request "that the window manager
+/// not set the input focus to their top-level window". Windows advertising `WM_TAKE_FOCUS` are
+/// additionally offered the focus and may take it, or decline it, themselves.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum FocusAction {
+    /// No Input: the window never wants keyboard focus.
+    None,
+    /// Passive: the window manager sets focus directly.
+    Direct,
+    /// Locally Active: the window manager sets focus directly and also sends `WM_TAKE_FOCUS`.
+    DirectAndOffer,
+    /// Globally Active: the window manager only sends `WM_TAKE_FOCUS`.
+    Offer,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
@@ -421,7 +444,7 @@ struct FocusData {
     window: x::Window,
     output_name: Option<String>,
     is_popup: bool,
-    has_take_focus: bool,
+    action: FocusAction,
 }
 
 #[derive(Copy, Clone, Default)]
@@ -772,20 +795,32 @@ impl<C: XConnection> ServerState<C> {
                 window,
                 output_name,
                 is_popup,
-                has_take_focus,
+                action,
             }) = self.to_focus.take()
             {
                 debug!(
-                    "focusing (take_focus={has_take_focus:?}) {} {window:?}",
+                    "focusing {} {window:?} ({action:?})",
                     if is_popup { "popup" } else { "window" }
                 );
-                if has_take_focus {
-                    self.connection.send_take_focus(window);
-                } else {
-                    self.connection.focus_window(window, output_name);
-                    if !is_popup {
-                        self.last_focused_toplevel = Some(window);
+                match action {
+                    FocusAction::Direct | FocusAction::DirectAndOffer => {
+                        self.connection.focus_window(window, output_name);
                     }
+                    // The window takes focus itself once offered; leave X focus undisturbed
+                    // until then, but it is already the active toplevel.
+                    FocusAction::Offer if !is_popup => {
+                        self.connection.activate_window(window, output_name);
+                    }
+                    FocusAction::Offer | FocusAction::None => {}
+                }
+                // Focus is set before the offer is sent: send_take_focus waits for the
+                // SendEvent reply, so a client responding to the offer by focusing one of its
+                // subwindows would otherwise be overridden by our SetInputFocus.
+                if matches!(action, FocusAction::DirectAndOffer | FocusAction::Offer) {
+                    self.connection.send_take_focus(window);
+                }
+                if !is_popup && action != FocusAction::None {
+                    self.last_focused_toplevel = Some(window);
                 }
             } else if self.unfocus {
                 self.connection.focus_window(x::WINDOW_NONE, None);
