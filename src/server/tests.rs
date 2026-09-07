@@ -1896,6 +1896,29 @@ fn output_change_of_focused_toplevel_keeps_input_model() {
 }
 
 #[test]
+fn focus_restore_target_gone_before_dispatch() {
+    // Restoration is applied on the next run; if the toplevel it would restore to is unmapped
+    // and destroyed before that, nothing is sent to it and it does not become the restore
+    // target again. X focus is unset instead.
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let win = Window::new(1);
+    let (_, id) = f.create_toplevel(&comp, win);
+    set_focus_hints(&mut f, win, Some(true), true);
+    f.testwl.focus_toplevel(id);
+    f.run();
+    assert_eq!(f.satellite.focus_restore_target(), win);
+    f.satellite.connection.send_take_focus_window = None;
+
+    f.satellite.restore_focus();
+    f.satellite.unmap_window(win);
+    f.satellite.destroy_window(win);
+    f.run();
+    assert_eq!(f.connection().send_take_focus_window, None);
+    assert_eq!(f.connection().focused_window, None);
+    assert_eq!(f.satellite.focus_restore_target(), x::WINDOW_NONE);
+}
+
+#[test]
 fn popup_override_redirect_never_focused_nor_offered() {
     for accepts_input in [None, Some(true), Some(false)] {
         for take_focus in [false, true] {

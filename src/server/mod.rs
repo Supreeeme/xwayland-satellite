@@ -522,6 +522,8 @@ pub struct InnerServerState<S: X11Selection> {
     to_focus: Option<FocusData>,
     unfocus: bool,
     last_focused_toplevel: Option<x::Window>,
+    /// Focus is to be restored to the last focused toplevel on the next run.
+    restore_focus_pending: bool,
     last_hovered: Option<x::Window>,
 
     xdg_wm_base: XdgWmBase,
@@ -624,6 +626,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             to_focus: None,
             unfocus: false,
             last_focused_toplevel: None,
+            restore_focus_pending: false,
             last_hovered: None,
             xdg_wm_base,
             compositor,
@@ -791,6 +794,22 @@ impl<C: XConnection> ServerState<C> {
         }
 
         {
+            if std::mem::take(&mut self.restore_focus_pending) && self.to_focus.is_none() {
+                match self
+                    .last_focused_toplevel
+                    .and_then(|window| Some((window, self.mapped_focus_action(window)?)))
+                {
+                    Some((window, action)) => {
+                        self.to_focus = Some(FocusData {
+                            window,
+                            output_name: None,
+                            is_popup: false,
+                            action,
+                        })
+                    }
+                    None => self.unfocus = true,
+                }
+            }
             if let Some(FocusData {
                 window,
                 output_name,
@@ -1260,25 +1279,20 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     }
 
     /// Restores focus to the last focused toplevel (or unsets it if there is none), the way
-    /// it would be focused on activation: according to its input model.
+    /// it would be focused on activation: according to its input model. Applied on the next
+    /// run, and resolved only then, since the toplevel may be gone by that time.
     pub fn restore_focus(&mut self) {
-        let Some(window) = self.last_focused_toplevel else {
-            self.unfocus = true;
-            return;
-        };
-        let action = self
-            .windows
+        self.restore_focus_pending = true;
+    }
+
+    /// The window's input model, if it is a mapped window we know.
+    fn mapped_focus_action(&self, window: x::Window) -> Option<FocusAction> {
+        self.windows
             .get(&window)
             .copied()
             .and_then(|id| self.world.get::<&WindowData>(id).ok())
+            .filter(|data| data.mapped)
             .map(|data| data.attrs.focus_action())
-            .unwrap_or(FocusAction::Direct);
-        self.to_focus = Some(FocusData {
-            window,
-            output_name: None,
-            is_popup: false,
-            action,
-        });
     }
 
     pub fn set_fullscreen(&mut self, window: x::Window, state: super::xstate::SetState) {
