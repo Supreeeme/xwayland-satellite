@@ -3148,6 +3148,49 @@ fn client_side_decorations() {
 }
 
 #[test]
+fn client_side_decorations_fractional_scale() {
+    // The titlebar is subtracted in logical pixels, so the X window content and the viewport
+    // agree at fractional scales as well (scale, preferred_scale value, expected X height).
+    for (scale, preferred, x_height) in [(1.5, 180, 112), (1.25, 150, 93)] {
+        let mut f = TestFixture::new_pre_connect(|testwl| {
+            testwl.enable_fractional_scale();
+        });
+        let compositor = f.compositor();
+        let (_, output) = f.new_output(0, 0);
+        let window = Window::new(1);
+        let (_, id) = f.create_toplevel(&compositor, window);
+        let data = f.testwl.get_surface_data(id).unwrap();
+        data.fractional
+            .as_ref()
+            .expect("Missing fractional scale")
+            .preferred_scale(preferred);
+        f.testwl.move_surface_to_output(id, &output);
+        f.run();
+        f.run();
+
+        f.testwl
+            .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ClientSide);
+        f.testwl.configure_toplevel(id, 100, 100, vec![]);
+        f.run();
+        f.run();
+
+        let dims = f.connection().window(window).dims;
+        assert_eq!(
+            (dims.width, dims.height),
+            ((100.0 * scale) as u16, x_height),
+            "X window size at scale {scale}"
+        );
+        let data = f.testwl.get_surface_data(id).unwrap();
+        let viewport = data.viewport.as_ref().unwrap();
+        assert_eq!(
+            (viewport.width, viewport.height),
+            (100, 75),
+            "viewport size at scale {scale}"
+        );
+    }
+}
+
+#[test]
 fn client_side_decorations_no_global() {
     let mut f = TestFixture::new_pre_connect(|testwl| {
         testwl.disable_decorations_global();

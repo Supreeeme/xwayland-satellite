@@ -308,25 +308,24 @@ impl SurfaceEvents {
                 window_data.attrs.dims.width
             };
             let height = if pending.height > 0 {
-                let mut height = (pending.height as f64 * scale_factor.0) as u16;
+                let mut logical_height = pending.height;
                 // The titlebar drawn by satellite is part of the configured toplevel size, so
                 // the X window only gets the remaining height. The viewport must then match the
-                // X window size exactly, or pointer coordinates end up offset.
+                // X window size exactly, or pointer coordinates end up offset. Subtract the
+                // titlebar in logical pixels, before scaling, so that the viewport derived from
+                // the X window size comes out as the configured height minus the titlebar at
+                // fractional scales too.
                 if let SurfaceRole::Toplevel(Some(toplevel)) = role {
                     if let Some(d) = &toplevel.decoration.satellite {
-                        let surface_width = (width as f64 / scale_factor.0) as i32;
+                        let (surface_width, _) = logical_size(width, 0, scale_factor.0);
                         if d.will_draw_decorations(surface_width) {
-                            height = height
-                                .saturating_sub(
-                                    (DecorationsDataSatellite::TITLEBAR_HEIGHT as f64
-                                        * scale_factor.0)
-                                        as u16,
-                                )
-                                .max(DecorationsDataSatellite::TITLEBAR_HEIGHT as u16);
+                            logical_height = (logical_height
+                                - DecorationsDataSatellite::TITLEBAR_HEIGHT)
+                                .max(DecorationsDataSatellite::TITLEBAR_HEIGHT);
                         }
                     }
                 }
-                height
+                (logical_height as f64 * scale_factor.0) as u16
             } else {
                 // A zero height means we keep our current size. The stored height already
                 // excludes the titlebar, so it must not be subtracted again.
@@ -479,6 +478,16 @@ impl SurfaceEvents {
     }
 }
 
+/// Converts a size in X pixels to the surface's logical size at the given scale, rounding up so
+/// that the whole buffer is shown. Everything deriving a logical size from an X window size must
+/// use this so that viewport and popup geometry agree.
+pub(super) fn logical_size(width: u16, height: u16, scale: f64) -> (i32, i32) {
+    (
+        (width as f64 / scale).ceil() as i32,
+        (height as f64 / scale).ceil() as i32,
+    )
+}
+
 pub(super) fn update_surface_viewport(
     world: &World,
     mut surface_query: hecs::QueryOne<(
@@ -493,8 +502,7 @@ pub(super) fn update_surface_viewport(
     let dims = &window_data.attrs.dims;
     let size_hints = &window_data.attrs.size_hints;
 
-    let width = (dims.width as f64 / scale_factor.0).ceil() as i32;
-    let height = (dims.height as f64 / scale_factor.0).ceil() as i32;
+    let (width, height) = logical_size(dims.width, dims.height, scale_factor.0);
     if width > 0 && height > 0 {
         viewport.set_destination(width, height);
     }
