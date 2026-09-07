@@ -233,6 +233,11 @@ impl super::XConnection for FakeXConnection {
 
     #[track_caller]
     fn focus_window(&mut self, window: Window, _output_name: Option<String>) {
+        if window == x::WINDOW_NONE {
+            self.focused_window = None;
+            self.active_window = None;
+            return;
+        }
         assert!(
             self.windows.contains_key(&window),
             "Unknown window: {window:?}"
@@ -1771,8 +1776,9 @@ fn toplevel_focus_models() {
         f.run();
 
         let (focused, active, restore) = match action {
-            // Nothing is done for a window that never takes input.
-            FocusAction::None => (Some(win_b), Some(win_b), win_b),
+            // Focus is unset rather than left on the previously focused window, and the
+            // window never becomes the focus restore target.
+            FocusAction::None => (None, None, win_b),
             FocusAction::Direct | FocusAction::DirectAndOffer => (Some(win_a), Some(win_a), win_a),
             // X focus is left undisturbed until the window takes it.
             FocusAction::Offer => (Some(win_b), Some(win_a), win_a),
@@ -1792,6 +1798,32 @@ fn toplevel_focus_models() {
         }
         assert_eq!(f.satellite.focus_restore_target(), restore, "{case}");
     }
+}
+
+#[test]
+fn no_input_toplevel_keeps_previous_focus_state() {
+    // Activating a No Input window unsets X focus, but the previously focused toplevel stays
+    // the focus restore target and is what satellite picks as the parent of popups created
+    // afterwards (the builder's parent is the expectation checked by create_popup).
+    let (mut f, comp) = TestFixture::new_with_compositor();
+
+    let win_a = Window::new(1);
+    let (_, id_a) = f.create_toplevel(&comp, win_a);
+    let win_b = Window::new(2);
+    let (_, id_b) = f.create_toplevel(&comp, win_b);
+    set_focus_hints(&mut f, win_b, Some(false), false);
+    f.testwl.focus_toplevel(id_a);
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(win_a));
+
+    f.testwl.focus_toplevel(id_b);
+    f.run();
+    assert_eq!(f.connection().focused_window, None);
+    assert_eq!(f.connection().active_window, None);
+    assert_eq!(f.satellite.focus_restore_target(), win_a);
+
+    let popup = Window::new(3);
+    f.create_popup(&comp, PopupBuilder::new(popup, win_a, id_a));
 }
 
 #[test]

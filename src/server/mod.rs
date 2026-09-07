@@ -811,6 +811,12 @@ impl<C: XConnection> ServerState<C> {
                     FocusAction::Offer if !is_popup => {
                         self.connection.activate_window(window, output_name);
                     }
+                    // The window never takes keyboard input. X focus must not stay on the
+                    // previously focused window either, or keys meant for this one would keep
+                    // going there, so unset it. It does not become the focus restore target.
+                    FocusAction::None if !is_popup => {
+                        self.connection.focus_window(x::WINDOW_NONE, None);
+                    }
                     FocusAction::Offer | FocusAction::None => {}
                 }
                 // Focus is set before the offer is sent: send_take_focus waits for the
