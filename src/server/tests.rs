@@ -1827,6 +1827,75 @@ fn no_input_toplevel_keeps_previous_focus_state() {
 }
 
 #[test]
+fn focus_restore_uses_input_model() {
+    // Restoring focus after the active window unmaps goes through the same input model
+    // handling as activation: a Globally Active toplevel is offered the focus, not given it.
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let win = Window::new(1);
+    let (_, id) = f.create_toplevel(&comp, win);
+    set_focus_hints(&mut f, win, Some(false), true);
+    f.testwl.focus_toplevel(id);
+    f.run();
+    assert_eq!(f.satellite.focus_restore_target(), win);
+    f.satellite.connection.send_take_focus_window = None;
+    f.satellite.connection.focused_window = None;
+    f.satellite.connection.active_window = None;
+
+    f.satellite.restore_focus();
+    f.run();
+    assert_eq!(f.connection().focused_window, None, "not focused directly");
+    assert_eq!(f.connection().send_take_focus_window, Some(win));
+    assert_eq!(f.connection().active_window, Some(win));
+
+    // A Locally Active one is focused and offered.
+    set_focus_hints(&mut f, win, Some(true), true);
+    f.satellite.connection.send_take_focus_window = None;
+    f.satellite.restore_focus();
+    f.run();
+    assert_eq!(f.connection().focused_window, Some(win));
+    assert_eq!(f.connection().send_take_focus_window, Some(win));
+    assert!(f.connection().take_focus_sent_after_focus);
+}
+
+#[test]
+fn output_change_of_focused_toplevel_keeps_input_model() {
+    // A focused toplevel entering another output only updates the primary output; a Globally
+    // Active client's own choice of focus window must not be overridden.
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let (_, output_a) = f.new_output(0, 0);
+    let (_, output_b) = f.new_output(1000, 0);
+    f.run();
+    let win = Window::new(1);
+    let (_, id) = f.create_toplevel(&comp, win);
+    f.testwl.move_surface_to_output(id, &output_a);
+    f.run();
+    // The toplevel was focused directly on creation; make it Globally Active and activate it
+    // again, which only offers the focus.
+    set_focus_hints(&mut f, win, Some(false), true);
+    f.satellite.connection.focused_window = None;
+    f.testwl.focus_toplevel(id);
+    f.run();
+    assert_eq!(f.connection().focused_window, None);
+    assert_eq!(f.connection().send_take_focus_window, Some(win));
+    assert_eq!(f.connection().active_window, Some(win));
+    f.satellite.connection.active_window = None;
+
+    f.testwl.move_surface_to_output(id, &output_b);
+    f.run();
+    f.run();
+    assert_eq!(
+        f.connection().focused_window,
+        None,
+        "focus was set directly"
+    );
+    assert_eq!(
+        f.connection().active_window,
+        Some(win),
+        "primary output not updated"
+    );
+}
+
+#[test]
 fn popup_override_redirect_never_focused_nor_offered() {
     for accepts_input in [None, Some(true), Some(false)] {
         for take_focus in [false, true] {

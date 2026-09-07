@@ -443,8 +443,9 @@ impl XState {
 
                     let active_win: &[x::Window] = active_win.value();
                     if active_win[0] == e.window() {
-                        let restore_to = server_state.focus_restore_target();
-                        server_state.connection.focus_window(restore_to, None);
+                        // Applied on the next server_state.run(), according to the restored
+                        // window's input model.
+                        server_state.restore_focus();
                     }
 
                     unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(

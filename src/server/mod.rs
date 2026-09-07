@@ -1259,6 +1259,28 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         self.last_focused_toplevel.unwrap_or(x::WINDOW_NONE)
     }
 
+    /// Restores focus to the last focused toplevel (or unsets it if there is none), the way
+    /// it would be focused on activation: according to its input model.
+    pub fn restore_focus(&mut self) {
+        let Some(window) = self.last_focused_toplevel else {
+            self.unfocus = true;
+            return;
+        };
+        let action = self
+            .windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.get::<&WindowData>(id).ok())
+            .map(|data| data.attrs.focus_action())
+            .unwrap_or(FocusAction::Direct);
+        self.to_focus = Some(FocusData {
+            window,
+            output_name: None,
+            is_popup: false,
+            action,
+        });
+    }
+
     pub fn set_fullscreen(&mut self, window: x::Window, state: super::xstate::SetState) {
         let Some(data) = self
             .windows

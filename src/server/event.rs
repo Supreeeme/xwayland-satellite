@@ -226,7 +226,9 @@ impl SurfaceEvents {
                     if state.last_focused_toplevel == Some(*window) {
                         let output = get_output_name(Some(&on_output), &state.world);
                         debug!("focused window changed outputs - resetting primary output");
-                        connection.focus_window(*window, output);
+                        // Only the primary output changes; how the window holds focus is its
+                        // input model's business and was settled when it was activated.
+                        connection.activate_window(*window, output);
                     }
 
                     if state.fractional_scale.is_none() {
