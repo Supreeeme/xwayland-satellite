@@ -851,10 +851,17 @@ impl Event for client::wl_keyboard::Event {
                 let mut query = surface.data().copied().and_then(|key| {
                     state
                         .world
-                        .query_one::<(&x::Window, &WlSurface, Option<&OnOutput>)>(key)
+                        .query_one::<(
+                            &x::Window,
+                            &WlSurface,
+                            Option<&OnOutput>,
+                            Option<&WindowData>,
+                        )>(key)
                         .ok()
                 });
-                let Some((window, surface, output)) = query.as_mut().and_then(|q| q.get()) else {
+                let Some((window, surface, output, window_data)) =
+                    query.as_mut().and_then(|q| q.get())
+                else {
                     return;
                 };
                 state.last_kb_serial = Some((
@@ -865,8 +872,7 @@ impl Event for client::wl_keyboard::Event {
                     serial,
                 ));
                 let output_name = get_output_name(output, &state.world);
-                let window_data = data.get::<&WindowData>();
-                let has_take_focus = window_data.as_ref().is_some_and(|d| d.attrs.has_take_focus);
+                let has_take_focus = window_data.is_some_and(|d| d.attrs.has_take_focus);
                 state.to_focus = Some(FocusData {
                     window: *window,
                     output_name,

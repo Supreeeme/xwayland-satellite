@@ -1717,6 +1717,23 @@ fn override_redirect_choose_hover_window() {
 }
 
 #[test]
+fn toplevel_offered_focus_when_advertised() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+
+    let win_a = Window::new(1);
+    let (_, id_a) = f.create_toplevel(&comp, win_a);
+    let win_b = Window::new(2);
+    f.create_toplevel(&comp, win_b);
+    assert_eq!(f.connection().focused_window, Some(win_b));
+    assert_eq!(f.connection().send_take_focus_window, None);
+
+    f.satellite.set_take_focus(win_a, true);
+    f.testwl.focus_toplevel(id_a);
+    f.run();
+    assert_eq!(f.connection().send_take_focus_window, Some(win_a));
+}
+
+#[test]
 fn popup_override_redirect_never_focused_nor_offered() {
     for accepts_input in [true, false] {
         for take_focus in [false, true] {
