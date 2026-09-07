@@ -1919,6 +1919,27 @@ fn focus_restore_target_gone_before_dispatch() {
 }
 
 #[test]
+fn focus_restore_yields_to_keyboard_leave() {
+    // A restoration is resolved when it is applied. If the compositor took keyboard focus
+    // away in the meantime, that is the newer state: the restoration must not focus the
+    // toplevel behind the compositor's back, X focus is unset instead.
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let win = Window::new(1);
+    let (_, id) = f.create_toplevel(&comp, win);
+    set_focus_hints(&mut f, win, Some(true), true);
+    f.testwl.focus_toplevel(id);
+    f.run();
+    assert_eq!(f.satellite.focus_restore_target(), win);
+    f.satellite.connection.send_take_focus_window = None;
+
+    f.satellite.restore_focus();
+    f.testwl.unfocus_toplevel();
+    f.run();
+    assert_eq!(f.connection().send_take_focus_window, None);
+    assert_eq!(f.connection().focused_window, None);
+}
+
+#[test]
 fn popup_override_redirect_never_focused_nor_offered() {
     for accepts_input in [None, Some(true), Some(false)] {
         for take_focus in [false, true] {

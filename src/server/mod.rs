@@ -794,7 +794,10 @@ impl<C: XConnection> ServerState<C> {
         }
 
         {
-            if std::mem::take(&mut self.restore_focus_pending) && self.to_focus.is_none() {
+            // A keyboard leave received since the restoration was queued is the newer state:
+            // the compositor moved focus away, so nothing of ours is to be focused.
+            let restore_focus = std::mem::take(&mut self.restore_focus_pending);
+            if restore_focus && self.to_focus.is_none() && !self.unfocus {
                 match self
                     .last_focused_toplevel
                     .and_then(|window| Some((window, self.mapped_focus_action(window)?)))
