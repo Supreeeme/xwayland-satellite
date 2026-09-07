@@ -593,7 +593,11 @@ impl TestFixture<FakeXConnection> {
     }
 
     fn enable_xdg_output(&mut self) -> TestObject<ZxdgOutputManagerV1> {
-        self.testwl.enable_xdg_output_manager();
+        self.enable_xdg_output_with_version(3)
+    }
+
+    fn enable_xdg_output_with_version(&mut self, version: u32) -> TestObject<ZxdgOutputManagerV1> {
+        self.testwl.enable_xdg_output_manager_with_version(version);
         self.run();
         self.run();
 
@@ -3373,6 +3377,75 @@ fn output_mode_change_xdg_logical_size_after_mode() {
         change_output_mode(&mut f, &output, width, height, false);
         check_xdg_logical_size(&output_xdg, &output_obj, (width, height));
     }
+}
+
+#[test]
+fn output_mode_change_xdg_output_v2_done() {
+    // Before version 3 the xdg output's changes are committed by its own done event, which the
+    // compositor has already sent by the time the new mode arrives, so the rewritten size must
+    // be committed by us.
+    let (mut f, _) = TestFixture::new_with_compositor();
+    let man = f.enable_xdg_output_with_version(2);
+    let (output_obj, output) = f.new_output(0, 0);
+    let output_xdg = f.create_xdg_output(&man, output_obj.obj.clone());
+    f.run();
+    std::mem::take(&mut *output_xdg.data.events.lock().unwrap());
+
+    change_output_mode(&mut f, &output, 2560, 1440, true);
+    let events = std::mem::take(&mut *output_xdg.data.events.lock().unwrap());
+    let last_size = events
+        .iter()
+        .rposition(|e| matches!(e, zxdg_output_v1::Event::LogicalSize { .. }))
+        .expect("Did not get zxdg_output_v1 logical_size");
+    assert!(
+        matches!(
+            events[last_size],
+            zxdg_output_v1::Event::LogicalSize {
+                width: 2560,
+                height: 1440
+            }
+        ),
+        "unexpected final logical size: {:?}",
+        events[last_size]
+    );
+    assert!(
+        events[last_size + 1..]
+            .iter()
+            .any(|e| matches!(e, zxdg_output_v1::Event::Done)),
+        "Did not get zxdg_output_v1 done after the final logical size: {events:?}"
+    );
+}
+
+#[test]
+fn xdg_output_v2_batch_not_split() {
+    // The compositor's own xdg output batch (size, position, done) is forwarded as one batch:
+    // the rewritten size is committed by the compositor's done, not by one of ours.
+    let (mut f, _) = TestFixture::new_with_compositor();
+    let man = f.enable_xdg_output_with_version(2);
+    let (output_obj, output) = f.new_output(0, 0);
+    let output_xdg = f.create_xdg_output(&man, output_obj.obj.clone());
+    f.run();
+    std::mem::take(&mut *output_xdg.data.events.lock().unwrap());
+
+    let xdg = f.testwl.get_xdg_output(&output).unwrap();
+    xdg.logical_size(1000, 1000);
+    xdg.logical_position(0, 0);
+    xdg.done();
+    f.testwl.dispatch();
+    f.run();
+    f.run();
+
+    let events = std::mem::take(&mut *output_xdg.data.events.lock().unwrap());
+    let kinds: Vec<&str> = events
+        .iter()
+        .map(|e| match e {
+            zxdg_output_v1::Event::LogicalSize { .. } => "size",
+            zxdg_output_v1::Event::LogicalPosition { .. } => "position",
+            zxdg_output_v1::Event::Done => "done",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, ["size", "position", "done"], "{events:?}");
 }
 
 #[test]
