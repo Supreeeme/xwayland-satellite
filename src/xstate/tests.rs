@@ -530,4 +530,49 @@ mod window_role_heuristics {
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Splash);
     }
+
+    #[test]
+    fn steam_add_non_steam_game_dialog() {
+        let win_types = WindowTypes::new();
+        let win = WindowRoleHeuristics {
+            has_transient_for: true,
+            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0x1, 0, 0, 0].as_slice())),
+            window_types: vec![win_types.dialog],
+            wm_class: Some("steam".into()),
+            ..Default::default()
+        };
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
+    }
+
+    #[test]
+    fn steam_popup_menu() {
+        let win_types = WindowTypes::new();
+        let win = WindowRoleHeuristics {
+            override_redirect: true,
+            has_transient_for: true,
+            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0x1, 0, 0, 0].as_slice())),
+            window_types: vec![win_types.popup_menu],
+            wm_class: Some("steamwebhelper".into()),
+            ..Default::default()
+        };
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
+    }
+
+    #[test]
+    fn regular_dialog_resizable_remains_toplevel() {
+        let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .min_size(300, 200)
+            .max_size(800, 600);
+        let win = WindowRoleHeuristics {
+            has_transient_for: true,
+            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0x1, 0, 0, 0].as_slice())),
+            window_types: vec![win_types.dialog],
+            wm_class: Some("otherapp".into()),
+            wm_normal_hints: Some(wm_normal_hints.into()),
+            ..Default::default()
+        };
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
+    }
 }
+

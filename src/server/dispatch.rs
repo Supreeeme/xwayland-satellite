@@ -165,13 +165,85 @@ impl<S: X11Selection> Dispatch<WlSurface, Entity> for InnerServerState<S> {
                     f.destroy();
                     cmd.remove_one::<WpFractionalScaleV1>(*entity);
                 }
+                if let Some(mut active_region) = data.get::<&mut ActiveInputRegion>() {
+                    if let Some(r) = active_region.0.take() {
+                        r.destroy();
+                    }
+                    cmd.remove_one::<ActiveInputRegion>(*entity);
+                }
             }
             Request::<WlSurface>::SetBufferScale { scale } => {
                 client.set_buffer_scale(scale);
             }
             Request::<WlSurface>::SetInputRegion { region } => {
-                let region = region.as_ref().map(|r| r.data().unwrap());
-                client.set_input_region(region);
+                let mut prev_region = data.get::<&mut ActiveInputRegion>();
+                if let Some(r) = region {
+                    let is_popup = data
+                        .get::<&WindowData>()
+                        .map(|d| d.attrs.role.is_popup())
+                        .unwrap_or(false);
+
+                    if is_popup {
+                        client.set_input_region(None);
+                        if let Some(prev) = prev_region.as_mut() {
+                            if let Some(old) = prev.0.take() {
+                                old.destroy();
+                            }
+                        }
+                        drop(prev_region);
+                        return;
+                    }
+
+                    let region_data = r.data::<RegionData>().unwrap();
+                    let ops = region_data.ops.lock().unwrap().clone();
+
+                    let (scale_x, scale_y) = if state.compositor_scaling {
+                        super::event::get_surface_input_scales(&state.world, *entity)
+                    } else {
+                        data.get::<&SurfaceScaleFactor>()
+                            .map(|s| (s.0, s.0))
+                            .unwrap_or((1.0, 1.0))
+                    };
+                    let scale_x = if scale_x > 0.0 { scale_x } else { 1.0 };
+                    let scale_y = if scale_y > 0.0 { scale_y } else { 1.0 };
+
+                    let c_region = state.compositor.create_region(&state.qh, ());
+                    for op in ops {
+                        match op {
+                            RegionOp::Add { x, y, width, height } => {
+                                let sx = (x as f64 / scale_x).round() as i32;
+                                let sy = (y as f64 / scale_y).round() as i32;
+                                let sw = (((x as f64 + width as f64) / scale_x).round() as i32 - sx).max(0);
+                                let sh = (((y as f64 + height as f64) / scale_y).round() as i32 - sy).max(0);
+                                c_region.add(sx, sy, sw, sh);
+                            }
+                            RegionOp::Subtract { x, y, width, height } => {
+                                let sx = (x as f64 / scale_x).round() as i32;
+                                let sy = (y as f64 / scale_y).round() as i32;
+                                let sw = (((x as f64 + width as f64) / scale_x).round() as i32 - sx).max(0);
+                                let sh = (((y as f64 + height as f64) / scale_y).round() as i32 - sy).max(0);
+                                c_region.subtract(sx, sy, sw, sh);
+                            }
+                        }
+                    }
+                    client.set_input_region(Some(&c_region));
+
+                    if let Some(prev) = prev_region.as_mut() {
+                        if let Some(old) = prev.0.replace(c_region) {
+                            old.destroy();
+                        }
+                    } else {
+                        cmd.insert(*entity, (ActiveInputRegion(Some(c_region)),));
+                    }
+                } else {
+                    client.set_input_region(None);
+                    if let Some(prev) = prev_region.as_mut() {
+                        if let Some(old) = prev.0.take() {
+                            old.destroy();
+                        }
+                    }
+                }
+                drop(prev_region);
             }
             other => warn!("unhandled surface request: {other:?}"),
         }
@@ -183,22 +255,54 @@ impl<S: X11Selection> Dispatch<WlSurface, Entity> for InnerServerState<S> {
     }
 }
 
-impl<S: X11Selection> Dispatch<WlRegion, client::wl_region::WlRegion> for InnerServerState<S> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RegionOp {
+    Add { x: i32, y: i32, width: i32, height: i32 },
+    Subtract { x: i32, y: i32, width: i32, height: i32 },
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct RegionData {
+    pub(super) ops: std::sync::Arc<std::sync::Mutex<Vec<RegionOp>>>,
+}
+
+pub(super) struct ActiveInputRegion(pub(super) Option<client::wl_region::WlRegion>);
+
+impl<S: X11Selection> Dispatch<WlRegion, RegionData> for InnerServerState<S> {
     fn request(
         _: &mut Self,
         _: &wayland_server::Client,
         _: &WlRegion,
         request: <WlRegion as Resource>::Request,
-        client: &client::wl_region::WlRegion,
+        data: &RegionData,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        macros::simple_event_shunt! {
-            client, request: wl_region::Request => [
-                Add { x, y, width, height },
-                Subtract { x, y, width, height },
-                Destroy
-            ]
+        match request {
+            wl_region::Request::Add {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                data.ops
+                    .lock()
+                    .unwrap()
+                    .push(RegionOp::Add { x, y, width, height });
+            }
+            wl_region::Request::Subtract {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                data.ops
+                    .lock()
+                    .unwrap()
+                    .push(RegionOp::Subtract { x, y, width, height });
+            }
+            wl_region::Request::Destroy => {}
+            _ => {}
         }
     }
 }
@@ -234,7 +338,9 @@ impl<S: X11Selection>
                         client,
                         server,
                         viewport,
-                        scale: SurfaceScaleFactor(state.current_scale),
+                        scale: SurfaceScaleFactor(state.global_scale),
+                        true_scale: event::TrueFractionalScale(state.global_scale),
+                        entered_outputs: event::EnteredOutputs(Vec::new()),
                     },
                 );
                 if let Some(f) = fractional {
@@ -242,8 +348,8 @@ impl<S: X11Selection>
                 }
             }
             Request::<WlCompositor>::CreateRegion { id } => {
-                let c_region = client.create_region(&state.qh, ());
-                data_init.init(id, c_region);
+                let region_data = RegionData::default();
+                data_init.init(id, region_data);
             }
             other => {
                 warn!("unhandled wlcompositor request: {other:?}");
@@ -901,6 +1007,9 @@ impl<S: X11Selection> Dispatch<ConfinedPointerServer, Entity> for InnerServerSta
     }
 }
 
+#[derive(Clone, Copy)]
+struct LockedPointerSurface(Entity);
+
 impl<S: X11Selection> Dispatch<LockedPointerServer, Entity> for InnerServerState<S> {
     fn request(
         state: &mut Self,
@@ -916,17 +1025,27 @@ impl<S: X11Selection> Dispatch<LockedPointerServer, Entity> for InnerServerState
                 surface_x,
                 surface_y,
             } => {
-                let (client, scale) = state
-                    .world
-                    .query_one_mut::<(&LockedPointerClient, &SurfaceScaleFactor)>(*entity)
-                    .unwrap();
+                let surf_key = {
+                    let mut query = state
+                        .world
+                        .query_one::<&LockedPointerSurface>(*entity)
+                        .unwrap();
+                    query.get().unwrap().0
+                };
 
-                // Xwayland believes that the surface is actually <surface scale factor> times bigger
-                // than it currently is, and therefore that the cursor position is also scaled up by the same
-                // amount. So we need to divide the cursor position from Xwayland by the surface scale
-                // to get where the cursor should actually be positioned.
+                let scales = if state.compositor_scaling {
+                    super::event::get_surface_input_scales(&state.world, surf_key)
+                } else {
+                    state
+                        .world
+                        .get::<&SurfaceScaleFactor>(surf_key)
+                        .ok()
+                        .map(|s| (s.0, s.0))
+                        .unwrap_or((1.0, 1.0))
+                };
 
-                client.set_cursor_position_hint(surface_x / scale.0, surface_y / scale.0);
+                let client = state.world.get::<&LockedPointerClient>(*entity).unwrap();
+                client.set_cursor_position_hint(surface_x / scales.0, surface_y / scales.1);
             }
             lp::Request::Destroy => {
                 {
@@ -1019,16 +1138,10 @@ impl<S: X11Selection>
                     )
                 };
                 let server = data_init.init(id, entity);
-                let surface_scale = state
-                    .world
-                    .get::<&SurfaceScaleFactor>(surf_key)
-                    .as_deref()
-                    .copied()
-                    .unwrap();
 
                 state
                     .world
-                    .spawn_at(entity, (client, server, surface_scale));
+                    .spawn_at(entity, (client, server, LockedPointerSurface(surf_key)));
             }
             Request::Destroy => {
                 client.destroy();
@@ -1478,6 +1591,7 @@ impl<S: X11Selection> GlobalDispatch<WlOutput, Global> for InnerServerState<S> {
                 server,
                 client,
                 event::OutputScaleFactor::Output(1),
+                event::TrueOutputScaleFactor(event::OutputScaleFactor::Output(1)),
                 event::OutputDimensions::default(),
                 GlobalName(data.name),
             ),

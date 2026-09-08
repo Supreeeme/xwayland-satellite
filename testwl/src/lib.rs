@@ -80,6 +80,7 @@ use wayland_server::{
         wl_keyboard::{self, WlKeyboard},
         wl_output::{self, WlOutput},
         wl_pointer::{self, WlPointer},
+        wl_region::WlRegion,
         wl_seat::{self, WlSeat},
         wl_shm::WlShm,
         wl_shm_pool::WlShmPool,
@@ -116,6 +117,12 @@ pub struct SurfaceData {
     pub viewport: Option<Viewport>,
     pub moving: bool,
     pub resizing: Option<xdg_toplevel::ResizeEdge>,
+    pub input_region: Option<Vec<(i32, i32, i32, i32)>>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RegionState {
+    pub rects: Vec<(i32, i32, i32, i32)>,
 }
 
 impl SurfaceData {
@@ -1574,7 +1581,9 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                 let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
                     unreachable!();
                 };
-                toplevel.states.push(xdg_toplevel::State::Fullscreen);
+                if !toplevel.states.contains(&xdg_toplevel::State::Fullscreen) {
+                    toplevel.states.push(xdg_toplevel::State::Fullscreen);
+                }
                 let states = toplevel.states.clone();
                 state.configure_toplevel(*surface_id, 100, 100, states);
             }
@@ -1588,6 +1597,34 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                     .iter()
                     .copied()
                     .position(|p| p == xdg_toplevel::State::Fullscreen)
+                else {
+                    return;
+                };
+                toplevel.states.swap_remove(pos);
+                let states = toplevel.states.clone();
+                state.configure_toplevel(*surface_id, 100, 100, states);
+            }
+            xdg_toplevel::Request::SetMaximized => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
+                    unreachable!();
+                };
+                if !toplevel.states.contains(&xdg_toplevel::State::Maximized) {
+                    toplevel.states.push(xdg_toplevel::State::Maximized);
+                }
+                let states = toplevel.states.clone();
+                state.configure_toplevel(*surface_id, 100, 100, states);
+            }
+            xdg_toplevel::Request::UnsetMaximized => {
+                let data = state.surfaces.get_mut(surface_id).unwrap();
+                let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
+                    unreachable!();
+                };
+                let Some(pos) = toplevel
+                    .states
+                    .iter()
+                    .copied()
+                    .position(|p| p == xdg_toplevel::State::Maximized)
                 else {
                     return;
                 };
@@ -1965,10 +2002,14 @@ impl Dispatch<WlCompositor, ()> for State {
                         viewport: None,
                         moving: false,
                         resizing: None,
+                        input_region: None,
                     },
                 );
                 state.last_surface_id = Some(SurfaceId(id));
                 state.created_surfaces.push(SurfaceId(id));
+            }
+            proto::wl_compositor::Request::CreateRegion { id } => {
+                data_init.init(id, Arc::new(Mutex::new(RegionState::default())));
             }
             _ => unreachable!(),
         }
@@ -2058,9 +2099,40 @@ impl Dispatch<WlSurface, ()> for State {
                 }
                 state.surfaces.remove(&id);
             }
-            SetInputRegion { .. } => {}
+            SetInputRegion { region } => {
+                data.input_region = region.map(|r| {
+                    let r_data = r.data::<Arc<Mutex<RegionState>>>().unwrap();
+                    r_data.lock().unwrap().rects.clone()
+                });
+            }
             SetBufferScale { .. } => {}
             other => todo!("unhandled request {other:?}"),
+        }
+    }
+}
+
+impl Dispatch<WlRegion, Arc<Mutex<RegionState>>> for State {
+    fn request(
+        _: &mut Self,
+        _: &Client,
+        _: &WlRegion,
+        request: <WlRegion as Resource>::Request,
+        data: &Arc<Mutex<RegionState>>,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            proto::wl_region::Request::Add {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                data.lock().unwrap().rects.push((x, y, width, height));
+            }
+            proto::wl_region::Request::Subtract { .. } => {}
+            proto::wl_region::Request::Destroy => {}
+            _ => {}
         }
     }
 }
