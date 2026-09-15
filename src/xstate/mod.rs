@@ -525,6 +525,19 @@ impl XState {
         handled
     }
 
+    /// Write `WM_STATE = NormalState` on `window`.
+    fn set_wm_state_normal(&self, window: x::Window) {
+        if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty {
+            mode: x::PropMode::Replace,
+            window,
+            property: self.atoms.wm_state,
+            r#type: self.atoms.wm_state,
+            data: &[WmState::Normal as u32, x::Window::none().resource_id()],
+        }) {
+            debug!("WM_STATE update failed ({window:?}: {e:?})");
+        }
+    }
+
     fn handle_client_message(
         &self,
         e: x::ClientMessageEvent,
@@ -584,7 +597,23 @@ impl XState {
                 match WmState::try_from(data[0]) {
                     // xdg-shell has no way to ask for the inverse of set_minimized, so
                     // NormalState (i.e. deiconify) is something we can't act on.
-                    Ok(WmState::Iconic) => server_state.minimize_window(e.window()),
+                    Ok(WmState::Iconic) => {
+                        server_state.minimize_window(e.window());
+                        // Answer the request on WM_STATE. Wine ≥ 9 records
+                        // the XIconifyWindow it just sent and refuses to send
+                        // any other window-state request (fullscreen,
+                        // maximize, configure) until the WM changes WM_STATE
+                        // in reply, so a game that iconifies itself on focus
+                        // loss — Source engine titles do — would otherwise be
+                        // unable to leave or enter fullscreen until something
+                        // unrelated (a focus change) made us rewrite the
+                        // property. xdg-shell neither confirms the minimize
+                        // nor reports the restore, so IconicState would be a
+                        // claim we could never take back; re-asserting
+                        // NormalState is the one answer that stays true from
+                        // the client's point of view and it unblocks Wine.
+                        self.set_wm_state_normal(e.window());
+                    }
                     Ok(state) => {
                         debug!("ignoring WM_CHANGE_STATE to {state:?} for {:?}", e.window())
                     }
