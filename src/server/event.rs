@@ -539,6 +539,18 @@ impl Event for client::wl_buffer::Event {
 
 impl Event for client::wl_seat::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
+        // Losing the pointer capability ends any press we observed through it. Xwayland will
+        // release the pointer once it processes this event, but the candidate is dropped right
+        // away instead of waiting for that request.
+        if let Self::Capabilities {
+            capabilities: WEnum::Value(capabilities),
+        } = &self
+        {
+            if !capabilities.contains(client::wl_seat::Capability::Pointer) {
+                invalidate_move_candidate(&mut state.world, target);
+            }
+        }
+
         let server = state.world.get::<&WlSeat>(target).unwrap();
         simple_event_shunt! {
             server, self => [
@@ -549,8 +561,8 @@ impl Event for client::wl_seat::Event {
     }
 }
 
-struct PendingEnter(client::wl_pointer::Event);
-enum CurrentSurface {
+pub(super) struct PendingEnter(pub(super) client::wl_pointer::Event);
+pub(super) enum CurrentSurface {
     Xwayland(Entity),
     Decoration(Entity),
 }
@@ -561,6 +573,189 @@ impl CurrentSurface {
     }
 }
 pub struct LastClickSerial(pub client::wl_seat::WlSeat, pub u32);
+
+/// A one shot record of a left pointer press we actually delivered, hosted on the entity that
+/// owns the seat's currently bound pointer.
+///
+/// This only exists for the `_NET_WM_MOVERESIZE` button 0 + Move compatibility path.
+/// Chromium ungrabs its own X11 pointer grab and then sends the request with button 0, which
+/// EWMH §4.3 allows: the button field is a SHOULD. [`LastClickSerial`] cannot stand in for the
+/// missing button: nothing clears it when the button is released.
+///
+/// A candidate means "the pointer events we have processed for this seat end with a left press
+/// over `source`". It is not a mirror of the physical button state - the compositor owns that -
+/// and it is consumed by the first request that uses it.
+pub(super) struct MoveCandidate {
+    /// The Xwayland surface entity that owned the pointer when the press was delivered, i.e. the
+    /// [`CurrentSurface`], not the last hovered or keyboard focused window.
+    pub source: Entity,
+    /// Serial of the press.
+    pub serial: u32,
+    /// The pointer instance that delivered the press. A pointer that is released and recreated
+    /// through `wl_seat.get_pointer` reuses this entity, so the instance is compared explicitly.
+    pub pointer: client::wl_pointer::WlPointer,
+}
+
+/// Why no move candidate could be used for a window.
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+pub(super) enum NoMoveCandidate {
+    /// No live candidate belongs to this window.
+    Missing,
+    /// Several seats have a candidate for this window. An X11 client message has no seat field,
+    /// so there is nothing to pick between them with.
+    Ambiguous,
+}
+
+/// Invalidates the move candidate hosted on `seat`, if there is one.
+pub(super) fn invalidate_move_candidate(world: &mut World, seat: Entity) {
+    if world.remove_one::<MoveCandidate>(seat).is_ok() {
+        debug!(target: "move_candidate", "invalidated move candidate on {seat:?}");
+    }
+}
+
+/// Invalidates every move candidate that was created over `source`.
+pub(super) fn invalidate_move_candidates_for_source(world: &mut World, source: Entity) {
+    let seats: Vec<Entity> = world
+        .query::<&MoveCandidate>()
+        .iter()
+        .filter(|(_, candidate)| candidate.source == source)
+        .map(|(seat, _)| seat)
+        .collect();
+
+    for seat in seats {
+        invalidate_move_candidate(world, seat);
+    }
+}
+
+/// Clears pointer ownership and move candidates that still refer to `source`.
+///
+/// An unmapped or destroyed Xwayland surface can keep its entity alive, so entity generations do
+/// not make either record stale automatically.
+pub(super) fn invalidate_pointer_source(world: &mut World, source: Entity) {
+    let owners: Vec<Entity> = world
+        .query::<&CurrentSurface>()
+        .iter()
+        .filter_map(|(seat, current)| match current {
+            CurrentSurface::Xwayland(entity) if *entity == source => Some(seat),
+            _ => None,
+        })
+        .collect();
+
+    for seat in owners {
+        let _ = world.remove_one::<CurrentSurface>(seat);
+    }
+
+    invalidate_move_candidates_for_source(world, source);
+}
+
+/// Invalidates every move candidate hosted on a seat bound from `global`.
+///
+/// A global may be bound any number of times, so unlike `remove_output` this must not stop at the
+/// first match.
+pub(super) fn invalidate_move_candidates_for_seat_global(world: &mut World, global: GlobalName) {
+    let seats: Vec<Entity> = world
+        .query::<(&MoveCandidate, &GlobalName)>()
+        .iter()
+        .filter(|(_, (_, name))| **name == global)
+        .map(|(seat, _)| seat)
+        .collect();
+
+    for seat in seats {
+        invalidate_move_candidate(world, seat);
+    }
+}
+
+/// Records a real left press over `source` as this seat's move candidate, replacing any previous
+/// one.
+///
+/// The seat's global has to still be advertised: `handle_globals` runs before the pointer events
+/// that were queued in the same batch, so a removal that already invalidated the candidates must
+/// not be undone by one of those older presses.
+///
+/// The pointer stored below is the currently bound pointer. It is also the event's source because
+/// `clientside::Dispatch<WlPointer, Entity>` drops events from any older pointer instance before
+/// they reach this handler, and `ServerState::run` drains that queue without dispatching new client
+/// requests between the two steps. Keep that ordering, or carry the source pointer on the queued
+/// event instead.
+pub(super) fn create_move_candidate<V>(
+    world: &mut World,
+    globals_map: &HashMap<GlobalName, V>,
+    seat: Entity,
+    source: Entity,
+    serial: u32,
+) {
+    invalidate_move_candidate(world, seat);
+
+    let Ok(global) = world.get::<&GlobalName>(seat).map(|global| *global) else {
+        return;
+    };
+    if !globals_map.contains_key(&global) {
+        debug!(
+            target: "move_candidate",
+            "not creating move candidate: seat global {global:?} is gone"
+        );
+        return;
+    }
+    let Ok(pointer) = world
+        .get::<&client::wl_pointer::WlPointer>(seat)
+        .map(|pointer| (*pointer).clone())
+    else {
+        return;
+    };
+
+    world
+        .insert_one(
+            seat,
+            MoveCandidate {
+                source,
+                serial,
+                pointer,
+            },
+        )
+        .unwrap();
+    debug!(
+        target: "move_candidate",
+        "new move candidate on {seat:?} for {source:?} (serial {serial})"
+    );
+}
+
+/// Finds the single seat holding a usable move candidate for `source`.
+pub(super) fn find_move_candidate<V>(
+    world: &World,
+    globals_map: &HashMap<GlobalName, V>,
+    source: Entity,
+) -> Result<Entity, NoMoveCandidate> {
+    let mut found = None;
+
+    for (seat, (candidate, wl_seat, pointer, global)) in world
+        .query::<(
+            &MoveCandidate,
+            &client::wl_seat::WlSeat,
+            &client::wl_pointer::WlPointer,
+            &GlobalName,
+        )>()
+        .iter()
+    {
+        // Lifecycle handlers invalidate these states eagerly. Re-check them here as
+        // defense-in-depth at the authorization boundary.
+        if candidate.source != source
+            || !globals_map.contains_key(global)
+            || !wl_seat.is_alive()
+            || !pointer.is_alive()
+            // The press has to have come from the pointer that is still bound to this seat.
+            || candidate.pointer != *pointer
+        {
+            continue;
+        }
+
+        if found.is_some() {
+            return Err(NoMoveCandidate::Ambiguous);
+        }
+        found = Some(seat);
+    }
+
+    found.ok_or(NoMoveCandidate::Missing)
+}
 
 impl Event for client::wl_pointer::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
@@ -608,6 +803,13 @@ impl Event for client::wl_pointer::Event {
                     Event::handle(enter_event, target, state);
                 } else {
                     warn!("could not move pointer to surface: stale surface");
+                    drop(pe);
+                    // The queued enter cannot be resolved, so we don't know what the pointer is
+                    // over anymore. Forget the previous owner instead of letting the next press
+                    // borrow it, and drop the candidate it may have created.
+                    let _ = state.world.remove_one::<PendingEnter>(target);
+                    let _ = state.world.remove_one::<CurrentSurface>(target);
+                    invalidate_move_candidate(&mut state.world, target);
                     return false;
                 }
             }
@@ -620,6 +822,9 @@ impl Event for client::wl_pointer::Event {
                 surface_x,
                 surface_y,
             } => {
+                // Entering a surface never authorizes a move by itself, and it ends the press
+                // ownership of whatever we were over before.
+                invalidate_move_candidate(&mut state.world, target);
                 let connection = &mut state.connection;
                 let state = &mut state.inner;
                 let mut cmd = CommandBuffer::new();
@@ -641,6 +846,10 @@ impl Event for client::wl_pointer::Event {
                             .unwrap();
                     } else {
                         warn!("could not enter surface {}: stale surface", surface.id());
+                        drop(query);
+                        // We can't tell what the pointer is over now, so the old owner must not
+                        // survive into the next press.
+                        let _ = state.world.remove_one::<CurrentSurface>(target);
                     }
 
                     return;
@@ -688,8 +897,14 @@ impl Event for client::wl_pointer::Event {
                 cmd.run_on(&mut state.world);
             }
             Self::Leave { serial, surface } => {
+                // Invalidate before the early return below: a dead surface is still a leave, and
+                // the candidate must not outlive the pointer being over its source.
+                invalidate_move_candidate(&mut state.world, target);
                 let _ = state.world.remove_one::<PendingEnter>(target);
                 if !surface.is_alive() {
+                    // Same reasoning as the stale enter path: an unknown owner is dropped rather
+                    // than handed to the next press.
+                    let _ = state.world.remove_one::<CurrentSurface>(target);
                     return;
                 }
                 debug!("leaving surface ({})", surface.id());
@@ -719,23 +934,35 @@ impl Event for client::wl_pointer::Event {
                 surface_x,
                 surface_y,
             } => {
-                if !handle_pending_enter(target, state, "motion") {
-                    return;
-                }
+                let _ = handle_pending_enter(target, state, "motion");
                 {
-                    let Ok(surface) = state.world.get::<&CurrentSurface>(target) else {
-                        warn!("could not motion on surface: stale surface");
-                        return;
-                    };
-                    if let CurrentSurface::Decoration(parent) = &*surface {
-                        decoration::handle_pointer_motion(state, *parent, surface_x, surface_y);
-                        return;
+                    match state.world.get::<&CurrentSurface>(target) {
+                        Ok(surface) => {
+                            if let CurrentSurface::Decoration(parent) = &*surface {
+                                decoration::handle_pointer_motion(
+                                    state, *parent, surface_x, surface_y,
+                                );
+                                return;
+                            }
+                        }
+                        Err(_) => {
+                            // The compositor still owns pointer focus. Forward the event to
+                            // Xwayland, but do not infer a window owner from stale local state.
+                            debug!("forwarding motion with unknown pointer owner");
+                        }
                     }
                 }
-                let (server, scale) = state
+                let Ok((server, scale)) = state
                     .world
-                    .query_one_mut::<(&WlPointer, &SurfaceScaleFactor)>(target)
-                    .unwrap();
+                    .query_one_mut::<(&WlPointer, Option<&SurfaceScaleFactor>)>(target)
+                else {
+                    warn!("could not forward motion: stale pointer");
+                    return;
+                };
+                // Unknown ownership can occur before the first resolvable enter, so there may be
+                // no surface-derived scale yet. Keep ordinary input flowing at the protocol's
+                // unit scale without inventing an owner or a move authorization candidate.
+                let scale = scale.copied().unwrap_or(SurfaceScaleFactor(1.0));
                 trace!(
                     target: "pointer_position",
                     "pointer motion {} {}",
@@ -750,37 +977,52 @@ impl Event for client::wl_pointer::Event {
                 button,
                 state: button_state,
             } => {
-                if !handle_pending_enter(target, state, "click") {
-                    return;
-                }
-                let mut cmd = CommandBuffer::new();
-
-                let Ok(mut query) =
-                    state
-                        .world
-                        .query_one::<(&WlPointer, &client::wl_seat::WlSeat, &CurrentSurface)>(
-                            target,
-                        )
-                else {
-                    warn!("could not click on surface: stale surface");
-                    return;
-                };
-
-                let (server, seat, current_surface) = query.get().unwrap();
-
                 // from linux/input-event-codes.h
                 mod button_codes {
                     pub const LEFT: u32 = 0x110;
                 }
 
-                if button_state == WEnum::Value(client::wl_pointer::ButtonState::Pressed)
-                    && button == button_codes::LEFT
-                {
-                    match current_surface {
-                        CurrentSurface::Xwayland(entity) => {
+                let pressed =
+                    button_state == WEnum::Value(client::wl_pointer::ButtonState::Pressed);
+
+                // A left release ends the candidate even if other buttons are still held, and it
+                // has to happen before the early returns below - a candidate must never outlive
+                // the press that created it.
+                if button == button_codes::LEFT && !pressed {
+                    invalidate_move_candidate(&mut state.world, target);
+                }
+
+                let _ = handle_pending_enter(target, state, "click");
+                let mut cmd = CommandBuffer::new();
+
+                let Ok(mut query) = state.world.query_one::<(
+                    &WlPointer,
+                    &client::wl_seat::WlSeat,
+                    Option<&CurrentSurface>,
+                )>(target) else {
+                    warn!("could not click on surface: stale surface");
+                    return;
+                };
+
+                // The pointer may already be gone (released client side) while its events are
+                // still being drained, and we may not know what it is over.
+                let Some((server, seat, current_surface)) = query.get() else {
+                    warn!("could not click on surface: no pointer");
+                    return;
+                };
+
+                // Set when this press should become the seat's move candidate.
+                let mut press_owner = None;
+
+                match current_surface {
+                    Some(CurrentSurface::Xwayland(entity)) => {
+                        if pressed && button == button_codes::LEFT {
                             cmd.insert(*entity, (LastClickSerial(seat.clone(), serial),));
+                            press_owner = Some(*entity);
                         }
-                        CurrentSurface::Decoration(parent) => {
+                    }
+                    Some(CurrentSurface::Decoration(parent)) => {
+                        if pressed && button == button_codes::LEFT {
                             let seat = seat.clone();
                             let parent = *parent;
                             drop(query);
@@ -788,11 +1030,29 @@ impl Event for client::wl_pointer::Event {
                             return;
                         }
                     }
+                    // We invalidated the owner (stale enter, dead leave, unresolvable pending
+                    // enter), so this event must not create a click serial or move candidate.
+                    // The compositor still owns pointer focus, so preserve ordinary input
+                    // delivery and let Xwayland route the event.
+                    None => {
+                        warn!("forwarding button {button} with unknown pointer owner");
+                    }
                 }
 
                 server.button(serial, time, button, convert_wenum(button_state));
                 drop(query);
                 cmd.run_on(&mut state.world);
+
+                if let Some(source) = press_owner {
+                    let state = state.deref_mut();
+                    create_move_candidate(
+                        &mut state.world,
+                        &state.globals_map,
+                        target,
+                        source,
+                        serial,
+                    );
+                }
             }
             _ => {
                 let (server, current_surface) = state
@@ -1744,5 +2004,275 @@ impl Event for zwp_tablet_pad_strip_v2::Event {
                 Frame { time }
             ]
         }
+    }
+}
+
+/// Tests for the move candidate bookkeeping used by Chromium/Electron clients on the
+/// `_NET_WM_MOVERESIZE` button 0 path.
+///
+/// These drive the production helpers directly on a `hecs::World` with real (client side) seat and
+/// pointer proxies, which is the only part of a proxy that matters here: its identity. The
+/// end to end behavior is covered by the `move_button0_*` integration tests.
+#[cfg(test)]
+mod move_candidate_tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+    use wayland_client::{
+        Connection as ClientConnection, EventQueue, delegate_noop,
+        protocol::wl_registry::WlRegistry,
+    };
+
+    type ClientSeat = client::wl_seat::WlSeat;
+    type ClientPointer = client::wl_pointer::WlPointer;
+
+    /// Dispatch target for the proxies below. Nothing is ever dispatched: the peer end of the
+    /// socket is never served, so no events can arrive.
+    struct NoEvents;
+    delegate_noop!(NoEvents: ignore WlRegistry);
+    delegate_noop!(NoEvents: ignore ClientSeat);
+    delegate_noop!(NoEvents: ignore ClientPointer);
+
+    /// Hands out distinct, live seat and pointer proxies.
+    struct Proxies {
+        /// Keeps the peer end of the socket open so the proxies stay alive.
+        _peer: UnixStream,
+        connection: ClientConnection,
+        queue: EventQueue<NoEvents>,
+    }
+
+    impl Proxies {
+        fn new() -> Self {
+            let (ours, peer) = UnixStream::pair().unwrap();
+            let connection = ClientConnection::from_socket(ours).unwrap();
+            let queue = connection.new_event_queue::<NoEvents>();
+            Self {
+                _peer: peer,
+                connection,
+                queue,
+            }
+        }
+
+        fn seat(&self) -> ClientSeat {
+            let qh = self.queue.handle();
+            let registry = self.connection.display().get_registry(&qh, ());
+            registry.bind::<ClientSeat, _, _>(1, 5, &qh, ())
+        }
+
+        fn pointer(&self, seat: &ClientSeat) -> ClientPointer {
+            seat.get_pointer(&self.queue.handle(), ())
+        }
+    }
+
+    /// A world with one bound seat, as satellite lays it out: the seat entity also hosts the
+    /// pointer and the name of the global it was bound from.
+    struct SeatWorld {
+        world: World,
+        globals: HashMap<GlobalName, ()>,
+        proxies: Proxies,
+    }
+
+    impl SeatWorld {
+        fn new() -> Self {
+            Self {
+                world: World::new(),
+                globals: HashMap::new(),
+                proxies: Proxies::new(),
+            }
+        }
+
+        /// Spawns a seat bound from `global`, advertising that global.
+        fn add_seat(&mut self, global: u32) -> Entity {
+            let seat = self.proxies.seat();
+            let pointer = self.proxies.pointer(&seat);
+            self.globals.insert(GlobalName(global), ());
+            self.world.spawn((seat, pointer, GlobalName(global)))
+        }
+
+        /// Replaces the seat's pointer, as `wl_seat.get_pointer` does for an existing entity.
+        fn rebind_pointer(&mut self, seat_entity: Entity) {
+            let seat = (*self.world.get::<&ClientSeat>(seat_entity).unwrap()).clone();
+            let pointer = self.proxies.pointer(&seat);
+            self.world.insert_one(seat_entity, pointer).unwrap();
+        }
+
+        fn candidate(&self, seat_entity: Entity) -> Option<(Entity, u32)> {
+            self.world
+                .get::<&MoveCandidate>(seat_entity)
+                .ok()
+                .map(|candidate| (candidate.source, candidate.serial))
+        }
+
+        fn press(&mut self, seat_entity: Entity, source: Entity, serial: u32) {
+            create_move_candidate(&mut self.world, &self.globals, seat_entity, source, serial);
+        }
+
+        fn find(&self, source: Entity) -> Result<Entity, NoMoveCandidate> {
+            find_move_candidate(&self.world, &self.globals, source)
+        }
+    }
+
+    #[test]
+    fn press_creates_a_findable_candidate() {
+        let mut w = SeatWorld::new();
+        let seat = w.add_seat(1);
+        let window = w.world.spawn(());
+
+        w.press(seat, window, 42);
+
+        assert_eq!(w.candidate(seat), Some((window, 42)));
+        assert_eq!(w.find(window), Ok(seat));
+    }
+
+    #[test]
+    fn a_new_press_replaces_the_previous_candidate() {
+        let mut w = SeatWorld::new();
+        let seat = w.add_seat(1);
+        let first = w.world.spawn(());
+        let second = w.world.spawn(());
+
+        w.press(seat, first, 1);
+        w.press(seat, second, 2);
+
+        assert_eq!(w.candidate(seat), Some((second, 2)));
+        assert_eq!(w.find(first), Err(NoMoveCandidate::Missing));
+        assert_eq!(w.find(second), Ok(seat));
+    }
+
+    #[test]
+    fn candidates_belong_to_the_pressed_window_only() {
+        let mut w = SeatWorld::new();
+        let seat = w.add_seat(1);
+        let pressed = w.world.spawn(());
+        let other = w.world.spawn(());
+
+        w.press(seat, pressed, 7);
+
+        assert_eq!(w.find(other), Err(NoMoveCandidate::Missing));
+        // Asking for the wrong window doesn't spend the candidate either.
+        assert_eq!(w.find(pressed), Ok(seat));
+    }
+
+    #[test]
+    fn invalidation_drops_the_candidate() {
+        let mut w = SeatWorld::new();
+        let seat = w.add_seat(1);
+        let window = w.world.spawn(());
+
+        w.press(seat, window, 3);
+        invalidate_move_candidate(&mut w.world, seat);
+
+        assert_eq!(w.candidate(seat), None);
+        assert_eq!(w.find(window), Err(NoMoveCandidate::Missing));
+
+        // A later real press works again: nothing is stuck in a consumed state.
+        w.press(seat, window, 4);
+        assert_eq!(w.find(window), Ok(seat));
+    }
+
+    #[test]
+    fn invalidating_a_source_clears_every_seat_holding_it() {
+        let mut w = SeatWorld::new();
+        let first = w.add_seat(1);
+        let second = w.add_seat(2);
+        let window = w.world.spawn(());
+        let other_window = w.world.spawn(());
+
+        w.press(first, window, 1);
+        w.press(second, other_window, 2);
+        invalidate_move_candidates_for_source(&mut w.world, window);
+
+        assert_eq!(w.candidate(first), None);
+        assert_eq!(w.candidate(second), Some((other_window, 2)));
+    }
+
+    #[test]
+    fn removing_a_seat_global_clears_all_of_its_binds() {
+        let mut w = SeatWorld::new();
+        // The same global bound twice, plus an unrelated seat.
+        let first = w.add_seat(1);
+        let second = w.add_seat(1);
+        let unrelated = w.add_seat(2);
+        let window = w.world.spawn(());
+
+        w.press(first, window, 1);
+        w.press(second, window, 2);
+        w.press(unrelated, window, 3);
+
+        w.globals.remove(&GlobalName(1));
+        invalidate_move_candidates_for_seat_global(&mut w.world, GlobalName(1));
+
+        assert_eq!(w.candidate(first), None);
+        assert_eq!(w.candidate(second), None);
+        assert_eq!(w.candidate(unrelated), Some((window, 3)));
+        assert_eq!(w.find(window), Ok(unrelated));
+    }
+
+    #[test]
+    fn a_press_queued_behind_a_global_removal_does_not_recreate_a_candidate() {
+        let mut w = SeatWorld::new();
+        let seat = w.add_seat(1);
+        let window = w.world.spawn(());
+
+        w.globals.remove(&GlobalName(1));
+        invalidate_move_candidates_for_seat_global(&mut w.world, GlobalName(1));
+        w.press(seat, window, 5);
+
+        assert_eq!(w.candidate(seat), None);
+        assert_eq!(w.find(window), Err(NoMoveCandidate::Missing));
+    }
+
+    #[test]
+    fn a_removed_seat_global_hides_an_existing_candidate() {
+        let mut w = SeatWorld::new();
+        let seat = w.add_seat(1);
+        let window = w.world.spawn(());
+
+        w.press(seat, window, 9);
+        w.globals.remove(&GlobalName(1));
+
+        assert_eq!(w.find(window), Err(NoMoveCandidate::Missing));
+    }
+
+    #[test]
+    fn a_replaced_pointer_does_not_inherit_the_press() {
+        let mut w = SeatWorld::new();
+        let seat = w.add_seat(1);
+        let window = w.world.spawn(());
+
+        w.press(seat, window, 11);
+        // Simulates the candidate outliving a get_pointer that recreated the pointer object.
+        w.rebind_pointer(seat);
+
+        assert_eq!(w.find(window), Err(NoMoveCandidate::Missing));
+    }
+
+    #[test]
+    fn a_seat_without_a_pointer_has_no_candidate() {
+        let mut w = SeatWorld::new();
+        let seat = w.add_seat(1);
+        let window = w.world.spawn(());
+
+        w.world.remove_one::<ClientPointer>(seat).unwrap();
+        w.press(seat, window, 13);
+
+        assert_eq!(w.candidate(seat), None);
+        assert_eq!(w.find(window), Err(NoMoveCandidate::Missing));
+    }
+
+    #[test]
+    fn several_seats_pressing_the_same_window_are_ambiguous() {
+        let mut w = SeatWorld::new();
+        let first = w.add_seat(1);
+        let second = w.add_seat(2);
+        let window = w.world.spawn(());
+
+        w.press(first, window, 1);
+        w.press(second, window, 2);
+
+        assert_eq!(w.find(window), Err(NoMoveCandidate::Ambiguous));
+
+        // Once one of them is gone the other is unambiguous again.
+        invalidate_move_candidate(&mut w.world, first);
+        assert_eq!(w.find(window), Ok(second));
     }
 }
