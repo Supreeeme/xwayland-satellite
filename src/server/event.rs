@@ -295,15 +295,23 @@ impl SurfaceEvents {
             let (scale_factor, window, window_data) = query.get().unwrap();
 
             let window = *window;
-            let x = (pending.x.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.x;
-            let y = (pending.y.max(0) as f64 * scale_factor.0) as i32 + window_data.output_offset.y;
+            // Round the logical -> device conversion half-up instead of truncating, to match what
+            // compositors do with fractional scaling (they snap the on-screen rect to whole device
+            // pixels, rounding half-up). Truncating here would commit a buffer one device pixel
+            // smaller than the rect the compositor draws, so it rescales and the window looks
+            // slightly blurry. See the `fractional_scale_toplevel_device_size_matches_viewport`
+            // test. `f64::round` is half-away-from-zero, and the `as` casts saturate.
+            let x = (pending.x.max(0) as f64 * scale_factor.0).round() as i32
+                + window_data.output_offset.x;
+            let y = (pending.y.max(0) as f64 * scale_factor.0).round() as i32
+                + window_data.output_offset.y;
             let width = if pending.width > 0 {
-                (pending.width as f64 * scale_factor.0) as u16
+                (pending.width as f64 * scale_factor.0).round() as u16
             } else {
                 window_data.attrs.dims.width
             };
             let height = if pending.height > 0 {
-                (pending.height as f64 * scale_factor.0) as u16
+                (pending.height as f64 * scale_factor.0).round() as u16
             } else {
                 window_data.attrs.dims.height
             };
@@ -468,7 +476,11 @@ pub(super) fn update_surface_viewport(
     let dims = &window_data.attrs.dims;
     let size_hints = &window_data.attrs.size_hints;
 
-    let width = (dims.width as f64 / scale_factor.0).ceil() as i32;
+    // Invert the logical -> device scaling done in the configure handler (`event.rs`, the
+    // `xdg_surface::Event::Configure` arm): that side rounds half-up, so this side must round
+    // half-up too, or the viewport destination drifts by a pixel per round trip and the committed
+    // buffer no longer matches the rect the compositor draws.
+    let width = (dims.width as f64 / scale_factor.0).round() as i32;
     let mut height = dims.height;
     if let Some(SurfaceRole::Toplevel(Some(toplevel))) = role {
         if let Some(d) = &toplevel.decoration.satellite {
@@ -482,7 +494,7 @@ pub(super) fn update_surface_viewport(
             }
         }
     }
-    let height = (height as f64 / scale_factor.0).ceil() as i32;
+    let height = (height as f64 / scale_factor.0).round() as i32;
     if width > 0 && height > 0 {
         viewport.set_destination(width, height);
     }
