@@ -752,8 +752,10 @@ impl TestFixture<FakeXConnection> {
         }
 
         let scale = self.satellite.current_scale;
-        let expected_width = (100.0 * scale) as u16;
-        let expected_height = (100.0 * scale) as u16;
+        // Must match the half-up rounding the server applies to logical -> device sizes; with
+        // fractional scales such as 145/120 the fraction is not always zero.
+        let expected_width = (100.0 * scale).round() as u16;
+        let expected_height = (100.0 * scale).round() as u16;
 
         let win_data = self.connection().windows.get(&window).map(|d| &d.dims);
         assert!(
@@ -2498,6 +2500,103 @@ fn fractional_scale_popup() {
         f.connection().window(popup).dims,
         "X11 dimensions changed after configure"
     );
+}
+
+#[test]
+fn fractional_scale_toplevel_device_size_matches_viewport() {
+    // Regression for https://github.com/Supreeeme/xwayland-satellite/issues/479 and the niri
+    // `scale 1.25` report: a compositor snaps a *logical* size to whole device pixels (niri rounds
+    // half-up, and so do GTK and Qt). xwayland-satellite commits the X11 window size as the buffer
+    // size, so if it truncates instead of rounding, the compositor has to rescale by
+    // (dst * scale) / device — a 1-device-pixel mismatch that reads as "slightly blurry".
+    //
+    // The test never hardcodes a magic size: it asserts the round trip is the identity,
+    // `device == round(viewport_dst * scale)`, for every residue of `logical * 1.25` mod 4.
+    // Unpatched, the L = 1150/1151/1154/1155 cases fail (device is 1 px short) and
+    // L = 1152/1153 pass, because those are the sizes where truncating and rounding agree.
+    const SCALE: f64 = 1.25;
+    const HEIGHT: u16 = 1438;
+
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let comp = f.compositor();
+    let (_, output) = f.new_output(0, 0);
+
+    let toplevel = Window::new(1);
+    let (_, toplevel_id) = f.create_toplevel(&comp, toplevel);
+
+    {
+        let surface_data = f.testwl.get_surface_data(toplevel_id).unwrap();
+        let fractional = surface_data
+            .fractional
+            .as_ref()
+            .expect("No fractional scale for surface");
+        fractional.preferred_scale((SCALE * 120.0) as u32); // scale is reported in 1/120ths
+    }
+    f.testwl.move_surface_to_output(toplevel_id, &output);
+    f.run();
+    f.run();
+
+    // Guard the test itself: at scale 1.0 truncating and rounding are identical, so a scale that
+    // failed to take would make this test pass against the very bug it exists to catch.
+    {
+        let entity = f.satellite.windows[&toplevel];
+        let scale = f
+            .satellite
+            .world
+            .entity(entity)
+            .unwrap()
+            .get::<&super::event::SurfaceScaleFactor>()
+            .expect("surface has no scale factor")
+            .0;
+        assert_eq!(scale, SCALE, "fractional scale did not reach the surface");
+    }
+
+    for logical in [1150i32, 1151, 1152, 1153, 1154, 1155] {
+        f.testwl.configure_toplevel(
+            toplevel_id,
+            logical,
+            HEIGHT as i32,
+            vec![xdg_toplevel::State::Activated],
+        );
+        f.run();
+
+        let dims = f.connection().window(toplevel).dims;
+        let surface_data = f.testwl.get_surface_data(toplevel_id).unwrap();
+        let viewport = surface_data.viewport.as_ref().expect("Missing viewport");
+
+        assert_eq!(
+            viewport.width, logical,
+            "logical {logical}: the viewport destination must be the configured logical size, \
+             otherwise the compositor's device rect drifts and the round trip creeps"
+        );
+        assert_eq!(
+            viewport.height, HEIGHT as i32,
+            "logical {logical}: viewport height"
+        );
+        assert_eq!(
+            dims.width,
+            (logical as f64 * SCALE).round() as u16,
+            "logical {logical}: the X11 (buffer) width must be round(logical * scale); \
+             truncating leaves the compositor rescaling by {}/{}",
+            (logical as f64 * SCALE) as u16,
+            (logical as f64 * SCALE).round() as u16,
+        );
+        assert_eq!(
+            dims.height,
+            (HEIGHT as f64 * SCALE).round() as u16,
+            "logical {logical}: the X11 (buffer) height must be round(logical * scale)"
+        );
+
+        // The invariant, stated independently of any magic number: the buffer is exactly the rect
+        // the compositor will draw, so the mapping is 1:1.
+        assert_eq!(
+            dims.width,
+            (viewport.width as f64 * SCALE).round() as u16,
+            "logical {logical}: buffer and on-screen rect disagree — this is the blur"
+        );
+    }
 }
 
 #[test]
