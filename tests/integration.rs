@@ -202,7 +202,7 @@ impl Fixture {
     #[track_caller]
     fn wait_and_dispatch(&mut self) {
         let mut pollfd = [self.pollfd.clone()];
-        self.testwl.dispatch();
+        self.testwl.flush();
         let timeout = timespec_from_millis(50);
         assert!(
             poll(&mut pollfd, Some(&timeout)).unwrap() > 0,
@@ -715,6 +715,28 @@ impl Connection {
         .value()
         .to_vec()
     }
+}
+
+#[test]
+fn dispatch_already_queued_request() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, window);
+
+    connection.set_property(window, x::ATOM_STRING, x::ATOM_WM_NAME, b"queued");
+    let timeout = timespec_from_millis(1000);
+    assert!(poll(&mut [f.pollfd.clone()], Some(&timeout)).unwrap() > 0);
+    f.wait_and_dispatch();
+    assert_eq!(
+        f.testwl
+            .get_surface_data(surface)
+            .unwrap()
+            .toplevel()
+            .title
+            .as_deref(),
+        Some("queued")
+    );
 }
 
 #[test]

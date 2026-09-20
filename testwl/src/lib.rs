@@ -562,6 +562,10 @@ impl Server {
         for callback in std::mem::take(&mut self.state.callbacks) {
             callback.done(self.state.begin.elapsed().as_millis().try_into().unwrap());
         }
+        self.flush();
+    }
+
+    pub fn flush(&mut self) {
         self.display.flush_clients().unwrap();
     }
 
