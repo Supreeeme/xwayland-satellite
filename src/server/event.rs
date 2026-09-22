@@ -317,7 +317,9 @@ impl SurfaceEvents {
                 // fractional scales too.
                 if let SurfaceRole::Toplevel(Some(toplevel)) = role {
                     if let Some(d) = &toplevel.decoration.satellite {
-                        let (surface_width, _) = logical_size(width, 0, scale_factor.0);
+                        // Rounded up like the viewport's width (update_surface_viewport), so
+                        // that the check sees the width the titlebar is actually drawn at.
+                        let surface_width = (width as f64 / scale_factor.0).ceil() as i32;
                         if d.will_draw_decorations(surface_width) {
                             logical_height = (logical_height
                                 - DecorationsDataSatellite::TITLEBAR_HEIGHT)
@@ -478,16 +480,6 @@ impl SurfaceEvents {
     }
 }
 
-/// Converts a size in X pixels to the surface's logical size at the given scale, rounding up so
-/// that the whole buffer is shown. Everything deriving a logical size from an X window size must
-/// use this so that viewport and popup geometry agree.
-pub(super) fn logical_size(width: u16, height: u16, scale: f64) -> (i32, i32) {
-    (
-        (width as f64 / scale).ceil() as i32,
-        (height as f64 / scale).ceil() as i32,
-    )
-}
-
 pub(super) fn update_surface_viewport(
     world: &World,
     mut surface_query: hecs::QueryOne<(
@@ -502,7 +494,8 @@ pub(super) fn update_surface_viewport(
     let dims = &window_data.attrs.dims;
     let size_hints = &window_data.attrs.size_hints;
 
-    let (width, height) = logical_size(dims.width, dims.height, scale_factor.0);
+    let width = (dims.width as f64 / scale_factor.0).ceil() as i32;
+    let height = (dims.height as f64 / scale_factor.0).ceil() as i32;
     if width > 0 && height > 0 {
         viewport.set_destination(width, height);
     }

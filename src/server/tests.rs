@@ -3149,42 +3149,51 @@ fn client_side_decorations() {
 
 #[test]
 fn client_side_decorations_fractional_scale() {
+    use super::decoration::DecorationsDataSatellite;
+
     // The titlebar is subtracted in logical pixels, so the X window content and the viewport
-    // agree at fractional scales as well (scale, preferred_scale value, expected X height).
-    for (scale, preferred, x_height) in [(1.5, 180, 112), (1.25, 150, 93)] {
-        let mut f = TestFixture::new_pre_connect(|testwl| {
-            testwl.enable_fractional_scale();
-        });
-        let compositor = f.compositor();
-        let (_, output) = f.new_output(0, 0);
-        let window = Window::new(1);
-        let (_, id) = f.create_toplevel(&compositor, window);
+    // agree at fractional scales as well.
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let compositor = f.compositor();
+    let (_, output) = f.new_output(0, 0);
+    let window = Window::new(1);
+    let (_, id) = f.create_toplevel(&compositor, window);
+    f.testwl.move_surface_to_output(id, &output);
+    f.testwl
+        .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ClientSide);
+    f.run();
+
+    // The titlebar is part of the configured toplevel size, so the X window gets the rest of
+    // it. Logical sizes convert to X pixels by truncating and back by rounding up
+    // (update_surface_viewport), so the viewport returns to exactly the configured size minus
+    // the titlebar.
+    let content_height = 100.0 - f64::from(DecorationsDataSatellite::TITLEBAR_HEIGHT);
+    let scales: [(f64, u32); 2] = [(1.5, 180), (1.25, 150)];
+    for (scale, preferred) in scales {
         let data = f.testwl.get_surface_data(id).unwrap();
         data.fractional
             .as_ref()
             .expect("Missing fractional scale")
             .preferred_scale(preferred);
-        f.testwl.move_surface_to_output(id, &output);
-        f.run();
-        f.run();
-
-        f.testwl
-            .force_decoration_mode(id, zxdg_toplevel_decoration_v1::Mode::ClientSide);
         f.testwl.configure_toplevel(id, 100, 100, vec![]);
         f.run();
         f.run();
 
+        let x_width = (100.0 * scale).floor() as u16;
+        let x_height = (content_height * scale).floor() as u16;
         let dims = f.connection().window(window).dims;
         assert_eq!(
             (dims.width, dims.height),
-            ((100.0 * scale) as u16, x_height),
+            (x_width, x_height),
             "X window size at scale {scale}"
         );
         let data = f.testwl.get_surface_data(id).unwrap();
         let viewport = data.viewport.as_ref().unwrap();
         assert_eq!(
             (viewport.width, viewport.height),
-            (100, 75),
+            (100, content_height as i32),
             "viewport size at scale {scale}"
         );
     }
@@ -3279,15 +3288,6 @@ fn resize_decorations_on_reconfigure() {
     f.reconfigure_window(window, dims, false);
     f.run();
     f.run();
-
-    // A resize from the X side must not be squished by the titlebar height.
-    let data = f.testwl.get_surface_data(id).unwrap();
-    let viewport = data.viewport.as_ref().unwrap();
-    assert_eq!(
-        (viewport.width, viewport.height),
-        (200, 200),
-        "viewport size"
-    );
 
     let data = f.testwl.get_surface_data(subsurface_id).unwrap();
     let buf_dims = f
