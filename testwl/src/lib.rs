@@ -22,7 +22,10 @@ use wayland_protocols::{
             zwp_locked_pointer_v1::{self, ZwpLockedPointerV1},
             zwp_pointer_constraints_v1::{self, ZwpPointerConstraintsV1},
         },
-        relative_pointer::zv1::server::zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
+        relative_pointer::zv1::server::{
+            zwp_relative_pointer_manager_v1::{self, ZwpRelativePointerManagerV1},
+            zwp_relative_pointer_v1::{self, ZwpRelativePointerV1},
+        },
         tablet::zv2::server::{
             zwp_tablet_manager_v2::ZwpTabletManagerV2,
             zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2,
@@ -256,6 +259,7 @@ pub struct LockedPointer {
 struct PointerState {
     pointer: WlPointer,
     locked: Option<LockedPointer>,
+    relative_pointers: Vec<ZwpRelativePointerV1>,
 }
 
 struct State {
@@ -480,8 +484,8 @@ impl Server {
         let decorations_global = dh.create_global::<State, ZxdgDecorationManagerV1, _>(1, ());
         dh.create_global::<State, WpViewporter, _>(1, ());
         dh.create_global::<State, ZwpPointerConstraintsV1, _>(1, ());
+        dh.create_global::<State, ZwpRelativePointerManagerV1, _>(1, ());
         global_noop!(ZwpLinuxDmabufV1);
-        global_noop!(ZwpRelativePointerManagerV1);
         global_noop!(WpLinuxDrmSyncobjManagerV1);
 
         struct HandlerData;
@@ -869,6 +873,19 @@ impl Server {
         self.display.flush_clients().unwrap();
     }
 
+    #[track_caller]
+    pub fn relative_pointer_motion(&mut self, dx: f64, dy: f64, dx_unaccel: f64, dy_unaccel: f64) {
+        let pointer = self.state.pointer.as_ref().expect("No pointer created");
+        let time = self.state.begin.elapsed().as_micros() as u64;
+        let utime_hi = (time >> 32) as u32;
+        let utime_lo = time as u32;
+
+        for relative_pointer in &pointer.relative_pointers {
+            relative_pointer.relative_motion(utime_hi, utime_lo, dx, dy, dx_unaccel, dy_unaccel);
+        }
+        self.display.flush_clients().unwrap();
+    }
+
     pub fn get_output(&mut self, name: &str) -> Option<WlOutput> {
         self.state
             .outputs
@@ -1021,6 +1038,7 @@ simple_global_dispatch!(ZxdgDecorationManagerV1);
 simple_global_dispatch!(WpViewporter);
 simple_global_dispatch!(WpFractionalScaleManagerV1);
 simple_global_dispatch!(ZwpPointerConstraintsV1);
+simple_global_dispatch!(ZwpRelativePointerManagerV1);
 
 impl Dispatch<ZwpTabletManagerV2, ()> for State {
     fn request(
@@ -1419,6 +1437,7 @@ impl Dispatch<WlSeat, ()> for State {
                 state.pointer = Some(PointerState {
                     pointer: data_init.init(id, ()),
                     locked: None,
+                    relative_pointers: Vec::new(),
                 });
             }
             wl_seat::Request::GetKeyboard { id } => {
@@ -2471,6 +2490,51 @@ impl Dispatch<ZwpPointerConstraintsV1, ()> for State {
                     surface: surface_id,
                     cursor_hint: None,
                 });
+            }
+            _ => todo!("{request:?}"),
+        }
+    }
+}
+
+impl Dispatch<ZwpRelativePointerManagerV1, ()> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        _: &ZwpRelativePointerManagerV1,
+        request: <ZwpRelativePointerManagerV1 as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_relative_pointer_manager_v1::Request::GetRelativePointer { id, pointer } => {
+                let pointer_state = state.pointer.as_mut().unwrap();
+                assert_eq!(pointer, pointer_state.pointer);
+                let relative_pointer = data_init.init(id, ());
+                pointer_state.relative_pointers.push(relative_pointer);
+            }
+            _ => todo!("{request:?}"),
+        }
+    }
+}
+
+impl Dispatch<ZwpRelativePointerV1, ()> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        relative_pointer: &ZwpRelativePointerV1,
+        request: <ZwpRelativePointerV1 as Resource>::Request,
+        _: &(),
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            zwp_relative_pointer_v1::Request::Destroy => {
+                if let Some(pointer_state) = state.pointer.as_mut() {
+                    pointer_state
+                        .relative_pointers
+                        .retain(|p| p != relative_pointer);
+                }
             }
             _ => todo!("{request:?}"),
         }
