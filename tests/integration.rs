@@ -16,6 +16,7 @@ use wayland_protocols::xdg::{
 };
 use wayland_server::Resource;
 use wayland_server::protocol::{wl_output, wl_pointer};
+use xcb::BaseEvent;
 use xcb::{Xid, x};
 use xwayland_satellite as xwls;
 use xwayland_satellite::xstate::{MoveResizeDirection, WmSizeHintsFlags, WmState};
@@ -2348,6 +2349,194 @@ fn rotated_output() {
             assert_eq!(e.window(), connection.root);
             assert_eq!(e.width(), 1000);
             assert_eq!(e.height(), 100);
+        }
+        other => panic!("unexpected event {other:?}"),
+    }
+}
+
+#[test]
+fn configure_request_without_change_gets_synthetic_notify() {
+    // ICCCM 4.1.5: a ConfigureRequest that changes nothing must still be answered with a
+    // synthetic ConfigureNotify, since the server sends no real one.
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 100, 100, false);
+    let _surface = f.map_as_toplevel(&mut connection, window);
+    connection
+        .send_and_check_request(&x::ChangeWindowAttributes {
+            window,
+            value_list: &[x::Cw::EventMask(x::EventMask::STRUCTURE_NOTIFY)],
+        })
+        .unwrap();
+    while connection.poll_for_event().unwrap().is_some() {}
+
+    let geometry = connection.get_reply(&x::GetGeometry {
+        drawable: x::Drawable::Window(window),
+    });
+    connection
+        .send_and_check_request(&x::ConfigureWindow {
+            window,
+            value_list: &[
+                x::ConfigWindow::X(geometry.x().into()),
+                x::ConfigWindow::Y(geometry.y().into()),
+                x::ConfigWindow::Width(geometry.width().into()),
+                x::ConfigWindow::Height(geometry.height().into()),
+            ],
+        })
+        .unwrap();
+
+    match connection.await_event() {
+        xcb::Event::X(x::Event::ConfigureNotify(e)) => {
+            assert!(
+                e.is_from_send_event(),
+                "expected a synthetic ConfigureNotify"
+            );
+            assert_eq!(e.window(), window);
+            assert_eq!(
+                (e.x(), e.y(), e.width(), e.height()),
+                (
+                    geometry.x(),
+                    geometry.y(),
+                    geometry.width(),
+                    geometry.height()
+                )
+            );
+        }
+        other => panic!("unexpected event {other:?}"),
+    }
+}
+
+#[test]
+fn configure_request_reports_requested_border_width() {
+    // ICCCM 4.1.5: the synthetic ConfigureNotify carries the border width the client requested
+    // (satellite does not apply it), and root coordinates adjusted for it.
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 100, 100, false);
+    let _surface = f.map_as_toplevel(&mut connection, window);
+    connection
+        .send_and_check_request(&x::ChangeWindowAttributes {
+            window,
+            value_list: &[x::Cw::EventMask(x::EventMask::STRUCTURE_NOTIFY)],
+        })
+        .unwrap();
+    while connection.poll_for_event().unwrap().is_some() {}
+
+    let geometry = connection.get_reply(&x::GetGeometry {
+        drawable: x::Drawable::Window(window),
+    });
+    assert_eq!(geometry.border_width(), 0);
+    connection
+        .send_and_check_request(&x::ConfigureWindow {
+            window,
+            value_list: &[x::ConfigWindow::BorderWidth(5)],
+        })
+        .unwrap();
+
+    match connection.await_event() {
+        xcb::Event::X(x::Event::ConfigureNotify(e)) => {
+            assert!(
+                e.is_from_send_event(),
+                "expected a synthetic ConfigureNotify"
+            );
+            assert_eq!(e.border_width(), 5);
+            assert_eq!((e.x(), e.y()), (geometry.x() - 5, geometry.y() - 5));
+            assert_eq!(
+                (e.width(), e.height()),
+                (geometry.width(), geometry.height())
+            );
+        }
+        other => panic!("unexpected event {other:?}"),
+    }
+    // The border is still not applied to the window itself.
+    let geometry = connection.get_reply(&x::GetGeometry {
+        drawable: x::Drawable::Window(window),
+    });
+    assert_eq!(geometry.border_width(), 0);
+}
+
+#[test]
+fn configure_request_move_without_resize_gets_synthetic_notify() {
+    // ICCCM 4.1.5: a move without a resize is followed by a synthetic ConfigureNotify in root
+    // coordinates, in addition to the real event.
+    let f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    // Unmapped windows may still be moved by their client.
+    let window = connection.new_window(connection.root, 0, 0, 100, 100, false);
+    connection
+        .send_and_check_request(&x::ChangeWindowAttributes {
+            window,
+            value_list: &[x::Cw::EventMask(x::EventMask::STRUCTURE_NOTIFY)],
+        })
+        .unwrap();
+    connection
+        .send_and_check_request(&x::ConfigureWindow {
+            window,
+            value_list: &[x::ConfigWindow::X(10), x::ConfigWindow::Y(20)],
+        })
+        .unwrap();
+
+    let mut got_synthetic = false;
+    for _ in 0..2 {
+        match connection.await_event() {
+            xcb::Event::X(x::Event::ConfigureNotify(e)) => {
+                assert_eq!((e.x(), e.y()), (10, 20));
+                assert_eq!((e.width(), e.height()), (100, 100));
+                got_synthetic |= e.is_from_send_event();
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+    assert!(
+        got_synthetic,
+        "expected a synthetic ConfigureNotify after the move"
+    );
+}
+
+#[test]
+fn configure_request_restack_gets_synthetic_notify() {
+    // ICCCM 4.1.5: a restack without a resize is answered with a synthetic ConfigureNotify.
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 100, 100, false);
+    let _surface = f.map_as_toplevel(&mut connection, window);
+    connection
+        .send_and_check_request(&x::ChangeWindowAttributes {
+            window,
+            value_list: &[x::Cw::EventMask(x::EventMask::STRUCTURE_NOTIFY)],
+        })
+        .unwrap();
+    while connection.poll_for_event().unwrap().is_some() {}
+
+    let geometry = connection.get_reply(&x::GetGeometry {
+        drawable: x::Drawable::Window(window),
+    });
+    connection
+        .send_and_check_request(&x::ConfigureWindow {
+            window,
+            value_list: &[x::ConfigWindow::StackMode(x::StackMode::Above)],
+        })
+        .unwrap();
+
+    match connection.await_event() {
+        xcb::Event::X(x::Event::ConfigureNotify(e)) => {
+            assert!(
+                e.is_from_send_event(),
+                "expected a synthetic ConfigureNotify"
+            );
+            assert_eq!(
+                (e.x(), e.y(), e.width(), e.height()),
+                (
+                    geometry.x(),
+                    geometry.y(),
+                    geometry.width(),
+                    geometry.height()
+                )
+            );
         }
         other => panic!("unexpected event {other:?}"),
     }
