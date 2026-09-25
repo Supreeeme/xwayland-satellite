@@ -3069,6 +3069,7 @@ fn disconnected_output_rescaling() {
     f.run();
     // Multiple monitors with different scaling will select the lowest scale across monitors
     assert_eq!(f.satellite.inner.new_scale, Some(1.5));
+    assert_eq!(f.satellite.inner.current_scale, 1.5);
 
     f.remove_output(output_ext);
     let surface_data = f.testwl.get_surface_data(id).expect("No surface data");
@@ -3081,6 +3082,7 @@ fn disconnected_output_rescaling() {
     f.run();
     // An fractional scale change done while the surface is on a removed output is ignored
     assert_eq!(f.satellite.inner.new_scale, Some(1.5));
+    assert_eq!(f.satellite.inner.current_scale, 1.5);
 
     f.testwl.move_surface_to_output(id, &output_main);
     let surface_data = f.testwl.get_surface_data(id).expect("No surface data");
@@ -3093,6 +3095,7 @@ fn disconnected_output_rescaling() {
     f.run();
     // After the output is disconnected, only the 2x scale output remains, so use that scale
     assert_eq!(f.satellite.inner.new_scale, Some(2.0));
+    assert_eq!(f.satellite.inner.current_scale, 2.0);
 }
 
 #[track_caller]
