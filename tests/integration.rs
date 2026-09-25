@@ -354,6 +354,7 @@ impl Fixture {
 xcb::atoms_struct! {
     struct Atoms {
         wm_protocols => b"WM_PROTOCOLS",
+        wm_take_focus => b"WM_TAKE_FOCUS",
         net_active_window => b"_NET_ACTIVE_WINDOW",
         wm_delete_window => b"WM_DELETE_WINDOW",
         net_wm_state => b"_NET_WM_STATE",
@@ -1000,6 +1001,82 @@ fn input_focus() {
     check_focus(x::WINDOW_NONE);
 
     f.wm_delete_window(&mut connection, win1, surface1);
+}
+
+#[test]
+fn popup_focus_protocol_updates() {
+    for enabled in [Some(true), Some(false), None] {
+        let mut f = Fixture::new();
+        let mut connection = Connection::new(&f.display);
+        let toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
+        let toplevel_surface = f.map_as_toplevel(&mut connection, toplevel);
+        let popup = connection.new_window(connection.root, 0, 0, 20, 20, false);
+        connection.set_property(
+            popup,
+            x::ATOM_ATOM,
+            connection.atoms.win_type,
+            &[connection.atoms.win_type_popup_menu],
+        );
+        connection.set_property(
+            popup,
+            x::ATOM_WM_HINTS,
+            x::ATOM_WM_HINTS,
+            &[1_u32, 1, 0, 0, 0, 0, 0, 0, 0],
+        );
+        let protocols = connection.atoms.wm_protocols;
+        let take_focus = connection.atoms.wm_take_focus;
+        let other = connection.atoms.wm_delete_window;
+        let initial = if enabled == Some(true) {
+            other
+        } else {
+            take_focus
+        };
+        connection.set_property(popup, x::ATOM_ATOM, protocols, &[initial]);
+        connection.map_window(popup);
+        f.wait_and_dispatch();
+        let surface = f.testwl.last_created_surface_id().unwrap();
+
+        match enabled {
+            Some(enabled) => {
+                let updated = if enabled { take_focus } else { other };
+                connection.set_property(popup, x::ATOM_ATOM, protocols, &[updated]);
+            }
+            None => connection
+                .send_and_check_request(&x::DeleteProperty {
+                    window: popup,
+                    property: protocols,
+                })
+                .unwrap(),
+        }
+        // Wait until satellite has handled the preceding property change.
+        connection.set_property(toplevel, x::ATOM_STRING, x::ATOM_WM_NAME, b"updated");
+        f.wait_and_dispatch();
+        assert_eq!(
+            f.testwl
+                .get_surface_data(toplevel_surface)
+                .unwrap()
+                .toplevel()
+                .title
+                .as_deref(),
+            Some("updated")
+        );
+        f.testwl.configure_popup(surface);
+        f.wait_and_dispatch();
+
+        if enabled == Some(true) {
+            let event = connection.await_event();
+            let xcb::Event::X(x::Event::ClientMessage(event)) = event else {
+                panic!("Expected WM_TAKE_FOCUS, got {event:?}");
+            };
+            assert_eq!(event.window(), popup);
+            assert_eq!(event.r#type(), protocols);
+            assert!(matches!(event.data(), x::ClientMessageData::Data32(data)
+                if data[0] == take_focus.resource_id()));
+        } else {
+            assert_eq!(connection.get_reply(&x::GetInputFocus {}).focus(), popup);
+            assert!(connection.poll_for_event().unwrap().is_none());
+        }
+    }
 }
 
 #[test]
