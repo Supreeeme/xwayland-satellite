@@ -1088,6 +1088,28 @@ impl Default for OutputDimensions {
     }
 }
 
+/// Xwayland sizes the X11 screen from the xdg output's logical size, so satellite always reports
+/// the output's native (mode) dimensions instead of the compositor's logical size. This keeps
+/// X11 windows rendering at native resolution regardless of the output scale.
+fn send_xdg_logical_size(xdg: &XdgOutputServer, dimensions: &OutputDimensions) {
+    if dimensions.rotated_90 {
+        xdg.logical_size(dimensions.height, dimensions.width);
+    } else {
+        xdg.logical_size(dimensions.width, dimensions.height);
+    }
+}
+
+/// Commits a logical size resent after the compositor's own xdg output events, for clients whose
+/// xdg output predates version 3. Those are committed by zxdg_output_v1.done, which the
+/// compositor has already sent by then; since version 3 the following wl_output.done commits
+/// everything. Sizes rewritten while forwarding the compositor's own logical_size event need
+/// nothing: the compositor's done follows them, as it does for the rest of its batch.
+fn commit_resent_xdg_logical_size(xdg: &XdgOutputServer) {
+    if xdg.version() < 3 {
+        xdg.done();
+    }
+}
+
 fn update_output_offset(
     output: Entity,
     source: OutputDimensionsSource,
@@ -1306,11 +1328,8 @@ impl OutputEvent {
                     )
                 });
                 if let Some(xdg) = xdg {
-                    if dimensions.rotated_90 {
-                        xdg.logical_size(dimensions.height, dimensions.width);
-                    } else {
-                        xdg.logical_size(dimensions.width, dimensions.height);
-                    }
+                    send_xdg_logical_size(xdg, dimensions);
+                    commit_resent_xdg_logical_size(xdg);
                 }
             }
             Event::Mode {
@@ -1319,22 +1338,32 @@ impl OutputEvent {
                 height,
                 refresh,
             } => {
-                let Ok((output, dimensions)) = state
-                    .world
-                    .query_one_mut::<(&WlOutput, &mut OutputDimensions)>(target)
-                else {
+                let Ok((output, dimensions, xdg)) = state.world.query_one_mut::<(
+                    &WlOutput,
+                    &mut OutputDimensions,
+                    Option<&XdgOutputServer>,
+                )>(target) else {
                     return;
                 };
 
-                if flags
+                output.mode(convert_wenum(flags), width, height, refresh);
+
+                let is_current = flags
                     .into_result()
-                    .is_ok_and(|f| f.contains(client::wl_output::Mode::Current))
-                {
+                    .is_ok_and(|f| f.contains(client::wl_output::Mode::Current));
+                if is_current && (dimensions.width != width || dimensions.height != height) {
                     dimensions.width = width;
                     dimensions.height = height;
                     debug!("{} dimensions: {width}x{height}", output.id());
+                    // Compositors may send the xdg output's logical size before the new current
+                    // mode (smithay based ones do), in which case the logical size we forwarded
+                    // to Xwayland was computed from the old mode. Resend it so that the
+                    // following wl_output.done commits the size of the new mode.
+                    if let Some(xdg) = xdg {
+                        send_xdg_logical_size(xdg, dimensions);
+                        commit_resent_xdg_logical_size(xdg);
+                    }
                 }
-                output.mode(convert_wenum(flags), width, height, refresh);
             }
             Event::Scale { factor } => {
                 debug!(
@@ -1397,11 +1426,7 @@ impl OutputEvent {
                 else {
                     return;
                 };
-                if dimensions.rotated_90 {
-                    xdg.logical_size(dimensions.height, dimensions.width);
-                } else {
-                    xdg.logical_size(dimensions.width, dimensions.height);
-                }
+                send_xdg_logical_size(xdg, dimensions);
             }
             _ => simple_event_shunt! {
                 state.world.get::<&XdgOutputServer>(target).unwrap(),
