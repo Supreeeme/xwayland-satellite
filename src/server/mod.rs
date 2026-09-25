@@ -832,6 +832,10 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             self.dh.disable_global::<InnerServerState<S>>(global_id);
             if global_struct.interface == <WlOutput>::interface().name {
                 self.remove_output(global);
+            } else if global_struct.interface == <WlSeat>::interface().name {
+                // Every seat bound from this global is going away, so no press observed through
+                // one of them may start a move anymore.
+                event::invalidate_move_candidates_for_seat_global(&mut self.world, global);
             }
         }
     }
@@ -1182,6 +1186,10 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             win.mapped = false;
         }
 
+        // An unmapped window keeps its entity, so hecs' generation cannot invalidate a candidate
+        // pointing at it - drop it explicitly.
+        event::invalidate_pointer_source(&mut self.world, entity.unwrap());
+
         if let Ok(mut role) = self.world.remove_one::<SurfaceRole>(entity.unwrap()) {
             role.destroy();
         }
@@ -1304,6 +1312,97 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         data.toplevel._move(&last_click_data.0, last_click_data.1);
     }
 
+    /// Handles `_NET_WM_MOVERESIZE` with button 0 and direction Move.
+    ///
+    /// Unlike [`Self::move_window`], this cannot use [`LastClickSerial`]: that only proves a left
+    /// press was once delivered for the window, not that the latest pointer event satellite has
+    /// processed is still that press. Instead this requires a one shot [`MoveCandidate`] created
+    /// by a press delivered for this exact window, on a seat that is still usable. The compositor
+    /// remains the authority on whether the serial can start a grab.
+    pub fn move_window_from_press(&mut self, window: x::Window) {
+        let Some(entity) = self.windows.get(&window).copied() else {
+            warn!("Requested move of unknown window {window:?}");
+            return;
+        };
+
+        // The candidate records the entity that owned the pointer at press time, so the window is
+        // re-resolved and re-checked from the request's XID: it may have been unmapped, had its
+        // surface destroyed, or been rebound to a different entity since then.
+        {
+            let Ok(data) = self.world.entity(entity) else {
+                warn!("Requested move of stale window {window:?}");
+                return;
+            };
+
+            if !data.get::<&WindowData>().is_some_and(|win| win.mapped) {
+                warn!("Requested move of unmapped window {window:?}");
+                return;
+            }
+
+            if !data
+                .get::<&client::wl_surface::WlSurface>()
+                .is_some_and(|surface| surface.is_alive())
+            {
+                warn!("Requested move of window {window:?} without a live surface");
+                return;
+            }
+
+            let role = data.get::<&SurfaceRole>();
+            let Some(SurfaceRole::Toplevel(Some(toplevel))) = role.as_deref() else {
+                warn!("Requested move of non toplevel {window:?} ({role:?})");
+                return;
+            };
+
+            if !toplevel.toplevel.is_alive() {
+                warn!("Requested move of window {window:?} with a dead toplevel");
+                return;
+            }
+        }
+
+        let seat_entity = match event::find_move_candidate(&self.world, &self.globals_map, entity) {
+            Ok(seat) => seat,
+            Err(event::NoMoveCandidate::Missing) => {
+                warn!(
+                    "Requested move of window {window:?} with button 0, but no outstanding left press belongs to it"
+                );
+                return;
+            }
+            Err(event::NoMoveCandidate::Ambiguous) => {
+                warn!(
+                    "Requested move of window {window:?} with button 0, but several seats have a press for it"
+                );
+                return;
+            }
+        };
+
+        // Consume first: the candidate is spent whether or not the compositor honors the request
+        // below. We never retry, and never fall back to the last click serial.
+        let Ok(candidate) = self.world.remove_one::<MoveCandidate>(seat_entity) else {
+            warn!("Requested move of window {window:?}, but its candidate disappeared");
+            return;
+        };
+
+        let Ok(seat) = self.world.get::<&client::wl_seat::WlSeat>(seat_entity) else {
+            warn!("Requested move of window {window:?}, but its seat disappeared");
+            return;
+        };
+        let Ok(role) = self.world.get::<&SurfaceRole>(entity) else {
+            warn!("Requested move of window {window:?}, but its role disappeared");
+            return;
+        };
+        let SurfaceRole::Toplevel(Some(data)) = &*role else {
+            warn!("Requested move of window {window:?}, but it is no longer a toplevel");
+            return;
+        };
+
+        debug!(
+            "moving {window:?} from press on {seat_entity:?} (serial {})",
+            candidate.serial
+        );
+        // Sent, not accepted: the compositor decides whether a grab actually starts.
+        data.toplevel._move(&seat, candidate.serial);
+    }
+
     pub fn resize_window(&mut self, window: x::Window, direction: MoveResizeDirection) {
         let Some(data) = self
             .windows
@@ -1347,6 +1446,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
     pub fn destroy_window(&mut self, window: x::Window) {
         if let Some(id) = self.windows.remove(&window) {
+            event::invalidate_pointer_source(&mut self.world, id);
             self.world.remove::<(x::Window, WindowData)>(id).unwrap();
             if self.world.entity(id).unwrap().is_empty() {
                 self.world.despawn(id).unwrap();

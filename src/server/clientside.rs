@@ -291,7 +291,6 @@ push_events!(XdgSurface);
 push_events!(XdgToplevel);
 push_events!(XdgPopup);
 push_events!(WlSeat);
-push_events!(WlPointer);
 push_events!(WlOutput);
 push_events!(WlKeyboard);
 push_events!(ZwpRelativePointerV1);
@@ -303,6 +302,39 @@ push_events!(ZwpConfinedPointerV1);
 push_events!(ZwpLockedPointerV1);
 push_events!(WpFractionalScaleV1);
 push_events!(ZxdgToplevelDecorationV1);
+
+/// Pointer events carry the pointer instance that produced them, which the generic
+/// `push_events!` queue drops in favor of the entity alone.
+///
+/// A pointer can be released and recreated on the same seat entity, so an event from a pointer
+/// that is not the one currently bound there says nothing about the current one and is discarded.
+/// Both mismatching and missing bindings are dropped rather than unwrapped: after a release the
+/// entity lives on, and events from the old pointer can still be in flight.
+impl Dispatch<WlPointer, Entity> for MyWorld {
+    fn event(
+        state: &mut Self,
+        pointer: &WlPointer,
+        event: <WlPointer as Proxy>::Event,
+        key: &Entity,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let from_bound_pointer = state
+            .world
+            .get::<&WlPointer>(*key)
+            .is_ok_and(|bound| *bound == *pointer);
+
+        if !from_bound_pointer {
+            log::debug!(
+                "discarding event from unbound pointer {}: {event:?}",
+                pointer.id()
+            );
+            return;
+        }
+
+        state.events.push((*key, event.into()));
+    }
+}
 
 pub(crate) struct LateInitObjectKey<P: Proxy> {
     key: OnceLock<Entity>,

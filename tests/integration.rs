@@ -383,6 +383,8 @@ xcb::atoms_struct! {
         xsettings_setting => b"_XSETTINGS_SETTINGS",
         resource_manager => b"RESOURCE_MANAGER",
         moveresize => b"_NET_WM_MOVERESIZE",
+        net_wm_name => b"_NET_WM_NAME" only_if_exists = false,
+        utf8_string => b"UTF8_STRING" only_if_exists = false,
     }
 }
 
@@ -2354,6 +2356,229 @@ fn rotated_output() {
 }
 
 const BTN_LEFT: u32 = 0x110;
+/// from linux/input-event-codes.h
+const BTN_RIGHT: u32 = 0x111;
+/// X11 button detail for the left/right buttons.
+const X_DETAIL_LEFT: u8 = 1;
+const X_DETAIL_RIGHT: u8 = 3;
+
+static BARRIER_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// A mapped toplevel to drag, plus a second mapped toplevel used only as a processing barrier.
+struct MoveSetup {
+    window: x::Window,
+    surface: testwl::SurfaceId,
+    control: x::Window,
+    control_surface: testwl::SurfaceId,
+}
+
+impl Connection {
+    #[track_caller]
+    fn select_button_events(&self, window: x::Window) {
+        self.send_and_check_request(&x::ChangeWindowAttributes {
+            window,
+            value_list: &[x::Cw::EventMask(
+                x::EventMask::BUTTON_PRESS | x::EventMask::BUTTON_RELEASE,
+            )],
+        })
+        .unwrap();
+    }
+
+    #[track_caller]
+    fn send_moveresize(&self, window: x::Window, direction: MoveResizeDirection, button: u32) {
+        self.send_client_message(&x::ClientMessageEvent::new(
+            window,
+            self.atoms.moveresize,
+            x::ClientMessageData::Data32([0, 0, direction.into(), button, 0]),
+        ));
+    }
+}
+
+impl Fixture {
+    #[track_caller]
+    fn setup_move_test(&mut self, connection: &mut Connection) -> MoveSetup {
+        let control = connection.new_window(connection.root, 0, 0, 20, 20, false);
+        let control_surface = self.map_as_toplevel(connection, control);
+        let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+        let surface = self.map_as_toplevel(connection, window);
+        connection.select_button_events(window);
+
+        MoveSetup {
+            window,
+            surface,
+            control,
+            control_surface,
+        }
+    }
+
+    /// Moves the pointer over the window to drag.
+    #[track_caller]
+    fn enter_target(&mut self, setup: &MoveSetup) {
+        self.testwl.move_pointer_to(setup.surface, 10., 10.);
+        let ptr = self.testwl.pointer();
+        ptr.motion(1, 10.0, 10.0);
+        ptr.frame();
+        self.testwl.dispatch();
+    }
+
+    /// Sends a real `wl_pointer` button event and waits until the X client has received the
+    /// matching X11 event.
+    ///
+    /// Waiting for the X side of the press before acting on it is the handshake from upstream
+    /// PR #492's revision of the existing drag tests
+    /// (<https://github.com/Supreeeme/xwayland-satellite/pull/492>). Only that test
+    /// synchronization is reused here; none of that PR's runtime changes are.
+    #[track_caller]
+    fn pointer_button(
+        &mut self,
+        connection: &mut Connection,
+        setup: &MoveSetup,
+        button: u32,
+        detail: u8,
+        pressed: bool,
+        serial: u32,
+    ) {
+        let state = if pressed {
+            wl_pointer::ButtonState::Pressed
+        } else {
+            wl_pointer::ButtonState::Released
+        };
+        let ptr = self.testwl.pointer();
+        ptr.button(serial, serial, button, state);
+        ptr.frame();
+        self.testwl.dispatch();
+        self.await_x_button(connection, setup.window, detail, pressed);
+    }
+
+    #[track_caller]
+    fn press_left(&mut self, connection: &mut Connection, setup: &MoveSetup, serial: u32) {
+        self.pointer_button(connection, setup, BTN_LEFT, X_DETAIL_LEFT, true, serial);
+    }
+
+    #[track_caller]
+    fn release_left(&mut self, connection: &mut Connection, setup: &MoveSetup, serial: u32) {
+        self.pointer_button(connection, setup, BTN_LEFT, X_DETAIL_LEFT, false, serial);
+    }
+
+    /// Waits, with a deadline, for the X client to actually receive a button event.
+    #[track_caller]
+    fn await_x_button(
+        &mut self,
+        connection: &mut Connection,
+        window: x::Window,
+        detail: u8,
+        pressed: bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            while let Some(event) = connection
+                .poll_for_event()
+                .expect("Failed to poll for X11 events")
+            {
+                match event {
+                    xcb::Event::X(x::Event::ButtonPress(e))
+                        if pressed && e.event() == window && e.detail() == detail =>
+                    {
+                        return;
+                    }
+                    xcb::Event::X(x::Event::ButtonRelease(e))
+                        if !pressed && e.event() == window && e.detail() == detail =>
+                    {
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
+            assert!(
+                Instant::now() < deadline,
+                "X client never received button {detail} {} for {window:?}",
+                if pressed { "press" } else { "release" }
+            );
+
+            let mut fds = [connection.pollfd.clone(), self.pollfd.clone()];
+            poll(&mut fds, Some(&timespec_from_millis(20))).expect("poll failed");
+            connection.pollfd.clear_revents();
+            self.pollfd.clear_revents();
+            self.testwl.dispatch();
+        }
+    }
+
+    /// Barrier proving satellite has finished processing everything sent to the X server before
+    /// this call.
+    ///
+    /// A unique `_NET_WM_NAME` is written on a still mapped control window and we wait for the
+    /// matching `xdg_toplevel.set_title` in testwl. The X server keeps one client's requests in
+    /// order, satellite handles the resulting X events in order, and its own Wayland requests go
+    /// out over a single connection in order - so once the marker shows up, an earlier
+    /// `_NET_WM_MOVERESIZE` has been handled and any move it caused is already visible.
+    ///
+    /// Timing out here is a test synchronization failure, never a passing "not forwarded" result.
+    #[track_caller]
+    fn sync_barrier(&mut self, connection: &mut Connection, setup: &MoveSetup) {
+        let marker = format!(
+            "xwls-barrier-{}",
+            BARRIER_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        // UTF8_STRING + Replace with a fresh value every time: this is the type satellite reads
+        // _NET_WM_NAME as, and deleting the property would take an unrelated code path instead.
+        connection.set_property(
+            setup.control,
+            connection.atoms.utf8_string,
+            connection.atoms.net_wm_name,
+            marker.as_bytes(),
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            self.testwl.dispatch();
+            let title = self
+                .testwl
+                .get_surface_data(setup.control_surface)
+                .expect("control window has no surface")
+                .toplevel()
+                .title
+                .clone();
+            if title.as_deref() == Some(marker.as_str()) {
+                return;
+            }
+
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for barrier {marker} (last title: {title:?}): \
+                 test synchronization failed, this is not a negative result"
+            );
+
+            let mut fds = [self.pollfd.clone()];
+            poll(&mut fds, Some(&timespec_from_millis(20))).expect("poll failed");
+            self.pollfd.clear_revents();
+        }
+    }
+
+    /// Move requests recorded for a surface, taken from testwl's server lifetime ledger so a
+    /// request stays visible after its surface is destroyed.
+    #[track_caller]
+    fn moves_for(&self, surface: testwl::SurfaceId) -> Vec<testwl::MoveRequest> {
+        self.testwl
+            .move_requests()
+            .iter()
+            .filter(|request| request.surface == surface)
+            .cloned()
+            .collect()
+    }
+
+    /// Every move request testwl has seen.
+    #[track_caller]
+    fn all_moves(&self) -> &[testwl::MoveRequest] {
+        self.testwl.move_requests()
+    }
+
+    #[track_caller]
+    fn assert_no_moves(&self) {
+        let moves = self.all_moves();
+        assert!(moves.is_empty(), "unexpected move requests: {moves:?}");
+    }
+}
 
 #[test]
 fn client_init_move() {
@@ -2409,4 +2634,303 @@ fn client_init_resize() {
         "Got wrong resizing edge: {:?}",
         data.resizing
     );
+}
+
+// Chromium/Electron drop their own X11 pointer grab before asking the window manager
+// to move the window, and then send _NET_WM_MOVERESIZE with button 0. These cover the narrow
+// compatibility path for that: button 0 + Move only, and only with a left press we delivered
+// ourselves for that exact window.
+//
+// The fake compositor here does not run niri's grab validation, so these check what satellite
+// forwards, not that a real drag would start.
+
+#[test]
+fn move_button0_after_real_press() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let setup = f.setup_move_test(&mut connection);
+
+    f.enter_target(&setup);
+    f.press_left(&mut connection, &setup, 100);
+
+    connection.send_moveresize(setup.window, MoveResizeDirection::Move, 0);
+    f.sync_barrier(&mut connection, &setup);
+
+    let seat = f.testwl.seat().clone();
+    let requests = f.moves_for(setup.surface);
+    assert_eq!(requests.len(), 1, "expected exactly one move: {requests:?}");
+    assert_eq!(requests[0].serial, 100, "wrong serial: {requests:?}");
+    assert_eq!(requests[0].seat, seat, "wrong seat: {requests:?}");
+    assert!(
+        f.moves_for(setup.control_surface).is_empty(),
+        "the control window should not have moved"
+    );
+}
+
+#[test]
+fn move_button0_without_press() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let setup = f.setup_move_test(&mut connection);
+
+    // Hovering is not pressing.
+    f.enter_target(&setup);
+
+    connection.send_moveresize(setup.window, MoveResizeDirection::Move, 0);
+    f.sync_barrier(&mut connection, &setup);
+
+    f.assert_no_moves();
+}
+
+#[test]
+fn move_button0_after_right_press_only() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let setup = f.setup_move_test(&mut connection);
+
+    f.enter_target(&setup);
+    f.pointer_button(
+        &mut connection,
+        &setup,
+        BTN_RIGHT,
+        X_DETAIL_RIGHT,
+        true,
+        100,
+    );
+
+    connection.send_moveresize(setup.window, MoveResizeDirection::Move, 0);
+    f.sync_barrier(&mut connection, &setup);
+
+    f.assert_no_moves();
+}
+
+#[test]
+fn move_button0_after_left_release_with_right_held() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let setup = f.setup_move_test(&mut connection);
+
+    f.enter_target(&setup);
+    f.press_left(&mut connection, &setup, 100);
+    f.pointer_button(
+        &mut connection,
+        &setup,
+        BTN_RIGHT,
+        X_DETAIL_RIGHT,
+        true,
+        101,
+    );
+    // The left release is what ends the candidate, even though the right button is still held.
+    f.release_left(&mut connection, &setup, 102);
+
+    connection.send_moveresize(setup.window, MoveResizeDirection::Move, 0);
+    f.sync_barrier(&mut connection, &setup);
+
+    f.assert_no_moves();
+}
+
+#[test]
+fn move_button0_is_consumed_once() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let setup = f.setup_move_test(&mut connection);
+
+    f.enter_target(&setup);
+    f.press_left(&mut connection, &setup, 100);
+
+    connection.send_moveresize(setup.window, MoveResizeDirection::Move, 0);
+    connection.send_moveresize(setup.window, MoveResizeDirection::Move, 0);
+    f.sync_barrier(&mut connection, &setup);
+
+    let requests = f.moves_for(setup.surface);
+    assert_eq!(
+        requests.len(),
+        1,
+        "the candidate should only be usable once: {requests:?}"
+    );
+    assert_eq!(requests[0].serial, 100);
+}
+
+#[test]
+fn move_button0_works_again_after_a_new_press() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let setup = f.setup_move_test(&mut connection);
+
+    f.enter_target(&setup);
+    f.press_left(&mut connection, &setup, 100);
+    connection.send_moveresize(setup.window, MoveResizeDirection::Move, 0);
+    f.sync_barrier(&mut connection, &setup);
+    assert_eq!(f.moves_for(setup.surface).len(), 1);
+
+    f.release_left(&mut connection, &setup, 101);
+    f.press_left(&mut connection, &setup, 200);
+    connection.send_moveresize(setup.window, MoveResizeDirection::Move, 0);
+    f.sync_barrier(&mut connection, &setup);
+
+    let requests = f.moves_for(setup.surface);
+    assert_eq!(requests.len(), 2, "a new press should work: {requests:?}");
+    assert_eq!(requests[1].serial, 200, "wrong serial: {requests:?}");
+}
+
+#[test]
+fn move_button0_does_not_borrow_another_windows_press() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let setup = f.setup_move_test(&mut connection);
+
+    // Press on the window we are going to drag...
+    f.enter_target(&setup);
+    f.press_left(&mut connection, &setup, 100);
+
+    // ...but ask for the other one to be moved.
+    connection.send_moveresize(setup.control, MoveResizeDirection::Move, 0);
+    f.sync_barrier(&mut connection, &setup);
+
+    f.assert_no_moves();
+}
+
+#[test]
+fn move_button0_after_unmap() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let setup = f.setup_move_test(&mut connection);
+
+    f.enter_target(&setup);
+    f.press_left(&mut connection, &setup, 100);
+
+    connection.unmap_window(setup.window);
+    f.wait_and_dispatch();
+
+    connection.send_moveresize(setup.window, MoveResizeDirection::Move, 0);
+    f.sync_barrier(&mut connection, &setup);
+
+    f.assert_no_moves();
+}
+
+#[test]
+fn move_button0_after_unmap_remap() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let setup = f.setup_move_test(&mut connection);
+
+    f.enter_target(&setup);
+    f.press_left(&mut connection, &setup, 100);
+
+    connection.unmap_window(setup.window);
+    f.wait_and_dispatch();
+    // The same XID comes back with a new surface (and entity) behind it.
+    let remapped = f.map_as_toplevel(&mut connection, setup.window);
+
+    connection.send_moveresize(setup.window, MoveResizeDirection::Move, 0);
+    f.sync_barrier(&mut connection, &setup);
+
+    f.assert_no_moves();
+    assert!(
+        f.moves_for(remapped).is_empty(),
+        "remapped window should not have inherited the press: {:?}",
+        f.moves_for(remapped)
+    );
+}
+
+#[test]
+fn move_button0_only_supports_the_move_direction() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let setup = f.setup_move_test(&mut connection);
+
+    f.enter_target(&setup);
+    f.press_left(&mut connection, &setup, 100);
+
+    for direction in [
+        MoveResizeDirection::SizeBottomRight,
+        MoveResizeDirection::SizeTop,
+        MoveResizeDirection::SizeKeyboard,
+        MoveResizeDirection::MoveKeyboard,
+        MoveResizeDirection::Cancel,
+    ] {
+        connection.send_moveresize(setup.window, direction, 0);
+    }
+    // Other buttons stay unsupported too.
+    connection.send_moveresize(setup.window, MoveResizeDirection::Move, 2);
+    f.sync_barrier(&mut connection, &setup);
+
+    f.assert_no_moves();
+    assert!(
+        f.testwl
+            .get_surface_data(setup.surface)
+            .unwrap()
+            .resizing
+            .is_none(),
+        "button 0 must not start a resize"
+    );
+
+    // None of the above consumed the candidate.
+    connection.send_moveresize(setup.window, MoveResizeDirection::Move, 0);
+    f.sync_barrier(&mut connection, &setup);
+    assert_eq!(f.moves_for(setup.surface).len(), 1);
+}
+
+/// The move evidence must not disappear with the surface it was sent for, otherwise every
+/// "no move happened" assertion after an unmap would be vacuous.
+#[test]
+fn move_button0_record_survives_surface_destruction() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let setup = f.setup_move_test(&mut connection);
+
+    f.enter_target(&setup);
+    f.press_left(&mut connection, &setup, 100);
+    connection.send_moveresize(setup.window, MoveResizeDirection::Move, 0);
+    f.sync_barrier(&mut connection, &setup);
+    assert_eq!(f.moves_for(setup.surface).len(), 1);
+
+    connection.unmap_window(setup.window);
+    f.wait_and_dispatch();
+    assert!(
+        f.testwl.get_surface_data(setup.surface).is_none(),
+        "expected the surface to be gone after unmapping"
+    );
+
+    let moves = f.all_moves();
+    assert_eq!(moves.len(), 1, "the earlier move was lost: {moves:?}");
+    assert_eq!(moves[0].surface, setup.surface);
+    assert_eq!(moves[0].serial, 100);
+    assert_eq!(moves[0].seat, *f.testwl.seat());
+}
+
+#[test]
+fn move_button1_does_not_need_a_candidate() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let setup = f.setup_move_test(&mut connection);
+
+    // Press and release: the button 0 path would refuse this, button 1 keeps using the last
+    // click serial as it always has.
+    f.enter_target(&setup);
+    f.press_left(&mut connection, &setup, 100);
+    f.release_left(&mut connection, &setup, 101);
+
+    connection.send_moveresize(setup.window, MoveResizeDirection::Move, 1);
+    f.sync_barrier(&mut connection, &setup);
+
+    let requests = f.moves_for(setup.surface);
+    assert_eq!(requests.len(), 1, "legacy move regressed: {requests:?}");
+    assert_eq!(requests[0].serial, 100);
+}
+
+#[test]
+fn plain_click_is_delivered_and_does_not_move() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let setup = f.setup_move_test(&mut connection);
+
+    // Both halves of an ordinary click still reach the X client (the helpers assert this), and
+    // no move is forwarded without a request.
+    f.enter_target(&setup);
+    f.press_left(&mut connection, &setup, 100);
+    f.release_left(&mut connection, &setup, 101);
+    f.sync_barrier(&mut connection, &setup);
+
+    f.assert_no_moves();
 }
