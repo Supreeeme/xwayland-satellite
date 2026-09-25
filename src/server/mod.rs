@@ -99,9 +99,13 @@ where
     u32::from(wenum).try_into().unwrap()
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct WindowAttributes {
+    /// `WM_HINTS.input`. Windows without `WM_HINTS` are assumed to accept input; ICCCM 4.1.2.4
+    /// leaves window managers "free to assume convenient values for all fields of the WM_HINTS
+    /// property if a window is mapped without one".
     accepts_input: bool,
+    /// Whether `WM_TAKE_FOCUS` is in `WM_PROTOCOLS`.
     has_take_focus: bool,
     role: WindowRole,
     override_redirect: bool,
@@ -114,10 +118,51 @@ struct WindowAttributes {
     transient_for: Option<x::Window>,
 }
 
-impl WindowAttributes {
-    fn require_wm_focus(&self) -> bool {
-        !self.override_redirect && (self.has_take_focus || self.accepts_input)
+impl Default for WindowAttributes {
+    fn default() -> Self {
+        Self {
+            accepts_input: true,
+            has_take_focus: false,
+            role: WindowRole::default(),
+            override_redirect: false,
+            dims: WindowDims::default(),
+            size_hints: None,
+            title: None,
+            class: None,
+            group: None,
+            decorations: None,
+            transient_for: None,
+        }
     }
+}
+
+impl WindowAttributes {
+    /// The window's ICCCM input model (section 4.1.7), from `WM_HINTS.input` and `WM_TAKE_FOCUS`.
+    fn focus_action(&self) -> FocusAction {
+        match (self.accepts_input, self.has_take_focus) {
+            (false, false) => FocusAction::None,
+            (true, false) => FocusAction::Direct,
+            (true, true) => FocusAction::DirectAndOffer,
+            (false, true) => FocusAction::Offer,
+        }
+    }
+}
+
+/// How a window is given keyboard focus, one per ICCCM 4.1.7 input model. Passive and Locally
+/// Active windows (`input` = True) "require window manager assistance in acquiring the input
+/// focus"; No Input and Globally Active windows (`input` = False) request "that the window manager
+/// not set the input focus to their top-level window". Windows advertising `WM_TAKE_FOCUS` are
+/// additionally offered the focus and may take it, or decline it, themselves.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum FocusAction {
+    /// No Input: the window never wants keyboard focus.
+    None,
+    /// Passive: the window manager sets focus directly.
+    Direct,
+    /// Locally Active: the window manager sets focus directly and also sends `WM_TAKE_FOCUS`.
+    DirectAndOffer,
+    /// Globally Active: the window manager only sends `WM_TAKE_FOCUS`.
+    Offer,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Copy, Clone)]
@@ -399,7 +444,7 @@ struct FocusData {
     window: x::Window,
     output_name: Option<String>,
     is_popup: bool,
-    has_take_focus: bool,
+    action: FocusAction,
 }
 
 #[derive(Copy, Clone, Default)]
@@ -423,6 +468,9 @@ impl<S: X11Selection> XConnection for NoConnection<S> {
     type X11Selection = S;
     fn focus_window(&mut self, _: x::Window, _: Option<String>) {
         debug!("could not focus window without XWayland initialized");
+    }
+    fn activate_window(&mut self, _: x::Window, _: Option<String>) {
+        debug!("could not activate window without XWayland initialized");
     }
     fn send_take_focus(&mut self, _: x::Window) {
         debug!("could not send take focus without XWayland initialized");
@@ -474,6 +522,8 @@ pub struct InnerServerState<S: X11Selection> {
     to_focus: Option<FocusData>,
     unfocus: bool,
     last_focused_toplevel: Option<x::Window>,
+    /// Focus is to be restored to the last focused toplevel on the next run.
+    restore_focus_pending: bool,
     last_hovered: Option<x::Window>,
 
     xdg_wm_base: XdgWmBase,
@@ -576,6 +626,7 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             to_focus: None,
             unfocus: false,
             last_focused_toplevel: None,
+            restore_focus_pending: false,
             last_hovered: None,
             xdg_wm_base,
             compositor,
@@ -743,24 +794,61 @@ impl<C: XConnection> ServerState<C> {
         }
 
         {
+            // A keyboard leave received since the restoration was queued is the newer state:
+            // the compositor moved focus away, so nothing of ours is to be focused.
+            let restore_focus = std::mem::take(&mut self.restore_focus_pending);
+            if restore_focus && self.to_focus.is_none() && !self.unfocus {
+                match self
+                    .last_focused_toplevel
+                    .and_then(|window| Some((window, self.mapped_focus_action(window)?)))
+                {
+                    Some((window, action)) => {
+                        self.to_focus = Some(FocusData {
+                            window,
+                            output_name: None,
+                            is_popup: false,
+                            action,
+                        })
+                    }
+                    None => self.unfocus = true,
+                }
+            }
             if let Some(FocusData {
                 window,
                 output_name,
                 is_popup,
-                has_take_focus,
+                action,
             }) = self.to_focus.take()
             {
                 debug!(
-                    "focusing (take_focus={has_take_focus:?}) {} {window:?}",
+                    "focusing {} {window:?} ({action:?})",
                     if is_popup { "popup" } else { "window" }
                 );
-                if has_take_focus {
-                    self.connection.send_take_focus(window);
-                } else {
-                    self.connection.focus_window(window, output_name);
-                    if !is_popup {
-                        self.last_focused_toplevel = Some(window);
+                match action {
+                    FocusAction::Direct | FocusAction::DirectAndOffer => {
+                        self.connection.focus_window(window, output_name);
                     }
+                    // The window takes focus itself once offered; leave X focus undisturbed
+                    // until then, but it is already the active toplevel.
+                    FocusAction::Offer if !is_popup => {
+                        self.connection.activate_window(window, output_name);
+                    }
+                    // The window never takes keyboard input. X focus must not stay on the
+                    // previously focused window either, or keys meant for this one would keep
+                    // going there, so unset it. It does not become the focus restore target.
+                    FocusAction::None if !is_popup => {
+                        self.connection.focus_window(x::WINDOW_NONE, None);
+                    }
+                    FocusAction::Offer | FocusAction::None => {}
+                }
+                // Focus is set before the offer is sent: send_take_focus waits for the
+                // SendEvent reply, so a client responding to the offer by focusing one of its
+                // subwindows would otherwise be overridden by our SetInputFocus.
+                if matches!(action, FocusAction::DirectAndOffer | FocusAction::Offer) {
+                    self.connection.send_take_focus(window);
+                }
+                if !is_popup && action != FocusAction::None {
+                    self.last_focused_toplevel = Some(window);
                 }
             } else if self.unfocus {
                 self.connection.focus_window(x::WINDOW_NONE, None);
@@ -1191,6 +1279,23 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     /// If a toplevel was previously focused, returns it; otherwise returns `WINDOW_NONE`.
     pub fn focus_restore_target(&self) -> x::Window {
         self.last_focused_toplevel.unwrap_or(x::WINDOW_NONE)
+    }
+
+    /// Restores focus to the last focused toplevel (or unsets it if there is none), the way
+    /// it would be focused on activation: according to its input model. Applied on the next
+    /// run, and resolved only then, since the toplevel may be gone by that time.
+    pub fn restore_focus(&mut self) {
+        self.restore_focus_pending = true;
+    }
+
+    /// The window's input model, if it is a mapped window we know.
+    fn mapped_focus_action(&self, window: x::Window) -> Option<FocusAction> {
+        self.windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.get::<&WindowData>(id).ok())
+            .filter(|data| data.mapped)
+            .map(|data| data.attrs.focus_action())
     }
 
     pub fn set_fullscreen(&mut self, window: x::Window, state: super::xstate::SetState) {
