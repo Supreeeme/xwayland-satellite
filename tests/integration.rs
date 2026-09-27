@@ -623,6 +623,17 @@ impl Connection {
         .unwrap();
     }
 
+    #[track_caller]
+    fn send_root_unmap_notify(&self) {
+        self.send_and_check_request(&x::SendEvent {
+            propagate: false,
+            destination: x::SendEventDest::Window(self.root),
+            event_mask: x::EventMask::SUBSTRUCTURE_NOTIFY | x::EventMask::SUBSTRUCTURE_REDIRECT,
+            event: &x::UnmapNotifyEvent::new(self.root, self.root, false),
+        })
+        .unwrap();
+    }
+
     fn get_xsettings(&self) -> Settings {
         let owner = self
             .get_reply(&x::GetSelectionOwner {
@@ -803,6 +814,38 @@ fn toplevel_flow() {
     f.wait_and_dispatch();
 
     assert!(!toplevel.is_alive());
+}
+
+#[test]
+fn root_unmap_notify_does_not_disable_new_windows() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let existing_window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let existing_surface = f.map_as_toplevel(&mut connection, existing_window);
+
+    connection.send_root_unmap_notify();
+
+    // Updating an existing window gives us an observable ordering barrier: XState must process the
+    // root UnmapNotify before this PropertyNotify reaches the Wayland server.
+    connection.set_property(
+        existing_window,
+        x::ATOM_STRING,
+        x::ATOM_WM_NAME,
+        b"still managed",
+    );
+    f.wait_and_dispatch();
+    assert_eq!(
+        f.testwl
+            .get_surface_data(existing_surface)
+            .unwrap()
+            .toplevel()
+            .title,
+        Some("still managed".into())
+    );
+
+    let new_window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut connection, new_window);
 }
 
 #[test]
