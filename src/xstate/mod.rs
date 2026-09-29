@@ -1,3 +1,4 @@
+mod cursor_theme;
 mod settings;
 use settings::Settings;
 mod selection;
@@ -111,6 +112,17 @@ pub struct XState {
     selection_state: SelectionState,
     settings: Settings,
     max_req_bytes: usize,
+    /// Cursor names already looked up, by atom.
+    cursor_names: HashMap<u32, String>,
+    /// Name of the cursor displayed at startup, handed to the server on the
+    /// first event pass (XFixes only reports later changes).
+    initial_cursor_name: Option<Option<String>>,
+    /// Theme cursor images by hash. Reading the themes takes a noticeable
+    /// moment, so it is built on a background thread started at startup;
+    /// unnamed cursors keep their image until it is ready.
+    cursor_image_index: std::sync::Arc<std::sync::OnceLock<cursor_theme::CursorImageIndex>>,
+    /// Names recognized from the images of unnamed cursors, by XFixes serial.
+    recognized_cursors: HashMap<u32, Option<&'static str>>,
 }
 
 impl XState {
@@ -163,10 +175,10 @@ impl XState {
             })
             .unwrap();
 
-        // negotiate xfixes version
+        // negotiate xfixes version (2 for cursor names)
         let reply = connection
             .wait_for_reply(connection.send_request(&xcb::xfixes::QueryVersion {
-                client_major_version: 1,
+                client_major_version: 2,
                 client_minor_version: 0,
             }))
             .unwrap();
@@ -202,6 +214,7 @@ impl XState {
                     | SelectionEventMask::SELECTION_CLIENT_CLOSE,
             })
             .unwrap();
+        let mut initial_cursor_name = None;
         {
             // Setup default cursor theme
             let ctx = CursorContext::new(&connection, screen).unwrap();
@@ -212,6 +225,26 @@ impl XState {
                     value_list: &[x::Cw::Cursor(left_ptr)],
                 })
                 .unwrap();
+            // xcb-cursor does not name what it loads (libXcursor does); name it
+            // so it can be forwarded as a cursor shape like any themed cursor.
+            if reply.major_version() >= 2 {
+                connection.send_request(&xcb::xfixes::SetCursorName {
+                    cursor: left_ptr,
+                    name: b"left_ptr",
+                });
+                // Report the name of the displayed cursor whenever it changes.
+                connection
+                    .send_and_check_request(&xcb::xfixes::SelectCursorInput {
+                        window: root,
+                        event_mask: xcb::xfixes::CursorNotifyMask::DISPLAY_CURSOR,
+                    })
+                    .unwrap();
+                initial_cursor_name = connection
+                    .wait_for_reply(connection.send_request(&xcb::xfixes::GetCursorImageAndName {}))
+                    .ok()
+                    .map(|reply| reply.name().to_utf8().into_owned())
+                    .map(|name| (!name.is_empty()).then_some(name));
+            }
         }
 
         let wm_window = connection.generate_id();
@@ -231,7 +264,12 @@ impl XState {
             selection_state,
             settings,
             max_req_bytes,
+            cursor_names: HashMap::new(),
+            initial_cursor_name,
+            cursor_image_index: Default::default(),
+            recognized_cursors: HashMap::new(),
         };
+        r.start_cursor_image_index();
         r.create_ewmh_window();
         r.set_xsettings_owner();
         r
@@ -342,6 +380,11 @@ impl XState {
         }
 
         let mut handled = false;
+
+        if let Some(name) = self.initial_cursor_name.take() {
+            server_state.set_x_cursor_name(name.as_deref());
+        }
+
         let mut ignored_windows = Vec::new();
         while let Some(event) = self.connection.poll_for_event().unwrap() {
             handled = true;
@@ -508,6 +551,13 @@ impl XState {
                     self.handle_client_message(e, server_state);
                 }
                 xcb::Event::X(x::Event::MappingNotify(_)) => {}
+                xcb::Event::XFixes(xcb::xfixes::Event::CursorNotify(e)) => {
+                    let name = match self.cursor_name(e.name()) {
+                        Some(name) => Some(name),
+                        None => self.recognize_cursor(e.cursor_serial()).map(str::to_owned),
+                    };
+                    server_state.set_x_cursor_name(name.as_deref());
+                }
                 xcb::Event::RandR(xcb::randr::Event::Notify(e))
                     if matches!(e.u(), xcb::randr::NotifyData::Rc(_)) =>
                 {
@@ -521,6 +571,99 @@ impl XState {
             server_state.run();
         }
         handled
+    }
+
+    /// The XFixes name of a cursor, `None` for an unnamed one.
+    fn cursor_name(&mut self, atom: x::Atom) -> Option<String> {
+        if atom == x::ATOM_NONE {
+            return None;
+        }
+        let connection = &self.connection;
+        Some(
+            self.cursor_names
+                .entry(atom.resource_id())
+                .or_insert_with(|| get_atom_name(connection, atom))
+                .clone(),
+        )
+    }
+
+    /// Name an unnamed cursor by matching its image against the cursor themes
+    /// (see `cursor_theme`).
+    fn recognize_cursor(&mut self, serial: u32) -> Option<&'static str> {
+        /// Bound on remembered cursors; animated cursors create new ones.
+        const MAX_RECOGNIZED: usize = 4096;
+
+        if let Some(name) = self.recognized_cursors.get(&serial) {
+            return *name;
+        }
+        // Not ready yet: keep the image, and try again when this cursor is
+        // displayed next.
+        let index = self.cursor_image_index.clone();
+        let index = index.get()?;
+        let reply = self
+            .connection
+            .wait_for_reply(
+                self.connection
+                    .send_request(&xcb::xfixes::GetCursorImage {}),
+            )
+            .ok()?;
+        // The cursor may have changed again since the event was sent; a later
+        // event covers the new one.
+        if reply.cursor_serial() != serial {
+            return None;
+        }
+        let hash = cursor_theme::image_hash(
+            reply.width().into(),
+            reply.height().into(),
+            reply.cursor_image(),
+        );
+        let name = index.lookup(hash);
+        debug!("unnamed cursor {serial} recognized as {name:?}");
+        if self.recognized_cursors.len() >= MAX_RECOGNIZED {
+            self.recognized_cursors.clear();
+        }
+        self.recognized_cursors.insert(serial, name);
+        name
+    }
+
+    fn start_cursor_image_index(&self) {
+        let themes = cursor_theme::candidate_themes(&self.resource_manager_string());
+        let index = self.cursor_image_index.clone();
+        let spawned = std::thread::Builder::new()
+            .name("cursor-theme-index".into())
+            .spawn(move || {
+                let search_path = cursor_theme::search_path();
+                let built = cursor_theme::CursorImageIndex::build(
+                    &themes,
+                    crate::server::cursor_shape::known_x_cursor_names(),
+                    &search_path,
+                    |a, b| {
+                        let shape = crate::server::cursor_shape::shape_for_x_cursor_name;
+                        shape(a) == shape(b)
+                    },
+                );
+                let _ = index.set(built);
+            });
+        if let Err(err) = spawned {
+            warn!("could not start the cursor theme index: {err}");
+        }
+    }
+
+    /// The root window's RESOURCE_MANAGER string (empty if unset).
+    fn resource_manager_string(&self) -> String {
+        self.connection
+            .wait_for_reply(self.connection.send_request(&x::GetProperty {
+                delete: false,
+                window: self.root,
+                property: self.atoms.resource_manager,
+                r#type: x::ATOM_STRING,
+                long_offset: 0,
+                long_length: u32::MAX,
+            }))
+            .ok()
+            .filter(|reply| reply.r#type() == x::ATOM_STRING)
+            .map(|reply| String::from_utf8_lossy(reply.value::<u8>()).into_owned())
+            .unwrap_or_default()
     }
 
     fn handle_client_message(
