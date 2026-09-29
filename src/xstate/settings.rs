@@ -5,19 +5,30 @@ use xcb::x;
 
 impl XState {
     pub(crate) fn set_xsettings_owner(&self) {
-        self.connection
+        // The owner also disappears when Xwayland itself shuts down; the
+        // connection is gone then, and there is nothing to reacquire.
+        if let Err(e) = self
+            .connection
             .send_and_check_request(&x::SetSelectionOwner {
                 owner: self.settings.window,
                 selection: self.atoms.xsettings,
                 time: x::CURRENT_TIME,
             })
-            .unwrap();
-        let reply = self
-            .connection
-            .wait_for_reply(self.connection.send_request(&x::GetSelectionOwner {
+        {
+            warn!("Could not acquire XSETTINGS selection: {e:?}");
+            return;
+        }
+        let reply = match self.connection.wait_for_reply(self.connection.send_request(
+            &x::GetSelectionOwner {
                 selection: self.atoms.xsettings,
-            }))
-            .unwrap();
+            },
+        )) {
+            Ok(reply) => reply,
+            Err(e) => {
+                warn!("Could not query XSETTINGS selection owner: {e:?}");
+                return;
+            }
+        };
 
         if reply.owner() != self.settings.window {
             warn!(

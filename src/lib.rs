@@ -9,7 +9,10 @@ use server::selection::{Clipboard, Primary};
 use smithay_client_toolkit::data_device_manager::WritePipe;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::os::unix::{net::UnixStream, process::ExitStatusExt};
+use std::os::unix::{
+    net::UnixStream,
+    process::{CommandExt, ExitStatusExt},
+};
 use std::process::{Command, ExitStatus, Stdio};
 use wayland_server::{Display, ListeningSocket};
 use xcb::x;
@@ -54,6 +57,25 @@ pub trait RunData {
     }
 }
 
+/// Guards the process environment while satellite calls into C libraries that
+/// read it with `getenv` (libwayland when creating its display and connection,
+/// xcb-util-cursor when loading the cursor theme).
+///
+/// Rust's own `std::env` functions are serialized by the standard library, but
+/// `getenv` in C is not, and it races with a concurrent `setenv`. When satellite
+/// runs inside another process (a compositor embedding it on a thread), that
+/// process should hold `ENV_LOCK.write()` whenever it changes its environment;
+/// satellite holds a read guard around each of those C calls. None of them
+/// wait on the embedding process, so a writer is only ever briefly delayed.
+pub static ENV_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// A read guard on [`ENV_LOCK`] (a poisoned lock is still usable here).
+pub(crate) fn env_read_guard() -> std::sync::RwLockReadGuard<'static, ()> {
+    ENV_LOCK
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 pub const fn timespec_from_millis(millis: u64) -> Timespec {
     let d = std::time::Duration::from_millis(millis);
     Timespec {
@@ -74,7 +96,10 @@ pub fn main(mut data: impl RunData) -> Option<()> {
     info!("Starting xwayland-satellite version {}", version());
 
     let socket = ListeningSocket::bind_auto("xwls", 1..=128).unwrap();
-    let mut display = Display::new().unwrap();
+    let mut display = {
+        let _env = env_read_guard();
+        Display::new().unwrap()
+    };
     let dh = display.handle();
     data.created_server();
 
@@ -92,6 +117,18 @@ pub fn main(mut data: impl RunData) -> Option<()> {
     let fds = data.listenfds();
     for fd in &fds {
         xwayland.args(["-listenfd", &fd.as_raw_fd().to_string()]);
+    }
+    // Let Xwayland inherit the listening sockets. This is done in the child,
+    // after fork, so an embedding process never has them inheritable by the
+    // other programs it spawns.
+    let listen_raw: Vec<i32> = fds.iter().map(|fd| fd.as_raw_fd()).collect();
+    unsafe {
+        xwayland.pre_exec(move || {
+            for fd in &listen_raw {
+                rustix::io::fcntl_setfd(BorrowedFd::borrow_raw(*fd), rustix::io::FdFlags::empty())?;
+            }
+            Ok(())
+        });
     }
 
     let mut xwayland = xwayland
@@ -227,6 +264,10 @@ pub fn main(mut data: impl RunData) -> Option<()> {
 
     loop {
         xstate.handle_events(&mut server_state);
+        if xstate.connection_lost() {
+            info!("Connection to Xwayland lost, stopping");
+            return None;
+        }
 
         display.dispatch_clients(&mut *server_state).unwrap();
         server_state.run();
