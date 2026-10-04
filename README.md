@@ -4,6 +4,10 @@ This is particularly useful for compositors that (understandably) do not want to
 
 Found a bug? [Open a bug report.](https://github.com/Supreeeme/xwayland-satellite/issues/new?template=bug_report.yaml)
 
+## Motivation
+
+Supporting rootless XWayland involves writing an X11 window manager and dealing with all those quirks. X11's windowing model also does not cleanly map onto Wayland (i.e. there is no absolute positioning support in Wayland) so the compositor would have to do things differently specifically for X11 windows. Also, X11 is just poorly documented in my experience.
+
 ## Building
 
 xwayland-satellite has the following dependencies:
