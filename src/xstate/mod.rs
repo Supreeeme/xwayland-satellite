@@ -638,9 +638,10 @@ impl XState {
             server_state.set_size_hints(window, hints);
         }
 
-        if let Some(protocols) = self.get_protocols(window)? {
-            server_state.set_take_focus(window, protocols.contains(&self.atoms.wm_take_focus));
-        }
+        let take_focus = self
+            .get_protocols(window)?
+            .is_some_and(|protocols| protocols.contains(&self.atoms.wm_take_focus));
+        server_state.set_take_focus(window, take_focus);
 
         let motif_wm_hints = self.get_motif_wm_hints(window)?;
         if let Some(decorations) = motif_wm_hints.as_ref().and_then(|m| m.decorations) {
@@ -835,6 +836,12 @@ impl XState {
         server_state: &mut super::RealServerState,
     ) {
         if self.handle_selection_property_change(&event) {
+            return;
+        }
+        if event.atom() == self.atoms.wm_protocols {
+            let take_focus = unwrap_or_skip_bad_window_ret!(self.get_protocols(event.window()))
+                .is_some_and(|protocols| protocols.contains(&self.atoms.wm_take_focus));
+            server_state.set_take_focus(event.window(), take_focus);
             return;
         }
         if event.state() == x::Property::Delete {
