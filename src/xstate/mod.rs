@@ -574,35 +574,20 @@ impl XState {
                     return;
                 };
                 let button = data[3];
-                // XXX: This can technically be driven by keyboard events and other mouse buttons as well,
-                // but I haven't found an application that does this yet. We'll cross that bridge when we get to it.
-                if button != 1 {
-                    warn!(
-                        "Attempted move/resize of {:?} with non left click button ({button})",
-                        e.window()
-                    );
-                    return;
-                }
 
-                match direction {
-                    MoveResizeDirection::Move => {
+                match moveresize_action(button, direction) {
+                    MoveResizeAction::Move => {
                         server_state.move_window(e.window());
                     }
-                    MoveResizeDirection::SizeTopLeft
-                    | MoveResizeDirection::SizeTop
-                    | MoveResizeDirection::SizeTopRight
-                    | MoveResizeDirection::SizeRight
-                    | MoveResizeDirection::SizeBottomRight
-                    | MoveResizeDirection::SizeBottom
-                    | MoveResizeDirection::SizeBottomLeft
-                    | MoveResizeDirection::SizeLeft => {
+                    MoveResizeAction::MoveFromPress => {
+                        server_state.move_window_from_press(e.window());
+                    }
+                    MoveResizeAction::Resize => {
                         server_state.resize_window(e.window(), direction);
                     }
-                    MoveResizeDirection::SizeKeyboard
-                    | MoveResizeDirection::MoveKeyboard
-                    | MoveResizeDirection::Cancel => {
+                    MoveResizeAction::Unsupported => {
                         warn!(
-                            "Unimplemented window move/resize action: {direction:?} ({:?})",
+                            "Unimplemented window move/resize action: {direction:?} with button {button} ({:?})",
                             e.window()
                         );
                     }
@@ -1253,6 +1238,123 @@ pub enum WmState {
     Withdrawn = 0,
     Normal = 1,
     Iconic = 3,
+}
+
+/// What a `_NET_WM_MOVERESIZE` client message should do.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum MoveResizeAction {
+    /// Interactive move started by the left button, using the last click serial.
+    Move,
+    /// Interactive resize started by the left button.
+    Resize,
+    /// Interactive move requested with button 0, which requires an outstanding left press we
+    /// observed ourselves.
+    MoveFromPress,
+    Unsupported,
+}
+
+/// Decides how to handle a `_NET_WM_MOVERESIZE` message.
+///
+/// Button 1 keeps its existing behavior. Button 0 is only accepted for `Move`: Chromium (and so
+/// Electron) ungrabs its own X11 pointer grab - which
+/// [EWMH §4.3](https://specifications.freedesktop.org/wm/latest/ar01s04.html) makes a MUST - and
+/// sends the request with button 0, which that section allows since the button field is only a
+/// SHOULD. Keyboard driven moves/resizes, cancels and other buttons stay
+/// unimplemented.
+fn moveresize_action(button: u32, direction: MoveResizeDirection) -> MoveResizeAction {
+    match (button, direction) {
+        (1, MoveResizeDirection::Move) => MoveResizeAction::Move,
+        (1, MoveResizeDirection::SizeTopLeft)
+        | (1, MoveResizeDirection::SizeTop)
+        | (1, MoveResizeDirection::SizeTopRight)
+        | (1, MoveResizeDirection::SizeRight)
+        | (1, MoveResizeDirection::SizeBottomRight)
+        | (1, MoveResizeDirection::SizeBottom)
+        | (1, MoveResizeDirection::SizeBottomLeft)
+        | (1, MoveResizeDirection::SizeLeft) => MoveResizeAction::Resize,
+        (0, MoveResizeDirection::Move) => MoveResizeAction::MoveFromPress,
+        _ => MoveResizeAction::Unsupported,
+    }
+}
+
+#[cfg(test)]
+mod moveresize_action_tests {
+    use super::{MoveResizeAction, MoveResizeDirection, moveresize_action};
+
+    const RESIZE_DIRECTIONS: [MoveResizeDirection; 8] = [
+        MoveResizeDirection::SizeTopLeft,
+        MoveResizeDirection::SizeTop,
+        MoveResizeDirection::SizeTopRight,
+        MoveResizeDirection::SizeRight,
+        MoveResizeDirection::SizeBottomRight,
+        MoveResizeDirection::SizeBottom,
+        MoveResizeDirection::SizeBottomLeft,
+        MoveResizeDirection::SizeLeft,
+    ];
+
+    #[test]
+    fn button1_keeps_existing_behavior() {
+        assert_eq!(
+            moveresize_action(1, MoveResizeDirection::Move),
+            MoveResizeAction::Move
+        );
+        for direction in RESIZE_DIRECTIONS {
+            assert_eq!(
+                moveresize_action(1, direction),
+                MoveResizeAction::Resize,
+                "{direction:?}"
+            );
+        }
+        for direction in [
+            MoveResizeDirection::SizeKeyboard,
+            MoveResizeDirection::MoveKeyboard,
+            MoveResizeDirection::Cancel,
+        ] {
+            assert_eq!(
+                moveresize_action(1, direction),
+                MoveResizeAction::Unsupported,
+                "{direction:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn button0_only_supports_move() {
+        assert_eq!(
+            moveresize_action(0, MoveResizeDirection::Move),
+            MoveResizeAction::MoveFromPress
+        );
+
+        for direction in RESIZE_DIRECTIONS.into_iter().chain([
+            MoveResizeDirection::SizeKeyboard,
+            MoveResizeDirection::MoveKeyboard,
+            MoveResizeDirection::Cancel,
+        ]) {
+            assert_eq!(
+                moveresize_action(0, direction),
+                MoveResizeAction::Unsupported,
+                "{direction:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_buttons_are_unsupported() {
+        for button in [2, 3, 4, 9, u32::MAX] {
+            for direction in [
+                MoveResizeDirection::Move,
+                MoveResizeDirection::SizeBottomRight,
+                MoveResizeDirection::MoveKeyboard,
+                MoveResizeDirection::Cancel,
+            ] {
+                assert_eq!(
+                    moveresize_action(button, direction),
+                    MoveResizeAction::Unsupported,
+                    "button {button} {direction:?}"
+                );
+            }
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, num_enum::TryFromPrimitive, num_enum::IntoPrimitive)]

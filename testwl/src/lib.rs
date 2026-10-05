@@ -105,6 +105,18 @@ pub struct Viewport {
     viewport: WpViewport,
 }
 
+/// An `xdg_toplevel.move` request as observed by this fake compositor.
+///
+/// This is test observation only: nothing here performs niri's (or any real compositor's) grab
+/// validation, so a recorded request does not mean a real move would have started.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct MoveRequest {
+    /// The surface the move was requested for, kept here so the record survives its destruction.
+    pub surface: SurfaceId,
+    pub seat: WlSeat,
+    pub serial: u32,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct SurfaceData {
     pub surface: WlSurface,
@@ -266,6 +278,9 @@ struct State {
     begin: Instant,
     last_surface_id: Option<SurfaceId>,
     created_surfaces: Vec<SurfaceId>,
+    /// Every move request received, kept for the lifetime of this server so the evidence is not
+    /// lost when a surface is destroyed.
+    move_requests: Vec<MoveRequest>,
     last_output: Option<WlOutput>,
     last_output_global: Option<GlobalId>,
     output_counter: u32,
@@ -293,6 +308,7 @@ impl Default for State {
         Self {
             surfaces: Default::default(),
             created_surfaces: Default::default(),
+            move_requests: Vec::new(),
             outputs: Default::default(),
             buffers: Default::default(),
             positioners: Default::default(),
@@ -436,6 +452,7 @@ pub struct Server {
     state: State,
     client: Option<Client>,
     decorations_global: GlobalId,
+    seat_global: Option<GlobalId>,
 }
 
 pub trait SendDataForMimeFn: FnMut(&str, &mut Server) -> bool {}
@@ -472,7 +489,7 @@ impl Server {
         dh.create_global::<State, WlSubcompositor, _>(1, ());
         dh.create_global::<State, WlShm, _>(1, ());
         dh.create_global::<State, XdgWmBase, _>(6, ());
-        dh.create_global::<State, WlSeat, _>(5, ());
+        let seat_global = dh.create_global::<State, WlSeat, _>(5, ());
         dh.create_global::<State, WlDataDeviceManager, _>(3, ());
         dh.create_global::<State, ZwpPrimarySelectionDeviceManagerV1, _>(1, ());
         dh.create_global::<State, ZwpTabletManagerV2, _>(1, ());
@@ -539,6 +556,7 @@ impl Server {
             state: State::default(),
             client: None,
             decorations_global,
+            seat_global: Some(seat_global),
         }
     }
 
@@ -661,6 +679,17 @@ impl Server {
     #[track_caller]
     pub fn pointer(&self) -> &WlPointer {
         self.state.pointer.as_ref().map(|p| &p.pointer).unwrap()
+    }
+
+    #[track_caller]
+    pub fn seat(&self) -> &WlSeat {
+        self.state.seat.as_ref().expect("No seat bound")
+    }
+
+    /// Every move request this server has received, in order, including ones whose surface has
+    /// since been destroyed.
+    pub fn move_requests(&self) -> &[MoveRequest] {
+        &self.state.move_requests
     }
 
     #[track_caller]
@@ -959,6 +988,18 @@ impl Server {
             .expect("Missing toplevel decoration")
             .0
             .configure(mode);
+        self.display.flush_clients().unwrap();
+    }
+
+    /// Withdraws the `wl_seat` global. Already bound seats keep working, exactly like a real
+    /// compositor removing the global.
+    #[track_caller]
+    pub fn remove_seat_global(&mut self) {
+        let global = self
+            .seat_global
+            .take()
+            .expect("Seat global already removed");
+        self.dh.remove_global::<State>(global);
         self.display.flush_clients().unwrap();
     }
 
@@ -1617,7 +1658,15 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                 };
                 toplevel.parent = parent;
             }
-            xdg_toplevel::Request::Move { seat: _, serial: _ } => {
+            xdg_toplevel::Request::Move { seat, serial } => {
+                let request = MoveRequest {
+                    surface: *surface_id,
+                    seat,
+                    serial,
+                };
+                // The ledger outlives the surface, so a move that was received stays visible even
+                // after the surface is destroyed.
+                state.move_requests.push(request);
                 let data = state.surfaces.get_mut(surface_id).unwrap();
                 data.moving = true;
             }
