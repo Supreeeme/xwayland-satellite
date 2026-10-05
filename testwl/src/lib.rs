@@ -908,8 +908,12 @@ impl Server {
     }
 
     pub fn enable_xdg_output_manager(&mut self) {
+        self.enable_xdg_output_manager_with_version(3);
+    }
+
+    pub fn enable_xdg_output_manager_with_version(&mut self, version: u32) {
         self.dh
-            .create_global::<State, ZxdgOutputManagerV1, _>(3, ());
+            .create_global::<State, ZxdgOutputManagerV1, _>(version, ());
         self.display.flush_clients().unwrap();
     }
 
