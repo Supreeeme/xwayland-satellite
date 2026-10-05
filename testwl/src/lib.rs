@@ -116,6 +116,8 @@ pub struct SurfaceData {
     pub viewport: Option<Viewport>,
     pub moving: bool,
     pub resizing: Option<xdg_toplevel::ResizeEdge>,
+    /// Outputs the surface has been sent wl_surface.enter for.
+    pub entered: Vec<WlOutput>,
 }
 
 impl SurfaceData {
@@ -896,8 +898,49 @@ impl Server {
     }
 
     pub fn move_surface_to_output(&mut self, surface: SurfaceId, output: &WlOutput) {
-        let data = self.state.surfaces.get(&surface).expect("No such surface");
+        let data = self
+            .state
+            .surfaces
+            .get_mut(&surface)
+            .expect("No such surface");
+        // Real compositors send wl_surface.leave for outputs a moved surface
+        // is no longer on; model that so output-anchoring logic in the
+        // client under test behaves as it would in production.
+        let previously_entered = std::mem::take(&mut data.entered);
+        // Leave every output except the target.
+        for old in &previously_entered {
+            if old.id() != output.id() {
+                data.surface.leave(old);
+            }
+        }
+        // Enter the target, unless the surface was already on it. This is
+        // independent of the leaves above: a surface moving off one output
+        // still gets an enter for the one it is moving to.
+        if !previously_entered.iter().any(|o| o.id() == output.id()) {
+            data.surface.enter(output);
+        }
+        data.entered.push(output.clone());
+        self.display.flush_clients().unwrap();
+    }
+
+    /// Send `wl_surface.enter` for an additional output, leaving the surface
+    /// on every output it is already on.
+    ///
+    /// This models a surface straddling two outputs - a window overlapping a
+    /// boundary, or a bounding box sweeping across one during an animation.
+    /// [`Self::move_surface_to_output`] cannot express it, because it leaves
+    /// every other output by design.
+    pub fn add_surface_to_output(&mut self, surface: SurfaceId, output: &WlOutput) {
+        let data = self
+            .state
+            .surfaces
+            .get_mut(&surface)
+            .expect("No such surface");
+        if data.entered.iter().any(|o| o.id() == output.id()) {
+            return;
+        }
         data.surface.enter(output);
+        data.entered.push(output.clone());
         self.display.flush_clients().unwrap();
     }
 
@@ -1965,6 +2008,7 @@ impl Dispatch<WlCompositor, ()> for State {
                         viewport: None,
                         moving: false,
                         resizing: None,
+                        entered: Vec::new(),
                     },
                 );
                 state.last_surface_id = Some(SurfaceId(id));
