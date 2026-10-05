@@ -1599,7 +1599,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     fn create_popup(&mut self, entity: Entity, xdg: XdgSurface, parent: x::Window) -> PopupData {
         let mut query = self
             .world
-            .query_one::<(&WindowData, &mut SurfaceScaleFactor)>(entity)
+            .query_one::<(&mut WindowData, &mut SurfaceScaleFactor)>(entity)
             .unwrap();
 
         let (window, scale) = query.get().unwrap();
@@ -1611,6 +1611,12 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         let parent_dims = parent_window.attrs.dims;
         let initial_scale = parent_scale.0;
         *scale = *parent_scale;
+        // The popup's X11 position is relative to the same output as its parent, so take the
+        // parent's output offset right away. Otherwise, until the popup's surface enters an
+        // output, its configure is written back to X without the offset, and the X server's
+        // echoed position is repositioned as if it were on the first output, which pushes the
+        // popup off its parent.
+        window.output_offset = parent_window.output_offset;
 
         debug!(
             "creating popup ({:?}) {:?} {:?} {:?} {entity:?} (scale: {initial_scale})",
