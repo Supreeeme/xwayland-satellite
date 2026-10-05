@@ -9,7 +9,7 @@ mod xresources;
 use crate::XConnection;
 use bitflags::bitflags;
 use log::{debug, trace, warn};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::fd::BorrowedFd;
 use std::rc::Rc;
 use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
@@ -111,6 +111,10 @@ pub struct XState {
     selection_state: SelectionState,
     settings: Settings,
     max_req_bytes: usize,
+    /// Mapped, managed windows, in mapping order - the contents of _NET_CLIENT_LIST.
+    client_list: Vec<x::Window>,
+    /// Override redirect windows, which the spec excludes from _NET_CLIENT_LIST.
+    override_redirect: HashSet<x::Window>,
 }
 
 impl XState {
@@ -231,6 +235,8 @@ impl XState {
             selection_state,
             settings,
             max_req_bytes,
+            client_list: Vec::new(),
+            override_redirect: HashSet::new(),
         };
         r.create_ewmh_window();
         r.set_xsettings_owner();
@@ -266,6 +272,28 @@ impl XState {
             .unwrap();
     }
 
+    /// _NET_CLIENT_LIST holds the managed windows in mapping order, oldest first.
+    fn push_client(&mut self, window: x::Window) {
+        if self.override_redirect.contains(&window) || self.client_list.contains(&window) {
+            return;
+        }
+        self.client_list.push(window);
+        self.publish_client_list();
+    }
+
+    fn remove_client(&mut self, window: x::Window) {
+        let Some(idx) = self.client_list.iter().position(|w| *w == window) else {
+            return;
+        };
+        self.client_list.remove(idx);
+        self.publish_client_list();
+    }
+
+    fn publish_client_list(&self) {
+        let list = self.client_list.clone();
+        self.set_root_property(self.atoms.client_list, x::ATOM_WINDOW, &list);
+    }
+
     fn create_ewmh_window(&mut self) {
         self.connection
             .send_and_check_request(&x::CreateWindow {
@@ -285,11 +313,13 @@ impl XState {
 
         self.set_root_property(self.atoms.wm_check, x::ATOM_WINDOW, &[self.wm_window]);
         self.set_root_property(self.atoms.active_win, x::ATOM_WINDOW, &[x::Window::none()]);
+        self.set_root_property(self.atoms.client_list, x::ATOM_WINDOW, &[] as &[x::Window]);
         self.set_root_property(
             self.atoms.supported,
             x::ATOM_ATOM,
             &[
                 self.atoms.active_win,
+                self.atoms.client_list,
                 self.atoms.motif_wm_hints,
                 self.atoms.net_wm_state,
                 self.atoms.wm_fullscreen,
@@ -352,6 +382,9 @@ impl XState {
             match event {
                 xcb::Event::X(x::Event::CreateNotify(e)) => {
                     debug!("new window: {e:?}");
+                    if e.override_redirect() {
+                        self.override_redirect.insert(e.window());
+                    }
                     server_state.new_window(
                         e.window(),
                         e.override_redirect(),
@@ -374,6 +407,9 @@ impl XState {
                         let attrs =
                             unwrap_or_skip_bad_window_cont!(self.connection.wait_for_reply(attrs));
 
+                        if attrs.override_redirect() {
+                            self.override_redirect.insert(e.window());
+                        }
                         server_state.new_window(
                             e.window(),
                             attrs.override_redirect(),
@@ -415,6 +451,7 @@ impl XState {
                         self.handle_window_properties(server_state, e.window())
                     );
                     server_state.map_window(e.window());
+                    self.push_client(e.window());
                     unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
                         &x::ChangeProperty {
                             mode: x::PropMode::Replace,
@@ -431,6 +468,7 @@ impl XState {
                 xcb::Event::X(x::Event::UnmapNotify(e)) => {
                     trace!("unmap event: {:?}", e.event());
                     server_state.unmap_window(e.window());
+                    self.remove_client(e.window());
                     let active_win = self
                         .connection
                         .wait_for_reply(self.get_property_cookie(
@@ -466,6 +504,8 @@ impl XState {
                 }
                 xcb::Event::X(x::Event::DestroyNotify(e)) => {
                     debug!("destroying window {:?}", e.window());
+                    self.remove_client(e.window());
+                    self.override_redirect.remove(&e.window());
                     server_state.destroy_window(e.window());
                 }
                 xcb::Event::X(x::Event::PropertyNotify(e)) => {
