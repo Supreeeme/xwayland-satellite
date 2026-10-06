@@ -339,9 +339,12 @@ impl Fixture {
     }
 
     fn create_output(&mut self, x: i32, y: i32) -> wayland_server::protocol::wl_output::WlOutput {
-        self.testwl.new_output();
+        self.testwl.new_output(Some(testwl::OutputInitData {
+            pos: testwl::Vec2 { x, y },
+            size: testwl::Vec2 { x: 1000, y: 1000 },
+        }));
         self.wait_and_dispatch();
-        self.testwl.finalize_output(x, y)
+        self.testwl.finalize_output()
     }
 }
 
@@ -1567,8 +1570,8 @@ fn close_window() {
 #[test]
 fn primary_output() {
     let mut f = Fixture::new_preset(|testwl| {
-        testwl.new_output(); // WL-1
-        testwl.new_output(); // WL-2
+        testwl.new_output(None); // WL-1
+        testwl.new_output(None); // WL-2
     });
     let mut conn = Connection::new(&f.display);
 
@@ -1926,7 +1929,9 @@ fn output_offset_xdg_matches_crtcs() {
     // Xdg output codepath. This leaves only the required wl_output::geometry event sent at global
     // binding to be forwarded to Xwayland.
     for info in outputs.iter() {
-        let out = f.create_output(info.x, info.y);
+        f.testwl.new_output(None);
+        f.wait_and_dispatch();
+        let out = f.testwl.finalize_output();
         out.geometry(
             info.x,
             info.y,
@@ -2333,7 +2338,7 @@ fn xsettings_switch_owner() {
 fn rotated_output() {
     let mut f = Fixture::new_preset(|testwl| {
         testwl.enable_xdg_output_manager();
-        testwl.new_output();
+        testwl.new_output(None);
     });
     let mut connection = Connection::new(&f.display);
 

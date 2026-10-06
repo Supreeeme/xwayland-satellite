@@ -515,7 +515,10 @@ impl<C: XConnection> TestFixture<C> {
         TestObject<WlOutput>,
         wayland_server::protocol::wl_output::WlOutput,
     ) {
-        self.testwl.new_output();
+        self.testwl.new_output(Some(testwl::OutputInitData {
+            pos: testwl::Vec2 { x, y },
+            size: testwl::Vec2 { x: 1000, y: 1000 },
+        }));
         self.run();
         self.run();
         let mut events = std::mem::take(&mut *self.registry.data.events.lock().unwrap());
@@ -540,7 +543,7 @@ impl<C: XConnection> TestFixture<C> {
         );
         self.run();
         self.run();
-        (output, self.testwl.finalize_output(x, y))
+        (output, self.testwl.finalize_output())
     }
 
     fn remove_output(&mut self, output_s: wayland_server::protocol::wl_output::WlOutput) {
@@ -1119,7 +1122,7 @@ fn pass_through_globals() {
     use wayland_client::protocol::wl_output::WlOutput;
 
     let mut f = TestFixture::new();
-    f.testwl.new_output();
+    f.testwl.new_output(None);
     f.testwl.enable_xdg_output_manager();
     f.run();
     f.run();

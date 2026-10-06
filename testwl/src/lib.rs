@@ -236,6 +236,12 @@ struct Output {
     global_id: Option<GlobalId>,
 }
 
+#[derive(Clone, Copy)]
+pub struct OutputInitData {
+    pub pos: Vec2,
+    pub size: Vec2,
+}
+
 struct KeyboardState {
     keyboard: WlKeyboard,
     current_focus: Option<SurfaceId>,
@@ -581,23 +587,10 @@ impl Server {
     /// This function must be called after the globals have been dispatched in order to use the
     /// output on the server side created by `new_output` (this function's return value).
     #[track_caller]
-    pub fn finalize_output(&mut self, x: i32, y: i32) -> WlOutput {
+    pub fn finalize_output(&mut self) -> WlOutput {
         let output_s = self.state.last_output.take().expect("No new outputs");
         let output_data = self.state.outputs.get_mut(&output_s).unwrap();
         output_data.global_id = self.state.last_output_global.take();
-        output_s.geometry(
-            x,
-            y,
-            0,
-            0,
-            wl_output::Subpixel::None,
-            "xwls".to_string(),
-            "fake monitor".to_string(),
-            wl_output::Transform::Normal,
-        );
-        output_s.mode(wl_output::Mode::Current, 1000, 1000, 0);
-        output_s.done();
-        self.dispatch();
         output_s
     }
 
@@ -864,8 +857,8 @@ impl Server {
         self.display.flush_clients().unwrap();
     }
 
-    pub fn new_output(&mut self) {
-        self.state.last_output_global = Some(self.dh.create_global::<State, WlOutput, _>(4, ()));
+    pub fn new_output(&mut self, data: Option<OutputInitData>) {
+        self.state.last_output_global = Some(self.dh.create_global::<State, WlOutput, _>(4, data));
         self.display.flush_clients().unwrap();
     }
 
@@ -1133,19 +1126,32 @@ impl Dispatch<ZxdgOutputV1, WlOutput> for State {
     }
 }
 
-impl GlobalDispatch<WlOutput, ()> for State {
+impl GlobalDispatch<WlOutput, Option<OutputInitData>> for State {
     fn bind(
         state: &mut Self,
         _: &DisplayHandle,
         _: &Client,
         resource: wayland_server::New<WlOutput>,
-        _: &(),
+        data: &Option<OutputInitData>,
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
-        let output = data_init.init(resource, ());
+        let output = data_init.init(resource, *data);
         state.output_counter += 1;
         let name = format!("WL-{}", state.output_counter);
         output.name(name.clone());
+        if let Some(data) = data {
+            output.geometry(
+                data.pos.x,
+                data.pos.y,
+                0,
+                0,
+                wl_output::Subpixel::None,
+                "xwls".to_string(),
+                "fake monitor".to_string(),
+                wl_output::Transform::Normal,
+            );
+            output.mode(wl_output::Mode::Current, data.size.x, data.size.y, 0);
+        }
         output.done();
         state.outputs.insert(
             output.clone(),
@@ -1159,13 +1165,13 @@ impl GlobalDispatch<WlOutput, ()> for State {
     }
 }
 
-impl Dispatch<WlOutput, ()> for State {
+impl Dispatch<WlOutput, Option<OutputInitData>> for State {
     fn request(
         _: &mut Self,
         _: &Client,
         _: &WlOutput,
         _: <WlOutput as Resource>::Request,
-        _: &(),
+        _: &Option<OutputInitData>,
         _: &DisplayHandle,
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
