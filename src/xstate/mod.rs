@@ -315,10 +315,17 @@ impl XState {
 
         self.set_root_property(self.atoms.wm_check, x::ATOM_WINDOW, &[self.wm_window]);
         self.set_root_property(self.atoms.active_win, x::ATOM_WINDOW, &[x::Window::none()]);
+        // Publish the lists empty up front: with no X11 client mapped yet they
+        // were missing altogether, which tools report as "not found" rather
+        // than as an empty desktop.
+        self.set_root_property::<x::Window>(self.atoms.client_list, x::ATOM_WINDOW, &[]);
+        self.set_root_property::<x::Window>(self.atoms.client_list_stacking, x::ATOM_WINDOW, &[]);
         self.set_root_property(
             self.atoms.supported,
             x::ATOM_ATOM,
             &[
+                self.atoms.wm_check,
+                self.atoms.net_wm_name,
                 self.atoms.active_win,
                 self.atoms.client_list,
                 self.atoms.client_list_stacking,
