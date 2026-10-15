@@ -58,7 +58,7 @@ pub const fn timespec_from_millis(millis: u64) -> Timespec {
     let d = std::time::Duration::from_millis(millis);
     Timespec {
         tv_sec: d.as_secs() as i64,
-        tv_nsec: d.subsec_nanos() as i64,
+        tv_nsec: d.subsec_nanos() as _,
     }
 }
 
