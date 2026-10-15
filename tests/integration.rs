@@ -343,6 +343,18 @@ impl Fixture {
         self.wait_and_dispatch();
         self.testwl.finalize_output(x, y)
     }
+
+    fn set_fractional_output_scale(&mut self, output: &wl_output::WlOutput, scale: f64) {
+        let physical = (1000.0 * scale) as i32;
+        output.mode(wl_output::Mode::Current, physical, physical, 60000);
+        output.scale(scale.ceil() as i32);
+        self.testwl
+            .get_xdg_output(output)
+            .unwrap()
+            .logical_size(1000, 1000);
+        output.done();
+        self.wait_and_dispatch();
+    }
 }
 
 xcb::atoms_struct! {
@@ -2164,8 +2176,12 @@ fn xsettings_fractional_scale() {
     f.testwl.enable_xdg_output_manager();
     let output = f.create_output(0, 0); // WL-1
 
+    // Output DPI must reach XSETTINGS before any surface enters the monitor.
+    f.set_fractional_output_scale(&output, 1.5);
+    assert_eq!(connection.get_xsettings().data["Xft/DPI"].value, 144 * 1024);
+
     let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
-    let surface = f.map_as_toplevel(&mut connection, window);
+    let surface = f.map_as_toplevel_with_scale(&mut connection, window, 1.5);
 
     let data = f
         .testwl
@@ -2197,6 +2213,14 @@ fn xsettings_fractional_scale() {
     fractional.preferred_scale(300); // 2.5 scale
     f.wait_and_dispatch();
 
+    // Surface preferences size the viewport, not the global X11 settings.
+    let settings = connection.get_xsettings();
+    assert_eq!(settings.data["Xft/DPI"].value, 144 * 1024);
+    assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 1);
+    assert_eq!(settings.data["Gdk/UnscaledDPI"].value, 144 * 1024);
+
+    f.set_fractional_output_scale(&output, 2.5);
+
     let settings = connection.get_xsettings();
     assert_eq!(
         settings.data["Xft/DPI"].value,
@@ -2226,8 +2250,15 @@ fn resource_manager_scale() {
         b"Xcursor.theme:\tAdwaita\nXft.dpi:\t96\n",
     );
 
+    // Preserve unrelated resources while updating DPI without a mapped window.
+    f.set_fractional_output_scale(&output, 1.5);
+    assert_eq!(
+        connection.get_resource_manager(),
+        b"Xcursor.theme:\tAdwaita\nXft.dpi:\t144\n"
+    );
+
     let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
-    let surface = f.map_as_toplevel(&mut connection, window);
+    let surface = f.map_as_toplevel_with_scale(&mut connection, window, 1.5);
     let data = f.testwl.get_surface_data(surface).unwrap();
     let fractional = data.fractional.as_ref().unwrap();
 
@@ -2243,6 +2274,12 @@ fn resource_manager_scale() {
     let fractional = data.fractional.as_ref().unwrap();
     fractional.preferred_scale(300); // 2.5 scale
     f.wait_and_dispatch();
+    assert_eq!(
+        connection.get_resource_manager(),
+        b"Xcursor.theme:\tAdwaita\nXft.dpi:\t144\n"
+    );
+
+    f.set_fractional_output_scale(&output, 2.5);
     assert_eq!(
         connection.get_resource_manager(),
         b"Xcursor.theme:\tAdwaita\nXft.dpi:\t240\n"
