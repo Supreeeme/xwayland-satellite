@@ -295,6 +295,10 @@ struct SelectionData<T: SelectionType> {
     atom: x::Atom,
     targets_atom: x::Atom,
     current_selection: Option<CurrentSelection<T>>,
+    // A Wayland clipboard manager can adopt our source while other receivers
+    // still have conversions queued. Keep their X11 owner and event routing
+    // until every pipe closes, not just until the manager finishes its reads.
+    deferred_selection: Option<ForeignSelection<T>>,
 }
 
 // This is a trait so that we can use &dyn
@@ -328,6 +332,7 @@ trait SelectionDataImpl {
     ) -> bool;
     fn atom(&self) -> x::Atom;
     fn selection_clear(&mut self);
+    fn source_destroyed(&mut self);
 }
 
 impl<T: SelectionType> SelectionData<T> {
@@ -337,8 +342,37 @@ impl<T: SelectionType> SelectionData<T> {
             atom,
             targets_atom,
             current_selection: None,
+            deferred_selection: None,
         }
     }
+
+    fn defer_selection(&mut self, selection: ForeignSelection<T>) -> Option<ForeignSelection<T>> {
+        if self
+            .x11_selection()
+            .is_some_and(|s| !s.pending.borrow().is_empty())
+        {
+            self.deferred_selection = Some(selection);
+            debug!("Deferring Wayland selection ownership until X11 conversions finish");
+            None
+        } else {
+            self.deferred_selection = None;
+            Some(selection)
+        }
+    }
+
+    fn ready_selection(&mut self) -> Option<ForeignSelection<T>> {
+        if self
+            .x11_selection()
+            .is_some_and(|s| !s.pending.borrow().is_empty())
+        {
+            None
+        } else {
+            // A null selection or focus loss also revokes a deferred offer;
+            // it must never be installed later just because the queue drained.
+            self.deferred_selection.take().filter(|s| s.is_current())
+        }
+    }
+
     fn wayland_selection_mut(&mut self) -> Option<&mut WaylandSelection<T>> {
         match &mut self.current_selection {
             Some(CurrentSelection::Wayland(sel)) => Some(sel),
@@ -387,6 +421,13 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
     }
 
     fn selection_clear(&mut self) {
+        self.deferred_selection = None;
+        self.current_selection = None;
+    }
+
+    fn source_destroyed(&mut self) {
+        // An already received Wayland mirror can outlive the X11 source.
+        // Drop its unfinished conversions, but keep a still-current offer.
         self.current_selection = None;
     }
 
@@ -398,6 +439,10 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
         owner: x::Window,
         timestamp: u32,
     ) {
+        // A genuine X11 owner change supersedes any deferred Wayland offer.
+        // Do not start queued conversions against that newer owner's bytes.
+        self.deferred_selection = None;
+        self.current_selection = None;
         // Grab targets
         match connection.send_and_check_request(&x::ConvertSelection {
             requestor: wm_window,
@@ -680,6 +725,9 @@ impl XState {
     }
 
     pub(crate) fn set_clipboard(&mut self, selection: ForeignSelection<Clipboard>) {
+        let Some(selection) = self.selection_state.clipboard.defer_selection(selection) else {
+            return;
+        };
         let mut utf8_xwl = false;
         let mut utf8_wl = false;
         let mut mimes: Vec<SelectionTargetId> = selection
@@ -732,6 +780,9 @@ impl XState {
     }
 
     pub(crate) fn set_primary_selection(&mut self, selection: ForeignSelection<Primary>) {
+        let Some(selection) = self.selection_state.primary.defer_selection(selection) else {
+            return;
+        };
         let mut utf8_xwl = false;
         let mut utf8_wl = false;
         let mut mimes: Vec<SelectionTargetId> = selection
@@ -779,6 +830,15 @@ impl XState {
                     incr_data: None,
                 }));
             debug!("Primary set from Wayland");
+        }
+    }
+
+    pub(crate) fn finish_selection_handoffs(&mut self) {
+        if let Some(selection) = self.selection_state.clipboard.ready_selection() {
+            self.set_clipboard(selection);
+        }
+        if let Some(selection) = self.selection_state.primary.ready_selection() {
+            self.set_primary_selection(selection);
         }
     }
 
@@ -920,7 +980,8 @@ impl XState {
                     xcb::xfixes::SelectionEvent::SelectionClientClose
                     | xcb::xfixes::SelectionEvent::SelectionWindowDestroy => {
                         debug!("Selection owner destroyed, selection will be unset");
-                        self.selection_state.clipboard.current_selection = None;
+                        let data = get_selection_data!(x);
+                        data.source_destroyed();
                     }
                 },
                 x if x == self.atoms.xsettings => match e.subtype() {

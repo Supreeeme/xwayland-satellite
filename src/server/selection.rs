@@ -15,6 +15,7 @@ use smithay_client_toolkit::primary_selection::PrimarySelectionManagerState;
 use smithay_client_toolkit::primary_selection::device::PrimarySelectionDevice;
 use smithay_client_toolkit::primary_selection::offer::PrimarySelectionOffer;
 use smithay_client_toolkit::primary_selection::selection::PrimarySelectionSource;
+use std::cell::Cell;
 use std::io::Read;
 use std::rc::{Rc, Weak};
 
@@ -104,6 +105,7 @@ impl<S: X11Selection> InnerServerState<S> {
                 let foreign = ForeignSelection {
                     mime_types,
                     inner: offer,
+                    current: Rc::clone(&events.offer_current),
                 };
                 state.source = Some(SelectionData::Foreign(foreign));
             }
@@ -149,10 +151,15 @@ impl<S: X11Selection> InnerServerState<S> {
 pub struct ForeignSelection<T: SelectionType> {
     pub mime_types: Box<[String]>,
     inner: T::Offer,
+    current: Rc<Cell<bool>>,
 }
 
 #[allow(private_bounds)]
 impl<T: SelectionType> ForeignSelection<T> {
+    pub(crate) fn is_current(&self) -> bool {
+        self.current.get() && T::offer_is_alive(&self.inner)
+    }
+
     pub(crate) fn receive(
         &self,
         mime_type: String,
@@ -196,6 +203,11 @@ pub trait SelectionType: Sized {
     }
 
     fn get_mimes(offer: &Self::Offer) -> Box<[String]>;
+    // The primary-selection wrapper does not expose its proxy; its callback
+    // reports null selections, so the generation token suffices there.
+    fn offer_is_alive(_offer: &Self::Offer) -> bool {
+        true
+    }
 }
 
 pub enum Clipboard {}
@@ -231,7 +243,14 @@ impl SelectionType for Clipboard {
     }
 
     fn take_offer(offer: &mut Option<Self::Offer>) -> Option<Self::Offer> {
-        offer.take().filter(|offer| offer.inner().is_alive())
+        offer.take().filter(Self::offer_is_alive)
+    }
+
+    fn offer_is_alive(offer: &Self::Offer) -> bool {
+        // SCTK destroys the proxy on a null clipboard selection without
+        // invoking DataDeviceHandler::selection. The generation alone cannot
+        // observe that revocation.
+        offer.inner().is_alive()
     }
 
     fn get_mimes(offer: &Self::Offer) -> Box<[String]> {

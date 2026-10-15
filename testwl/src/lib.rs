@@ -815,6 +815,16 @@ impl Server {
         self.display.flush_clients().unwrap();
     }
 
+    pub fn clear_data_offer(&mut self) {
+        self.state.data_device.as_ref().unwrap().selection(None);
+        self.display.flush_clients().unwrap();
+    }
+
+    pub fn clear_primary_offer(&mut self) {
+        self.state.primary_device.as_ref().unwrap().selection(None);
+        self.display.flush_clients().unwrap();
+    }
+
     #[track_caller]
     pub fn create_primary_offer(&mut self, data: Vec<PasteData>) {
         let Some(dev) = &self.state.primary_device else {
