@@ -16,6 +16,8 @@ use smithay_client_toolkit::{
         selection::PrimarySelectionSourceHandler,
     },
 };
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::{Mutex, OnceLock, mpsc};
 use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
@@ -94,6 +96,7 @@ use xcb::x;
 
 pub(super) struct SelectionEvents<T> {
     pub offer: Option<T>,
+    pub offer_current: Rc<Cell<bool>>,
     pub requests: Vec<(
         String,
         smithay_client_toolkit::data_device_manager::WritePipe,
@@ -105,6 +108,7 @@ impl<T> Default for SelectionEvents<T> {
     fn default() -> Self {
         Self {
             offer: None,
+            offer_current: Rc::new(Cell::new(true)),
             requests: Default::default(),
             cancelled: false,
         }
@@ -445,6 +449,8 @@ impl DataDeviceHandler for MyWorld {
         data_device: &wayland_client::protocol::wl_data_device::WlDataDevice,
     ) {
         let data: &DataDeviceData = data_device.data().unwrap();
+        self.clipboard.offer_current.set(false);
+        self.clipboard.offer_current = Rc::new(Cell::new(true));
         self.clipboard.offer = data.selection_offer();
     }
 
@@ -610,6 +616,8 @@ impl PrimarySelectionDeviceHandler for MyWorld {
             return;
         };
 
+        self.primary.offer_current.set(false);
+        self.primary.offer_current = Rc::new(Cell::new(true));
         self.primary.offer = data.selection_offer();
     }
 }

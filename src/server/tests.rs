@@ -1389,10 +1389,11 @@ trait SelectionTest {
         send_data: impl SendDataForMimeFn,
     ) -> Vec<testwl::PasteData>;
     fn create_offer(testwl: &mut testwl::Server, data: Vec<testwl::PasteData>);
+    fn clear_offer(testwl: &mut testwl::Server);
 }
 
 macro_rules! selection_tests {
-    ($name:ident, $selection_type:ty, $get_mime_fn:ident, $get_paste_data_fn:ident, $create_offer_fn:ident) => {
+    ($name:ident, $selection_type:ty, $get_mime_fn:ident, $get_paste_data_fn:ident, $create_offer_fn:ident, $clear_offer_fn:ident) => {
         impl SelectionTest for $selection_type {
             type SelectionType = $selection_type;
             fn mimes(testwl: &mut testwl::Server) -> Vec<String> {
@@ -1406,6 +1407,9 @@ macro_rules! selection_tests {
             }
             fn create_offer(testwl: &mut testwl::Server, data: Vec<testwl::PasteData>) {
                 testwl.$create_offer_fn(data);
+            }
+            fn clear_offer(testwl: &mut testwl::Server) {
+                testwl.$clear_offer_fn();
             }
         }
 
@@ -1425,6 +1429,11 @@ macro_rules! selection_tests {
             fn x11_then_wayland() {
                 super::selection_x11_then_wayland::<$selection_type>();
             }
+
+            #[test]
+            fn deferred_offer_revoked_on_replacement_and_clear() {
+                super::deferred_offer_revoked_on_replacement_and_clear::<$selection_type>();
+            }
         }
     };
 }
@@ -1434,15 +1443,47 @@ selection_tests!(
     Clipboard,
     data_source_mimes,
     clipboard_paste_data,
-    create_data_offer
+    create_data_offer,
+    clear_data_offer
 );
 selection_tests!(
     primary,
     Primary,
     primary_source_mimes,
     primary_paste_data,
-    create_primary_offer
+    create_primary_offer,
+    clear_primary_offer
 );
+
+fn deferred_offer_revoked_on_replacement_and_clear<T: SelectionTest>() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    f.create_toplevel(&comp, Window::new(1));
+    let data = vec![testwl::PasteData {
+        mime_type: "text/plain".into(),
+        data: b"copied".to_vec(),
+    }];
+    T::create_offer(&mut f.testwl, data.clone());
+    f.run();
+    let old = f.satellite.new_selection::<T::SelectionType>().unwrap();
+    assert!(old.is_current());
+
+    T::create_offer(&mut f.testwl, data);
+    f.run();
+    assert!(
+        !old.is_current(),
+        "a replacement must revoke an already extracted offer"
+    );
+    let replacement = f.satellite.new_selection::<T::SelectionType>().unwrap();
+    assert!(replacement.is_current());
+
+    T::clear_offer(&mut f.testwl);
+    f.run();
+    assert!(
+        !replacement.is_current(),
+        "a null selection must revoke a deferred offer"
+    );
+    assert!(f.satellite.new_selection::<T::SelectionType>().is_none());
+}
 
 fn copy_from_x11<T: SelectionTest>() {
     let (mut f, comp) = TestFixture::new_with_compositor();
