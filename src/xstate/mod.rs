@@ -429,6 +429,11 @@ impl XState {
                     server_state.reconfigure_window(e);
                 }
                 xcb::Event::X(x::Event::UnmapNotify(e)) => {
+                    if e.window() == self.root {
+                        warn!("ignoring UnmapNotify for the root window");
+                        continue;
+                    }
+
                     trace!("unmap event: {:?}", e.event());
                     server_state.unmap_window(e.window());
                     let active_win = self
