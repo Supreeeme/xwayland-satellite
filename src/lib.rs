@@ -245,9 +245,9 @@ pub fn main(mut data: impl RunData) -> Option<()> {
 
         // Anything above that waited for an X11 reply (the XConnection calls made while
         // dispatching, ConvertSelection in the paste path, selection ownership, XSETTINGS) may
-        // have pulled events into xcb's queue. Those never make the socket readable, so instead
-        // of sleeping in poll go round again and let handle_events take them first.
-        if xstate.stash_queued_event() {
+        // have pulled events into xcb's queue. Those never make the socket readable, so handle
+        // them now and go round again to dispatch the Wayland side instead of sleeping in poll.
+        if xstate.handle_queued_events(&mut server_state) {
             continue;
         }
         match poll(&mut fds, None) {
