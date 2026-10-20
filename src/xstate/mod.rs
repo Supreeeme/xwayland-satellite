@@ -334,15 +334,17 @@ impl XState {
             .unwrap();
     }
 
-    pub fn handle_events(&mut self, server_state: &mut super::RealServerState) {
+    pub fn handle_events(&mut self, server_state: &mut super::RealServerState) -> bool {
         macro_rules! unwrap_or_skip_bad_window_cont {
             ($err:expr) => {
                 unwrap_or_skip_bad_window!($err, continue)
             };
         }
 
+        let mut handled = false;
         let mut ignored_windows = Vec::new();
         while let Some(event) = self.connection.poll_for_event().unwrap() {
+            handled = true;
             trace!("x11 event: {event:?}");
 
             if self.handle_selection_event(&event, server_state) {
@@ -518,6 +520,7 @@ impl XState {
 
             server_state.run();
         }
+        handled
     }
 
     fn handle_client_message(
