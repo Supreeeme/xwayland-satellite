@@ -435,7 +435,8 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
             property: dest_property,
             r#type: x::ATOM_ATOM,
             long_offset: 0,
-            long_length: 20,
+            // In 32-bit units: CEF/Steam and Chromium offer well over 20 targets.
+            long_length: 4096,
         })) {
             Ok(reply) => reply,
             Err(e) => {
@@ -920,7 +921,7 @@ impl XState {
                     xcb::xfixes::SelectionEvent::SelectionClientClose
                     | xcb::xfixes::SelectionEvent::SelectionWindowDestroy => {
                         debug!("Selection owner destroyed, selection will be unset");
-                        self.selection_state.clipboard.current_selection = None;
+                        get_selection_data!(x).selection_clear();
                     }
                 },
                 x if x == self.atoms.xsettings => match e.subtype() {
