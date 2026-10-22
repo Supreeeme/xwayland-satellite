@@ -245,6 +245,7 @@ struct ToplevelData {
 
 #[derive(Debug)]
 struct PopupData {
+    parent: x::Window,
     popup: XdgPopup,
     positioner: XdgPositioner,
     xdg: XdgSurfaceData,
@@ -1080,6 +1081,19 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
     }
 
     pub fn reconfigure_window(&mut self, event: x::ConfigureNotifyEvent) {
+        // A popup is positioned relative to its parent (as in create_popup), not to its own
+        // output: the two can sit on outputs with different offsets.
+        let parent_origin = self
+            .windows
+            .get(&event.window())
+            .and_then(|&e| self.world.get::<&SurfaceRole>(e).ok())
+            .and_then(|role| match &*role {
+                SurfaceRole::Popup(Some(popup)) => self.windows.get(&popup.parent).copied(),
+                _ => None,
+            })
+            .and_then(|parent| self.world.get::<&WindowData>(parent).ok())
+            .map(|parent| (parent.attrs.dims.x as i32, parent.attrs.dims.y as i32));
+
         let Some((mut win, data)) = self
             .windows
             .get(&event.window())
@@ -1121,9 +1135,11 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         match role {
             SurfaceRole::Popup(Some(popup)) => {
+                let (origin_x, origin_y) =
+                    parent_origin.unwrap_or((win.output_offset.x, win.output_offset.y));
                 popup.positioner.set_offset(
-                    ((event.x() as i32 - win.output_offset.x) as f64 / scale_factor.0) as i32,
-                    ((event.y() as i32 - win.output_offset.y) as f64 / scale_factor.0) as i32,
+                    ((event.x() as i32 - origin_x) as f64 / scale_factor.0) as i32,
+                    ((event.y() as i32 - origin_y) as f64 / scale_factor.0) as i32,
                 );
                 popup.positioner.set_size(
                     1.max((event.width() as f64 / scale_factor.0).ceil() as i32),
@@ -1646,6 +1662,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         );
 
         PopupData {
+            parent,
             popup,
             positioner,
             xdg: XdgSurfaceData {
