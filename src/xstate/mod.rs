@@ -2,6 +2,7 @@ mod settings;
 use settings::Settings;
 mod selection;
 use selection::{Selection, SelectionState};
+mod dnd;
 #[cfg(test)]
 mod tests;
 mod xresources;
@@ -109,6 +110,7 @@ pub struct XState {
     root: x::Window,
     wm_window: x::Window,
     selection_state: SelectionState,
+    dnd: dnd::Dnd,
     settings: Settings,
     max_req_bytes: usize,
 }
@@ -216,6 +218,7 @@ impl XState {
 
         let wm_window = connection.generate_id();
         let selection_state = SelectionState::new(&connection, root, &atoms);
+        let dnd = dnd::Dnd::new(&connection, root);
         let window_atoms = WindowTypes::intern_all(&connection).unwrap();
         let settings = Settings::new(&connection, &atoms, root);
         // maximum-request-length is returned in units of 4 bytes.
@@ -229,6 +232,7 @@ impl XState {
             atoms,
             window_atoms,
             selection_state,
+            dnd,
             settings,
             max_req_bytes,
         };
@@ -345,7 +349,9 @@ impl XState {
         while let Some(event) = self.connection.poll_for_event().unwrap() {
             trace!("x11 event: {event:?}");
 
-            if self.handle_selection_event(&event, server_state) {
+            if self.handle_dnd_event(&event, server_state)
+                || self.handle_selection_event(&event, server_state)
+            {
                 continue;
             }
 
@@ -923,6 +929,17 @@ xcb::atoms_struct! {
         primary => b"PRIMARY" only_if_exists = false,
         primary_targets => b"_primary_targets" only_if_exists = false,
         moveresize => b"_NET_WM_MOVERESIZE" only_if_exists = false,
+        xdnd_aware => b"XdndAware" only_if_exists = false,
+        xdnd_proxy => b"XdndProxy" only_if_exists = false,
+        xdnd_selection => b"XdndSelection" only_if_exists = false,
+        xdnd_type_list => b"XdndTypeList" only_if_exists = false,
+        xdnd_enter => b"XdndEnter" only_if_exists = false,
+        xdnd_position => b"XdndPosition" only_if_exists = false,
+        xdnd_status => b"XdndStatus" only_if_exists = false,
+        xdnd_leave => b"XdndLeave" only_if_exists = false,
+        xdnd_drop => b"XdndDrop" only_if_exists = false,
+        xdnd_finished => b"XdndFinished" only_if_exists = false,
+        xdnd_action_copy => b"XdndActionCopy" only_if_exists = false,
     }
 }
 
