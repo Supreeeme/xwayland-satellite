@@ -1206,6 +1206,46 @@ fn copy_from_x11() {
 }
 
 #[test]
+fn copy_from_x11_many_targets() {
+    // CEF (Steam) and Chromium offer more than 20 targets; none may be lost.
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut connection, window);
+
+    let targets: Vec<x::Atom> = (0..30)
+        .map(|i| {
+            connection
+                .get_reply(&x::InternAtom {
+                    only_if_exists: false,
+                    name: format!("many/target-{i}").as_bytes(),
+                })
+                .atom()
+        })
+        .collect();
+    connection.set_selection_owner(window, connection.atoms.clipboard);
+    let request = connection.await_selection_request();
+    assert_eq!(request.target(), connection.atoms.targets);
+    connection.set_property(
+        request.requestor(),
+        x::ATOM_ATOM,
+        request.property(),
+        &targets,
+    );
+    connection.send_selection_notify(&request);
+    f.wait_and_dispatch();
+
+    let mimes = f.testwl.data_source_mimes();
+    assert_eq!(
+        mimes.len(),
+        30,
+        "Wrong number of advertised mimes: {mimes:?}"
+    );
+    assert!(mimes.contains(&"many/target-29".to_string()));
+}
+
+#[test]
 fn copy_from_wayland() {
     let mut f = Fixture::new();
     let mut connection = Connection::new(&f.display);
