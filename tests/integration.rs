@@ -1308,6 +1308,127 @@ fn copy_from_wayland() {
 }
 
 #[test]
+fn drag_from_wayland() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, window);
+
+    let intern = |name: &[u8]| {
+        connection
+            .get_reply(&x::InternAtom {
+                only_if_exists: false,
+                name,
+            })
+            .atom()
+    };
+    let aware = intern(b"XdndAware");
+    let enter = intern(b"XdndEnter");
+    let position = intern(b"XdndPosition");
+    let status = intern(b"XdndStatus");
+    let drop = intern(b"XdndDrop");
+    let finished = intern(b"XdndFinished");
+    let selection = intern(b"XdndSelection");
+    let copy = intern(b"XdndActionCopy");
+    let uri_list = intern(b"text/uri-list");
+    let dest = intern(b"dest1");
+    connection.set_property(window, x::ATOM_ATOM, aware, &[5u32]);
+
+    let data = b"file:///tmp/a.txt\r\n".to_vec();
+    f.testwl.start_drag(
+        surface,
+        5.0,
+        5.0,
+        vec![testwl::PasteData {
+            mime_type: "text/uri-list".into(),
+            data: data.clone(),
+        }],
+    );
+    f.wait_and_dispatch();
+
+    let mut message = || match connection.await_event() {
+        xcb::Event::X(x::Event::ClientMessage(e)) => {
+            let x::ClientMessageData::Data32(data) = e.data() else {
+                panic!("XDND message is not 32 bit");
+            };
+            (e.r#type(), data)
+        }
+        other => panic!("Expected XDND client message, got {other:?}"),
+    };
+    let (ty, data32) = message();
+    assert_eq!(ty, enter);
+    assert_eq!(data32[1] >> 24, 5);
+    assert_eq!(data32[2], uri_list.resource_id());
+    let source = data32[0];
+    let (ty, data32) = message();
+    assert_eq!(ty, position);
+    assert_eq!(data32[2], (5 << 16) | 5);
+    assert_eq!(data32[4], copy.resource_id());
+
+    let source_window = <x::Window as xcb::XidNew>::new(source);
+    fn reply(connection: &Connection, to: x::Window, r#type: x::Atom, data: [u32; 5]) {
+        connection
+            .send_and_check_request(&x::SendEvent {
+                propagate: false,
+                destination: x::SendEventDest::Window(to),
+                event_mask: x::EventMask::empty(),
+                event: &x::ClientMessageEvent::new(to, r#type, x::ClientMessageData::Data32(data)),
+            })
+            .unwrap();
+    }
+    reply(
+        &connection,
+        source_window,
+        status,
+        [window.resource_id(), 1, 0, 0, copy.resource_id()],
+    );
+    f.wait_and_dispatch();
+    assert_eq!(f.testwl.drag_accepted(), Some("text/uri-list"));
+
+    f.testwl.drop_drag();
+    f.wait_and_dispatch();
+    let (ty, _) = match connection.await_event() {
+        xcb::Event::X(x::Event::ClientMessage(e)) => (e.r#type(), ()),
+        other => panic!("Expected XdndDrop, got {other:?}"),
+    };
+    assert_eq!(ty, drop);
+
+    connection
+        .send_and_check_request(&x::ConvertSelection {
+            requestor: window,
+            selection,
+            target: uri_list,
+            property: dest,
+            time: x::CURRENT_TIME,
+        })
+        .unwrap();
+    f.wait_and_dispatch();
+    let notify = connection.await_selection_notify();
+    assert_eq!(notify.property(), dest);
+    let val: Vec<u8> = connection
+        .get_reply(&x::GetProperty {
+            delete: true,
+            window,
+            property: dest,
+            r#type: x::ATOM_ANY,
+            long_offset: 0,
+            long_length: 100,
+        })
+        .value()
+        .to_vec();
+    assert_eq!(val, data);
+
+    reply(
+        &connection,
+        source_window,
+        finished,
+        [window.resource_id(), 1, copy.resource_id(), 0, 0],
+    );
+    f.wait_and_dispatch();
+    assert!(f.testwl.drag_finished());
+}
+
+#[test]
 fn incr_copy_from_wayland() {
     const BYTES: usize = 3000;
     let mut f = Fixture::new();
