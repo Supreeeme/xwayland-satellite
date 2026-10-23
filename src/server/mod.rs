@@ -692,7 +692,11 @@ impl<C: XConnection> ServerState<C> {
                 let Ok(output_scale) = self.world.get::<&OutputScaleFactor>(*output) else {
                     continue;
                 };
-                if matches!(*output_scale, OutputScaleFactor::Output(..)) {
+                // Integer fallback controls global DPI, not a surface's
+                // fractional preference (or its initial scale before one arrives).
+                if self.fractional_scale.is_none()
+                    && matches!(*output_scale, OutputScaleFactor::Output(..))
+                {
                     let mut surface_query = self
                         .world
                         .query::<(&OnOutput, &mut SurfaceScaleFactor)>()
