@@ -576,7 +576,8 @@ impl XState {
                 let button = data[3];
                 // XXX: This can technically be driven by keyboard events and other mouse buttons as well,
                 // but I haven't found an application that does this yet. We'll cross that bridge when we get to it.
-                if button != 1 {
+                // Chromium sends 0 (AnyButton); the move still uses the last left click's serial.
+                if button != 0 && button != 1 {
                     warn!(
                         "Attempted move/resize of {:?} with non left click button ({button})",
                         e.window()
