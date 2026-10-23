@@ -339,9 +339,12 @@ impl Fixture {
     }
 
     fn create_output(&mut self, x: i32, y: i32) -> wayland_server::protocol::wl_output::WlOutput {
-        self.testwl.new_output();
+        self.testwl.new_output(Some(testwl::OutputInitData {
+            pos: testwl::Vec2 { x, y },
+            size: testwl::Vec2 { x: 1000, y: 1000 },
+        }));
         self.wait_and_dispatch();
-        self.testwl.finalize_output(x, y)
+        self.testwl.finalize_output()
     }
 }
 
@@ -407,9 +410,12 @@ impl std::ops::Deref for Connection {
 
 impl Connection {
     fn new(display: &str) -> Self {
-        let (inner, _) =
-            xcb::Connection::connect_with_extensions(Some(display), &[xcb::Extension::XFixes], &[])
-                .unwrap();
+        let (inner, _) = xcb::Connection::connect_with_extensions(
+            Some(display),
+            &[xcb::Extension::XFixes, xcb::Extension::RandR],
+            &[],
+        )
+        .unwrap();
         // xfixes init
         let reply = inner
             .wait_for_reply(inner.send_request(&xcb::xfixes::QueryVersion {
@@ -1567,8 +1573,8 @@ fn close_window() {
 #[test]
 fn primary_output() {
     let mut f = Fixture::new_preset(|testwl| {
-        testwl.new_output(); // WL-1
-        testwl.new_output(); // WL-2
+        testwl.new_output(None); // WL-1
+        testwl.new_output(None); // WL-2
     });
     let mut conn = Connection::new(&f.display);
 
@@ -1893,7 +1899,13 @@ fn output_offset_xdg_matches_crtcs() {
     let mut f = Fixture::new_preset(|testwl| {
         testwl.enable_xdg_output_manager();
     });
-    let connection = Connection::new(&f.display);
+    let mut connection = Connection::new(&f.display);
+    connection
+        .send_and_check_request(&xcb::randr::SelectInput {
+            window: connection.root,
+            enable: xcb::randr::NotifyMask::CRTC_CHANGE,
+        })
+        .unwrap();
 
     #[derive(Debug, PartialEq, Eq)]
     struct OutputInfo {
@@ -1926,7 +1938,9 @@ fn output_offset_xdg_matches_crtcs() {
     // Xdg output codepath. This leaves only the required wl_output::geometry event sent at global
     // binding to be forwarded to Xwayland.
     for info in outputs.iter() {
-        let out = f.create_output(info.x, info.y);
+        f.testwl.new_output(None);
+        f.wait_and_dispatch();
+        let out = f.testwl.finalize_output();
         out.geometry(
             info.x,
             info.y,
@@ -1947,8 +1961,15 @@ fn output_offset_xdg_matches_crtcs() {
         f.testwl.dispatch();
     }
 
-    // Give Xwayland time to respond to all of the events
-    std::thread::sleep(Duration::from_millis(50));
+    // Each output generates 2 CRTC change events while initializing, then each generate an
+    // additional CRTC change event when moved according to the global offset, for 6 events total
+    for _ in 0..6 {
+        match connection.await_event() {
+            xcb::Event::RandR(xcb::randr::Event::Notify(e))
+                if matches!(e.u(), xcb::randr::NotifyData::Cc(_)) => {}
+            other => panic!("Didn't get output change event, instead got {other:?}"),
+        }
+    }
     // If the required wl_output::geometry event on binding is not sent, Xwayland will leave the
     // cathode-ray tube controller (CRTC; a representation of the area to be sent to output(s) in
     // RandR) with an uninitialized rotation, which swaps the width and height of the CRTC.
@@ -2333,7 +2354,7 @@ fn xsettings_switch_owner() {
 fn rotated_output() {
     let mut f = Fixture::new_preset(|testwl| {
         testwl.enable_xdg_output_manager();
-        testwl.new_output();
+        testwl.new_output(None);
     });
     let mut connection = Connection::new(&f.display);
 
