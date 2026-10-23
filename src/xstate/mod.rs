@@ -111,6 +111,9 @@ pub struct XState {
     selection_state: SelectionState,
     settings: Settings,
     max_req_bytes: usize,
+    /// The border width each window last requested (ICCCM 4.1.5 wants it in synthetic
+    /// ConfigureNotify events), which is not necessarily the one it has.
+    requested_border_widths: HashMap<x::Window, u16>,
 }
 
 impl XState {
@@ -231,6 +234,7 @@ impl XState {
             selection_state,
             settings,
             max_req_bytes,
+            requested_border_widths: HashMap::new(),
         };
         r.create_ewmh_window();
         r.set_xsettings_owner();
@@ -352,6 +356,8 @@ impl XState {
             match event {
                 xcb::Event::X(x::Event::CreateNotify(e)) => {
                     debug!("new window: {e:?}");
+                    self.requested_border_widths
+                        .insert(e.window(), e.border_width());
                     server_state.new_window(
                         e.window(),
                         e.override_redirect(),
@@ -466,6 +472,7 @@ impl XState {
                 }
                 xcb::Event::X(x::Event::DestroyNotify(e)) => {
                     debug!("destroying window {:?}", e.window());
+                    self.requested_border_widths.remove(&e.window());
                     server_state.destroy_window(e.window());
                 }
                 xcb::Event::X(x::Event::PropertyNotify(e)) => {
@@ -494,13 +501,80 @@ impl XState {
                     if mask.contains(x::ConfigWindowMask::HEIGHT) {
                         list.push(x::ConfigWindow::Height(e.height().into()));
                     }
+                    if mask.contains(x::ConfigWindowMask::BORDER_WIDTH) {
+                        // Not applied, but ICCCM 4.1.5 wants it reported back as requested.
+                        self.requested_border_widths
+                            .insert(e.window(), e.border_width());
+                    }
 
+                    let geometry = self.connection.wait_for_reply(self.connection.send_request(
+                        &x::GetGeometry {
+                            drawable: x::Drawable::Window(e.window()),
+                        },
+                    ));
                     unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
                         &x::ConfigureWindow {
                             window: e.window(),
                             value_list: &list,
                         }
                     ));
+
+                    // ICCCM 4.1.5: the server only sends a real ConfigureNotify when something
+                    // changes, and the window manager must send a synthetic one when it changes
+                    // nothing (including a position we dropped for a mapped toplevel), or when
+                    // it moves or restacks the window without resizing it. Only a resize is
+                    // left to the real event. The synthetic event carries the border width the
+                    // client last requested, with the position adjusted for it.
+                    let Ok(geometry) = geometry else {
+                        continue;
+                    };
+                    let mut x = geometry.x();
+                    let mut y = geometry.y();
+                    let mut resized = false;
+                    for value in &list {
+                        match value {
+                            x::ConfigWindow::X(v) => x = *v as i16,
+                            x::ConfigWindow::Y(v) => y = *v as i16,
+                            x::ConfigWindow::Width(w) => {
+                                resized |= *w != u32::from(geometry.width());
+                            }
+                            x::ConfigWindow::Height(h) => {
+                                resized |= *h != u32::from(geometry.height());
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !resized {
+                        let border_width = self
+                            .requested_border_widths
+                            .get(&e.window())
+                            .copied()
+                            .unwrap_or(geometry.border_width());
+                        let border_delta =
+                            i32::from(geometry.border_width()) - i32::from(border_width);
+                        let event = x::ConfigureNotifyEvent::new(
+                            e.window(),
+                            e.window(),
+                            x::WINDOW_NONE,
+                            (i32::from(x) + border_delta) as i16,
+                            (i32::from(y) + border_delta) as i16,
+                            geometry.width(),
+                            geometry.height(),
+                            border_width,
+                            false,
+                        );
+                        if let Err(err) = self.connection.send_and_check_request(&x::SendEvent {
+                            destination: x::SendEventDest::Window(e.window()),
+                            propagate: false,
+                            event_mask: x::EventMask::STRUCTURE_NOTIFY,
+                            event: &event,
+                        }) {
+                            debug!(
+                                "Couldn't send synthetic ConfigureNotify to {:?}: {err:?}",
+                                e.window()
+                            );
+                        }
+                    }
                 }
                 xcb::Event::X(x::Event::ClientMessage(e)) => {
                     self.handle_client_message(e, server_state);
