@@ -244,6 +244,11 @@ pub fn main(mut data: impl RunData) -> Option<()> {
             xstate.update_global_scale(scale);
         }
 
+        // Synchronous X11 replies can buffer events without leaving the socket readable.
+        if xstate.handle_events(&mut server_state) {
+            continue;
+        }
+
         match poll(&mut fds, None) {
             Ok(_) => {
                 if !fds[3].revents().is_empty() {
