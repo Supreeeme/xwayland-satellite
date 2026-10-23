@@ -334,190 +334,206 @@ impl XState {
             .unwrap();
     }
 
-    pub fn handle_events(&mut self, server_state: &mut super::RealServerState) {
-        macro_rules! unwrap_or_skip_bad_window_cont {
-            ($err:expr) => {
-                unwrap_or_skip_bad_window!($err, continue)
-            };
+    /// Handle the events xcb already holds, which arrived while a request was waiting
+    /// for its reply. Such events were read off the socket into xcb's queue, so the
+    /// socket is not readable for them and a poll would sleep through them. Returns
+    /// whether any events were handled.
+    pub fn handle_queued_events(&mut self, server_state: &mut super::RealServerState) -> bool {
+        let mut handled = false;
+        let mut ignored_windows = Vec::new();
+        while let Some(event) = self.connection.poll_for_queued_event().unwrap() {
+            handled = true;
+            self.handle_event(event, server_state, &mut ignored_windows);
         }
+        handled
+    }
 
+    pub fn handle_events(&mut self, server_state: &mut super::RealServerState) {
         let mut ignored_windows = Vec::new();
         while let Some(event) = self.connection.poll_for_event().unwrap() {
-            trace!("x11 event: {event:?}");
+            self.handle_event(event, server_state, &mut ignored_windows);
+        }
+    }
 
-            if self.handle_selection_event(&event, server_state) {
-                continue;
+    fn handle_event(
+        &mut self,
+        event: xcb::Event,
+        server_state: &mut super::RealServerState,
+        ignored_windows: &mut Vec<x::Window>,
+    ) {
+        trace!("x11 event: {event:?}");
+
+        if self.handle_selection_event(&event, server_state) {
+            return;
+        }
+
+        match event {
+            xcb::Event::X(x::Event::CreateNotify(e)) => {
+                debug!("new window: {e:?}");
+                server_state.new_window(
+                    e.window(),
+                    e.override_redirect(),
+                    (&e).into(),
+                    self.get_pid(e.window()),
+                );
             }
+            xcb::Event::X(x::Event::ReparentNotify(e)) => {
+                debug!("reparent event: {e:?}");
+                if e.parent() == self.root {
+                    let geometry = self.connection.send_request(&x::GetGeometry {
+                        drawable: x::Drawable::Window(e.window()),
+                    });
+                    let attrs = self
+                        .connection
+                        .send_request(&x::GetWindowAttributes { window: e.window() });
+                    let geometry =
+                        unwrap_or_skip_bad_window_ret!(self.connection.wait_for_reply(geometry));
+                    let attrs =
+                        unwrap_or_skip_bad_window_ret!(self.connection.wait_for_reply(attrs));
 
-            match event {
-                xcb::Event::X(x::Event::CreateNotify(e)) => {
-                    debug!("new window: {e:?}");
                     server_state.new_window(
                         e.window(),
-                        e.override_redirect(),
-                        (&e).into(),
+                        attrs.override_redirect(),
+                        WindowDims {
+                            x: geometry.x(),
+                            y: geometry.y(),
+                            width: geometry.width(),
+                            height: geometry.height(),
+                        },
                         self.get_pid(e.window()),
                     );
-                }
-                xcb::Event::X(x::Event::ReparentNotify(e)) => {
-                    debug!("reparent event: {e:?}");
-                    if e.parent() == self.root {
-                        let geometry = self.connection.send_request(&x::GetGeometry {
-                            drawable: x::Drawable::Window(e.window()),
-                        });
-                        let attrs = self
-                            .connection
-                            .send_request(&x::GetWindowAttributes { window: e.window() });
-                        let geometry = unwrap_or_skip_bad_window_cont!(
-                            self.connection.wait_for_reply(geometry)
-                        );
-                        let attrs =
-                            unwrap_or_skip_bad_window_cont!(self.connection.wait_for_reply(attrs));
-
-                        server_state.new_window(
-                            e.window(),
-                            attrs.override_redirect(),
-                            WindowDims {
-                                x: geometry.x(),
-                                y: geometry.y(),
-                                width: geometry.width(),
-                                height: geometry.height(),
-                            },
-                            self.get_pid(e.window()),
-                        );
-                    } else {
-                        debug!("destroying window since its parent is no longer root!");
-                        server_state.destroy_window(e.window());
-                        ignored_windows.push(e.window());
-                    }
-                }
-                xcb::Event::X(x::Event::MapRequest(e)) => {
-                    debug!("requested to map {:?}", e.window());
-                    unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
-                        &x::ConfigureWindow {
-                            window: e.window(),
-                            value_list: &[x::ConfigWindow::StackMode(x::StackMode::Below)]
-                        }
-                    ));
-                    unwrap_or_skip_bad_window_cont!(
-                        self.connection
-                            .send_and_check_request(&x::MapWindow { window: e.window() })
-                    );
-                }
-                xcb::Event::X(x::Event::MapNotify(e)) => {
-                    unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
-                        &x::ChangeWindowAttributes {
-                            window: e.window(),
-                            value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
-                        }
-                    ));
-                    unwrap_or_skip_bad_window_cont!(
-                        self.handle_window_properties(server_state, e.window())
-                    );
-                    server_state.map_window(e.window());
-                    unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
-                        &x::ChangeProperty {
-                            mode: x::PropMode::Replace,
-                            window: e.window(),
-                            property: self.atoms.wm_state,
-                            r#type: self.atoms.wm_state,
-                            data: &[WmState::Normal as u32, x::Window::none().resource_id()],
-                        }
-                    ));
-                }
-                xcb::Event::X(x::Event::ConfigureNotify(e)) => {
-                    server_state.reconfigure_window(e);
-                }
-                xcb::Event::X(x::Event::UnmapNotify(e)) => {
-                    trace!("unmap event: {:?}", e.event());
-                    server_state.unmap_window(e.window());
-                    let active_win = self
-                        .connection
-                        .wait_for_reply(self.get_property_cookie(
-                            self.root,
-                            self.atoms.active_win,
-                            x::ATOM_WINDOW,
-                            1,
-                        ))
-                        .unwrap();
-
-                    let active_win: &[x::Window] = active_win.value();
-                    if active_win[0] == e.window() {
-                        let restore_to = server_state.focus_restore_target();
-                        server_state.connection.focus_window(restore_to, None);
-                    }
-
-                    unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
-                        &x::ChangeWindowAttributes {
-                            window: e.window(),
-                            value_list: &[x::Cw::EventMask(x::EventMask::empty())],
-                        }
-                    ));
-
-                    unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
-                        &x::ChangeProperty {
-                            mode: x::PropMode::Replace,
-                            window: e.window(),
-                            property: self.atoms.wm_state,
-                            r#type: self.atoms.wm_state,
-                            data: &[WmState::Withdrawn as u32, x::Window::none().resource_id()],
-                        }
-                    ));
-                }
-                xcb::Event::X(x::Event::DestroyNotify(e)) => {
-                    debug!("destroying window {:?}", e.window());
+                } else {
+                    debug!("destroying window since its parent is no longer root!");
                     server_state.destroy_window(e.window());
-                }
-                xcb::Event::X(x::Event::PropertyNotify(e)) => {
-                    if ignored_windows.contains(&e.window()) {
-                        continue;
-                    }
-                    self.handle_property_change(e, server_state);
-                }
-                xcb::Event::X(x::Event::ConfigureRequest(e)) => {
-                    debug!("{:?} request: {:?}", e.window(), e.value_mask());
-
-                    let mut list = Vec::new();
-                    let mask = e.value_mask();
-
-                    if server_state.can_change_position(e.window()) {
-                        if mask.contains(x::ConfigWindowMask::X) {
-                            list.push(x::ConfigWindow::X(e.x().into()));
-                        }
-                        if mask.contains(x::ConfigWindowMask::Y) {
-                            list.push(x::ConfigWindow::Y(e.y().into()));
-                        }
-                    }
-                    if mask.contains(x::ConfigWindowMask::WIDTH) {
-                        list.push(x::ConfigWindow::Width(e.width().into()));
-                    }
-                    if mask.contains(x::ConfigWindowMask::HEIGHT) {
-                        list.push(x::ConfigWindow::Height(e.height().into()));
-                    }
-
-                    unwrap_or_skip_bad_window_cont!(self.connection.send_and_check_request(
-                        &x::ConfigureWindow {
-                            window: e.window(),
-                            value_list: &list,
-                        }
-                    ));
-                }
-                xcb::Event::X(x::Event::ClientMessage(e)) => {
-                    self.handle_client_message(e, server_state);
-                }
-                xcb::Event::X(x::Event::MappingNotify(_)) => {}
-                xcb::Event::RandR(xcb::randr::Event::Notify(e))
-                    if matches!(e.u(), xcb::randr::NotifyData::Rc(_)) =>
-                {
-                    server_state.connection.update_outputs(self.root);
-                }
-                other => {
-                    warn!("unhandled event: {other:?}");
+                    ignored_windows.push(e.window());
                 }
             }
+            xcb::Event::X(x::Event::MapRequest(e)) => {
+                debug!("requested to map {:?}", e.window());
+                unwrap_or_skip_bad_window_ret!(self.connection.send_and_check_request(
+                    &x::ConfigureWindow {
+                        window: e.window(),
+                        value_list: &[x::ConfigWindow::StackMode(x::StackMode::Below)]
+                    }
+                ));
+                unwrap_or_skip_bad_window_ret!(
+                    self.connection
+                        .send_and_check_request(&x::MapWindow { window: e.window() })
+                );
+            }
+            xcb::Event::X(x::Event::MapNotify(e)) => {
+                unwrap_or_skip_bad_window_ret!(self.connection.send_and_check_request(
+                    &x::ChangeWindowAttributes {
+                        window: e.window(),
+                        value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
+                    }
+                ));
+                unwrap_or_skip_bad_window_ret!(
+                    self.handle_window_properties(server_state, e.window())
+                );
+                server_state.map_window(e.window());
+                unwrap_or_skip_bad_window_ret!(self.connection.send_and_check_request(
+                    &x::ChangeProperty {
+                        mode: x::PropMode::Replace,
+                        window: e.window(),
+                        property: self.atoms.wm_state,
+                        r#type: self.atoms.wm_state,
+                        data: &[WmState::Normal as u32, x::Window::none().resource_id()],
+                    }
+                ));
+            }
+            xcb::Event::X(x::Event::ConfigureNotify(e)) => {
+                server_state.reconfigure_window(e);
+            }
+            xcb::Event::X(x::Event::UnmapNotify(e)) => {
+                trace!("unmap event: {:?}", e.event());
+                server_state.unmap_window(e.window());
+                let active_win = self
+                    .connection
+                    .wait_for_reply(self.get_property_cookie(
+                        self.root,
+                        self.atoms.active_win,
+                        x::ATOM_WINDOW,
+                        1,
+                    ))
+                    .unwrap();
 
-            server_state.run();
+                let active_win: &[x::Window] = active_win.value();
+                if active_win[0] == e.window() {
+                    let restore_to = server_state.focus_restore_target();
+                    server_state.connection.focus_window(restore_to, None);
+                }
+
+                unwrap_or_skip_bad_window_ret!(self.connection.send_and_check_request(
+                    &x::ChangeWindowAttributes {
+                        window: e.window(),
+                        value_list: &[x::Cw::EventMask(x::EventMask::empty())],
+                    }
+                ));
+
+                unwrap_or_skip_bad_window_ret!(self.connection.send_and_check_request(
+                    &x::ChangeProperty {
+                        mode: x::PropMode::Replace,
+                        window: e.window(),
+                        property: self.atoms.wm_state,
+                        r#type: self.atoms.wm_state,
+                        data: &[WmState::Withdrawn as u32, x::Window::none().resource_id()],
+                    }
+                ));
+            }
+            xcb::Event::X(x::Event::DestroyNotify(e)) => {
+                debug!("destroying window {:?}", e.window());
+                server_state.destroy_window(e.window());
+            }
+            xcb::Event::X(x::Event::PropertyNotify(e)) => {
+                if ignored_windows.contains(&e.window()) {
+                    return;
+                }
+                self.handle_property_change(e, server_state);
+            }
+            xcb::Event::X(x::Event::ConfigureRequest(e)) => {
+                debug!("{:?} request: {:?}", e.window(), e.value_mask());
+
+                let mut list = Vec::new();
+                let mask = e.value_mask();
+
+                if server_state.can_change_position(e.window()) {
+                    if mask.contains(x::ConfigWindowMask::X) {
+                        list.push(x::ConfigWindow::X(e.x().into()));
+                    }
+                    if mask.contains(x::ConfigWindowMask::Y) {
+                        list.push(x::ConfigWindow::Y(e.y().into()));
+                    }
+                }
+                if mask.contains(x::ConfigWindowMask::WIDTH) {
+                    list.push(x::ConfigWindow::Width(e.width().into()));
+                }
+                if mask.contains(x::ConfigWindowMask::HEIGHT) {
+                    list.push(x::ConfigWindow::Height(e.height().into()));
+                }
+
+                unwrap_or_skip_bad_window_ret!(self.connection.send_and_check_request(
+                    &x::ConfigureWindow {
+                        window: e.window(),
+                        value_list: &list,
+                    }
+                ));
+            }
+            xcb::Event::X(x::Event::ClientMessage(e)) => {
+                self.handle_client_message(e, server_state);
+            }
+            xcb::Event::X(x::Event::MappingNotify(_)) => {}
+            xcb::Event::RandR(xcb::randr::Event::Notify(e))
+                if matches!(e.u(), xcb::randr::NotifyData::Rc(_)) =>
+            {
+                server_state.connection.update_outputs(self.root);
+            }
+            other => {
+                warn!("unhandled event: {other:?}");
+            }
         }
+
+        server_state.run();
     }
 
     fn handle_client_message(
