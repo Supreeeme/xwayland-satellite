@@ -2133,8 +2133,16 @@ fn forced_1x_scale_consistent_x11_size() {
 #[test]
 fn xsettings_scale() {
     let mut f = Fixture::new();
-    f.create_output(0, 0);
     let mut connection = Connection::new(&f.display);
+    let owner = connection
+        .get_reply(&x::GetSelectionOwner {
+            selection: connection.atoms.xsettings,
+        })
+        .owner();
+    connection.get_property_change_events(owner);
+    f.create_output(0, 0);
+    let reply = connection.await_property_notify();
+    assert_eq!(reply.atom(), connection.atoms.xsettings_setting);
     f.testwl.enable_xdg_output_manager();
 
     let settings = connection.get_xsettings();
@@ -2149,7 +2157,9 @@ fn xsettings_scale() {
     let output = f.testwl.get_output("WL-1").unwrap();
     output.scale(2);
     output.done();
-    f.wait_and_dispatch();
+    f.testwl.dispatch();
+    let reply = connection.await_property_notify();
+    assert_eq!(reply.atom(), connection.atoms.xsettings_setting);
 
     let settings = connection.get_xsettings();
     assert!(settings.serial > settings_serial);
@@ -2161,30 +2171,18 @@ fn xsettings_scale() {
     assert!(settings.data["Gdk/UnscaledDPI"].last_change > unscaled_serial);
 
     let output2 = f.create_output(0, 0);
+    let reply = connection.await_property_notify();
+    assert_eq!(reply.atom(), connection.atoms.xsettings_setting);
     let settings = connection.get_xsettings();
     assert_eq!(settings.data["Xft/DPI"].value, 96 * 1024);
     assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 1);
     assert_eq!(settings.data["Gdk/UnscaledDPI"].value, 96 * 1024);
 
-    let owner = connection
-        .get_reply(&x::GetSelectionOwner {
-            selection: connection.atoms.xsettings,
-        })
-        .owner();
-    connection
-        .send_and_check_request(&x::ChangeWindowAttributes {
-            window: owner,
-            value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
-        })
-        .unwrap();
     output2.scale(2);
     output2.done();
     f.testwl.dispatch();
-    assert!(matches!(
-        connection.await_event(),
-        xcb::Event::X(x::Event::PropertyNotify(event))
-            if event.atom() == connection.atoms.xsettings_setting
-    ));
+    let reply = connection.await_property_notify();
+    assert_eq!(reply.atom(), connection.atoms.xsettings_setting);
 
     let settings = connection.get_xsettings();
     assert_eq!(settings.data["Xft/DPI"].value, 2 * 96 * 1024);
@@ -2199,7 +2197,15 @@ fn xsettings_fractional_scale() {
     });
     let mut connection = Connection::new(&f.display);
     f.testwl.enable_xdg_output_manager();
+    let owner = connection
+        .get_reply(&x::GetSelectionOwner {
+            selection: connection.atoms.xsettings,
+        })
+        .owner();
+    connection.get_property_change_events(owner);
     let output = f.create_output(0, 0); // WL-1
+    let reply = connection.await_property_notify();
+    assert_eq!(reply.atom(), connection.atoms.xsettings_setting);
 
     let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
     let surface = f.map_as_toplevel(&mut connection, window);
@@ -2216,7 +2222,9 @@ fn xsettings_fractional_scale() {
     fractional.preferred_scale(180); // 1.5 scale
     f.testwl.move_surface_to_output(surface, &output);
 
-    f.wait_and_dispatch();
+    f.testwl.dispatch();
+    let reply = connection.await_property_notify();
+    assert_eq!(reply.atom(), connection.atoms.xsettings_setting);
     let settings = connection.get_xsettings();
 
     assert_eq!(
@@ -2232,7 +2240,9 @@ fn xsettings_fractional_scale() {
     let data = f.testwl.get_surface_data(surface).unwrap();
     let fractional = data.fractional.as_ref().unwrap();
     fractional.preferred_scale(300); // 2.5 scale
-    f.wait_and_dispatch();
+    f.testwl.dispatch();
+    let reply = connection.await_property_notify();
+    assert_eq!(reply.atom(), connection.atoms.xsettings_setting);
 
     let settings = connection.get_xsettings();
     assert_eq!(
