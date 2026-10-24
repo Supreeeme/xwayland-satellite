@@ -407,9 +407,12 @@ impl std::ops::Deref for Connection {
 
 impl Connection {
     fn new(display: &str) -> Self {
-        let (inner, _) =
-            xcb::Connection::connect_with_extensions(Some(display), &[xcb::Extension::XFixes], &[])
-                .unwrap();
+        let (inner, _) = xcb::Connection::connect_with_extensions(
+            Some(display),
+            &[xcb::Extension::XFixes, xcb::Extension::RandR],
+            &[],
+        )
+        .unwrap();
         // xfixes init
         let reply = inner
             .wait_for_reply(inner.send_request(&xcb::xfixes::QueryVersion {
@@ -1893,7 +1896,13 @@ fn output_offset_xdg_matches_crtcs() {
     let mut f = Fixture::new_preset(|testwl| {
         testwl.enable_xdg_output_manager();
     });
-    let connection = Connection::new(&f.display);
+    let mut connection = Connection::new(&f.display);
+    connection
+        .send_and_check_request(&xcb::randr::SelectInput {
+            window: connection.root,
+            enable: xcb::randr::NotifyMask::CRTC_CHANGE,
+        })
+        .unwrap();
 
     #[derive(Debug, PartialEq, Eq)]
     struct OutputInfo {
@@ -1947,8 +1956,21 @@ fn output_offset_xdg_matches_crtcs() {
         f.testwl.dispatch();
     }
 
-    // Give Xwayland time to respond to all of the events
-    std::thread::sleep(Duration::from_millis(50));
+    let mut pending_sizes: Vec<_> = outputs
+        .iter()
+        .map(|info| (info.width, info.height))
+        .collect();
+    while !pending_sizes.is_empty() {
+        let xcb::Event::RandR(xcb::randr::Event::Notify(event)) = connection.await_event() else {
+            continue;
+        };
+        let xcb::randr::NotifyData::Cc(change) = event.u() else {
+            continue;
+        };
+        pending_sizes.retain(|&(width, height)| {
+            width != i32::from(change.width()) || height != i32::from(change.height())
+        });
+    }
     // If the required wl_output::geometry event on binding is not sent, Xwayland will leave the
     // cathode-ray tube controller (CRTC; a representation of the area to be sent to output(s) in
     // RandR) with an uninitialized rotation, which swaps the width and height of the CRTC.
@@ -2111,8 +2133,16 @@ fn forced_1x_scale_consistent_x11_size() {
 #[test]
 fn xsettings_scale() {
     let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let owner = connection
+        .get_reply(&x::GetSelectionOwner {
+            selection: connection.atoms.xsettings,
+        })
+        .owner();
+    connection.get_property_change_events(owner);
     f.create_output(0, 0);
-    let connection = Connection::new(&f.display);
+    let reply = connection.await_property_notify();
+    assert_eq!(reply.atom(), connection.atoms.xsettings_setting);
     f.testwl.enable_xdg_output_manager();
 
     let settings = connection.get_xsettings();
@@ -2127,7 +2157,9 @@ fn xsettings_scale() {
     let output = f.testwl.get_output("WL-1").unwrap();
     output.scale(2);
     output.done();
-    f.wait_and_dispatch();
+    f.testwl.dispatch();
+    let reply = connection.await_property_notify();
+    assert_eq!(reply.atom(), connection.atoms.xsettings_setting);
 
     let settings = connection.get_xsettings();
     assert!(settings.serial > settings_serial);
@@ -2139,6 +2171,8 @@ fn xsettings_scale() {
     assert!(settings.data["Gdk/UnscaledDPI"].last_change > unscaled_serial);
 
     let output2 = f.create_output(0, 0);
+    let reply = connection.await_property_notify();
+    assert_eq!(reply.atom(), connection.atoms.xsettings_setting);
     let settings = connection.get_xsettings();
     assert_eq!(settings.data["Xft/DPI"].value, 96 * 1024);
     assert_eq!(settings.data["Gdk/WindowScalingFactor"].value, 1);
@@ -2147,7 +2181,8 @@ fn xsettings_scale() {
     output2.scale(2);
     output2.done();
     f.testwl.dispatch();
-    std::thread::sleep(Duration::from_millis(1));
+    let reply = connection.await_property_notify();
+    assert_eq!(reply.atom(), connection.atoms.xsettings_setting);
 
     let settings = connection.get_xsettings();
     assert_eq!(settings.data["Xft/DPI"].value, 2 * 96 * 1024);
@@ -2162,7 +2197,15 @@ fn xsettings_fractional_scale() {
     });
     let mut connection = Connection::new(&f.display);
     f.testwl.enable_xdg_output_manager();
+    let owner = connection
+        .get_reply(&x::GetSelectionOwner {
+            selection: connection.atoms.xsettings,
+        })
+        .owner();
+    connection.get_property_change_events(owner);
     let output = f.create_output(0, 0); // WL-1
+    let reply = connection.await_property_notify();
+    assert_eq!(reply.atom(), connection.atoms.xsettings_setting);
 
     let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
     let surface = f.map_as_toplevel(&mut connection, window);
@@ -2179,7 +2222,9 @@ fn xsettings_fractional_scale() {
     fractional.preferred_scale(180); // 1.5 scale
     f.testwl.move_surface_to_output(surface, &output);
 
-    f.wait_and_dispatch();
+    f.testwl.dispatch();
+    let reply = connection.await_property_notify();
+    assert_eq!(reply.atom(), connection.atoms.xsettings_setting);
     let settings = connection.get_xsettings();
 
     assert_eq!(
@@ -2195,7 +2240,9 @@ fn xsettings_fractional_scale() {
     let data = f.testwl.get_surface_data(surface).unwrap();
     let fractional = data.fractional.as_ref().unwrap();
     fractional.preferred_scale(300); // 2.5 scale
-    f.wait_and_dispatch();
+    f.testwl.dispatch();
+    let reply = connection.await_property_notify();
+    assert_eq!(reply.atom(), connection.atoms.xsettings_setting);
 
     let settings = connection.get_xsettings();
     assert_eq!(
@@ -2378,6 +2425,12 @@ fn client_init_move() {
 
     let win_toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
     let surface = f.map_as_toplevel(&mut connection, win_toplevel);
+    connection
+        .send_and_check_request(&x::ChangeWindowAttributes {
+            window: win_toplevel,
+            value_list: &[x::Cw::EventMask(x::EventMask::BUTTON_PRESS)],
+        })
+        .unwrap();
     f.testwl.move_pointer_to(surface, 10., 10.);
     let ptr = f.testwl.pointer();
     ptr.motion(10, 10.0, 10.0);
@@ -2385,6 +2438,10 @@ fn client_init_move() {
     ptr.button(10, 20, BTN_LEFT, wl_pointer::ButtonState::Pressed);
     ptr.frame();
     f.testwl.dispatch();
+    assert!(matches!(
+        connection.await_event(),
+        xcb::Event::X(x::Event::ButtonPress(_))
+    ));
 
     connection.send_client_message(&x::ClientMessageEvent::new(
         win_toplevel,
@@ -2404,6 +2461,12 @@ fn client_init_resize() {
 
     let win_toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
     let surface = f.map_as_toplevel(&mut connection, win_toplevel);
+    connection
+        .send_and_check_request(&x::ChangeWindowAttributes {
+            window: win_toplevel,
+            value_list: &[x::Cw::EventMask(x::EventMask::BUTTON_PRESS)],
+        })
+        .unwrap();
     f.testwl.move_pointer_to(surface, 10., 10.);
     let ptr = f.testwl.pointer();
     ptr.motion(10, 10.0, 10.0);
@@ -2411,6 +2474,10 @@ fn client_init_resize() {
     ptr.button(10, 20, BTN_LEFT, wl_pointer::ButtonState::Pressed);
     ptr.frame();
     f.testwl.dispatch();
+    assert!(matches!(
+        connection.await_event(),
+        xcb::Event::X(x::Event::ButtonPress(_))
+    ));
 
     connection.send_client_message(&x::ClientMessageEvent::new(
         win_toplevel,
