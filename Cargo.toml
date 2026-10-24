@@ -51,7 +51,6 @@ hecs = { version = "0.10.5", features = ["macros"] }
 num_enum = "0.7.4"
 tiny-skia = "0.11.4"
 ab_glyph = "0.2.32"
-fontdue = "0.9.3"
 async-channel = "2.5.0"
 
 [features]
