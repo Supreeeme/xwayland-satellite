@@ -811,7 +811,7 @@ fn root_unmap_notify_does_not_disable_new_windows() {
     let mut connection = Connection::new(&f.display);
 
     let existing_window = connection.new_window(connection.root, 0, 0, 20, 20, false);
-    let existing_surface = f.map_as_toplevel(&mut connection, existing_window);
+    f.map_as_toplevel(&mut connection, existing_window);
 
     connection
         .send_and_check_request(&x::SendEvent {
@@ -822,24 +822,19 @@ fn root_unmap_notify_does_not_disable_new_windows() {
         })
         .unwrap();
 
-    // Updating an existing window gives us an observable ordering barrier: XState must process the
-    // root UnmapNotify before this PropertyNotify reaches the Wayland server.
-    connection.set_property(
-        existing_window,
-        x::ATOM_STRING,
-        x::ATOM_WM_NAME,
-        b"still managed",
-    );
+    // Send an event which triggers the event loop
+    connection.unmap_window(existing_window);
     f.wait_and_dispatch();
-    assert_eq!(
-        f.testwl
-            .get_surface_data(existing_surface)
-            .unwrap()
-            .toplevel()
-            .title,
-        Some("still managed".into())
-    );
 
+    let reply = connection.get_reply(&x::GetWindowAttributes {
+        window: connection.root,
+    });
+    assert!(
+        reply
+            .all_event_masks()
+            .contains(x::EventMask::SUBSTRUCTURE_NOTIFY)
+    );
+    // Assert the mapping of windows continues to work
     let new_window = connection.new_window(connection.root, 0, 0, 20, 20, false);
     f.map_as_toplevel(&mut connection, new_window);
 }
