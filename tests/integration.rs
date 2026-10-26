@@ -407,9 +407,12 @@ impl std::ops::Deref for Connection {
 
 impl Connection {
     fn new(display: &str) -> Self {
-        let (inner, _) =
-            xcb::Connection::connect_with_extensions(Some(display), &[xcb::Extension::XFixes], &[])
-                .unwrap();
+        let (inner, _) = xcb::Connection::connect_with_extensions(
+            Some(display),
+            &[xcb::Extension::XFixes, xcb::Extension::RandR],
+            &[],
+        )
+        .unwrap();
         // xfixes init
         let reply = inner
             .wait_for_reply(inner.send_request(&xcb::xfixes::QueryVersion {
@@ -634,6 +637,31 @@ impl Connection {
             event_mask,
         })
         .unwrap();
+    }
+
+    #[track_caller]
+    fn get_crtc_change_events(&mut self) {
+        self.send_and_check_request(&xcb::randr::SelectInput {
+            window: self.root,
+            enable: xcb::randr::NotifyMask::CRTC_CHANGE,
+        })
+        .unwrap();
+    }
+
+    #[track_caller]
+    fn await_crtc_change_events(&mut self, count: u32) {
+        for _ in 1..=count {
+            match self.await_event() {
+                xcb::Event::RandR(xcb::randr::Event::Notify(e))
+                    if matches!(e.u(), xcb::randr::NotifyData::Cc(_)) => {}
+                other => panic!("Didn't get output change event, instead got {other:?}"),
+            }
+        }
+        assert!(
+            self.poll_for_event()
+                .expect("Failed to poll for event")
+                .is_none()
+        );
     }
 
     #[track_caller]
@@ -1886,6 +1914,37 @@ fn negative_output_coordinates() {
     assert_eq!(ptr_reply.child(), window);
     assert_eq!(ptr_reply.win_x(), 30);
     assert_eq!(ptr_reply.win_y(), 40);
+}
+
+#[test]
+fn mode_resends_logical_size() {
+    let mut f = Fixture::new_preset(|testwl| {
+        testwl.enable_xdg_output_manager();
+    });
+    let mut connection = Connection::new(&f.display);
+    connection.get_crtc_change_events();
+
+    f.create_output(0, 0);
+    let output = f.testwl.get_output("WL-1").unwrap();
+    output.mode(wl_output::Mode::Current, 1600, 900, 60);
+    output.done();
+    f.wait_and_dispatch();
+
+    // 1 event each for zero-initializing the CRTC, setting it to the 1000x1000 default, and responding to the `Mode` event
+    connection.await_crtc_change_events(3);
+
+    let resources = connection.get_reply(&xcb::randr::GetScreenResources {
+        window: connection.root,
+    });
+    let output_reply = connection.get_reply(&xcb::randr::GetOutputInfo {
+        output: resources.outputs()[0],
+        config_timestamp: resources.config_timestamp(),
+    });
+    let crtc_reply = connection.get_reply(&xcb::randr::GetCrtcInfo {
+        crtc: output_reply.crtc(),
+        config_timestamp: resources.config_timestamp(),
+    });
+    assert_eq!((crtc_reply.width(), crtc_reply.height()), (1600, 900));
 }
 
 #[test]
