@@ -1971,7 +1971,9 @@ fn output_offset_xdg_matches_crtcs() {
     let mut f = Fixture::new_preset(|testwl| {
         testwl.enable_xdg_output_manager();
     });
-    let connection = Connection::new(&f.display);
+    let mut connection = Connection::new(&f.display);
+    connection.get_crtc_change_events();
+
     #[derive(Debug, PartialEq, Eq)]
     struct OutputInfo {
         name: String,
@@ -2024,8 +2026,10 @@ fn output_offset_xdg_matches_crtcs() {
         f.testwl.dispatch();
     }
 
-    // Give Xwayland time to respond to all of the events
-    std::thread::sleep(Duration::from_millis(50));
+    // 7 events: 2 for each CRTC 0-initialization, 4 for setting each size (2 each for `wl_output`
+    // and `xdg_output, 1 for the output offset adjustment
+    connection.await_crtc_change_events(7);
+
     // If the required wl_output::geometry event on binding is not sent, Xwayland will leave the
     // cathode-ray tube controller (CRTC; a representation of the area to be sent to output(s) in
     // RandR) with an uninitialized rotation, which swaps the width and height of the CRTC.
