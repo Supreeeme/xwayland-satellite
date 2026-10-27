@@ -3289,8 +3289,8 @@ fn client_side_decorations_fractional_scale() {
         f.run();
         f.run();
 
-        let x_width = (100.0 * scale).floor() as u16;
-        let x_height = (content_height * scale) as u16;
+        let x_width = (100.0 * scale).round() as u16;
+        let x_height = (content_height * scale).round() as u16;
         let dims = f.connection().window(window).dims;
         assert_eq!(
             (dims.width, dims.height),
