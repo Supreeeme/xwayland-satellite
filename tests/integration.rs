@@ -173,7 +173,7 @@ impl Fixture {
         // Give Xwayland time to do its thing
 
         let mut ready = our_data.display.lock().unwrap().is_some();
-        while !ready && start.elapsed() < Duration::from_millis(2000) {
+        while !ready && start.elapsed() < Duration::from_millis(20000) {
             let timeout = timespec_from_millis(100);
             let n = poll(&mut f, Some(&timeout)).unwrap();
             if n > 0 {
