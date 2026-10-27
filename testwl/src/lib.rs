@@ -907,10 +907,14 @@ impl Server {
         self.display.flush_clients().unwrap();
     }
 
-    pub fn enable_xdg_output_manager(&mut self) {
+    pub fn enable_xdg_output_manager_version(&mut self, version: u32) {
         self.dh
-            .create_global::<State, ZxdgOutputManagerV1, _>(3, ());
+            .create_global::<State, ZxdgOutputManagerV1, _>(version, ());
         self.display.flush_clients().unwrap();
+    }
+
+    pub fn enable_xdg_output_manager(&mut self) {
+        self.enable_xdg_output_manager_version(3);
     }
 
     pub fn move_xdg_output(&mut self, output: &WlOutput, x: i32, y: i32) {
