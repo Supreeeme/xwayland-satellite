@@ -340,6 +340,26 @@ mod window_role_heuristics {
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
     }
 
+    // https://github.com/Supreeeme/xwayland-satellite/issues/542
+    // Steam Input uses a non-resizable utility window with no decor for the OSK
+    #[test]
+    fn steam_input_osk() {
+        let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new()
+            .user_pos(1055, 927)
+            .min_size(1280, 360)
+            .max_size(1280, 360);
+        let win = WindowRoleHeuristics {
+            override_redirect: false,
+            has_transient_for: false,
+            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
+            window_types: vec![win_types.utility],
+            wm_class: Some("steamwebhelper".into()),
+            wm_normal_hints: Some(wm_normal_hints.into()),
+        };
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
+    }
+
     // https://github.com/Supreeeme/xwayland-satellite/issues/356
     // Popup for specifying the _NET_WM_WINDOW_TYPE_COMBO window type
     #[test]

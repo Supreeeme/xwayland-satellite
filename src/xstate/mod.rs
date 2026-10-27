@@ -1200,7 +1200,9 @@ impl WindowRoleHeuristics {
                     );
                 }
                 x if x == window_atoms.utility => {
-                    return WindowRole::new_basic(motif_no_decor && forced_size);
+                    return WindowRole::new_basic(
+                        self.has_transient_for && motif_no_decor && forced_size,
+                    );
                 }
                 x if x == window_atoms.splash => return WindowRole::Splash,
                 x if [
