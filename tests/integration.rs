@@ -1918,33 +1918,35 @@ fn negative_output_coordinates() {
 
 #[test]
 fn mode_resends_logical_size() {
-    let mut f = Fixture::new_preset(|testwl| {
-        testwl.enable_xdg_output_manager();
-    });
-    let mut connection = Connection::new(&f.display);
-    connection.get_crtc_change_events();
+    for version in 2..=3 {
+        let mut f = Fixture::new_preset(|testwl| {
+            testwl.enable_xdg_output_manager_version(version);
+        });
+        let mut connection = Connection::new(&f.display);
+        connection.get_crtc_change_events();
 
-    f.create_output(0, 0);
-    let output = f.testwl.get_output("WL-1").unwrap();
-    output.mode(wl_output::Mode::Current, 1600, 900, 60);
-    output.done();
-    f.wait_and_dispatch();
+        f.create_output(0, 0);
+        let output = f.testwl.get_output("WL-1").unwrap();
+        output.mode(wl_output::Mode::Current, 1600, 900, 60);
+        output.done();
+        f.wait_and_dispatch();
 
-    // 1 event each for zero-initializing the CRTC, setting it to the 1000x1000 default, and responding to the `Mode` event
-    connection.await_crtc_change_events(3);
+        // 1 event each for zero-initializing the CRTC, setting it to the 1000x1000 default, and responding to the `Mode` event
+        connection.await_crtc_change_events(3);
 
-    let resources = connection.get_reply(&xcb::randr::GetScreenResources {
-        window: connection.root,
-    });
-    let output_reply = connection.get_reply(&xcb::randr::GetOutputInfo {
-        output: resources.outputs()[0],
-        config_timestamp: resources.config_timestamp(),
-    });
-    let crtc_reply = connection.get_reply(&xcb::randr::GetCrtcInfo {
-        crtc: output_reply.crtc(),
-        config_timestamp: resources.config_timestamp(),
-    });
-    assert_eq!((crtc_reply.width(), crtc_reply.height()), (1600, 900));
+        let resources = connection.get_reply(&xcb::randr::GetScreenResources {
+            window: connection.root,
+        });
+        let output_reply = connection.get_reply(&xcb::randr::GetOutputInfo {
+            output: resources.outputs()[0],
+            config_timestamp: resources.config_timestamp(),
+        });
+        let crtc_reply = connection.get_reply(&xcb::randr::GetCrtcInfo {
+            crtc: output_reply.crtc(),
+            config_timestamp: resources.config_timestamp(),
+        });
+        assert_eq!((crtc_reply.width(), crtc_reply.height()), (1600, 900));
+    }
 }
 
 #[test]

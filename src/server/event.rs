@@ -1367,11 +1367,22 @@ impl OutputEvent {
                     .name(name.clone());
                 state.world.insert(target, (OutputName(name),)).unwrap();
             }
+            Event::Done {} => {
+                let Ok((output, xdg)) = state
+                    .world
+                    .query_one_mut::<(&WlOutput, Option<&XdgOutputServer>)>(target)
+                else {
+                    return;
+                };
+                if let Some(xdg) = xdg {
+                    xdg.done();
+                }
+                output.done();
+            }
             _ => simple_event_shunt! {
                 state.world.get::<&WlOutput>(target).unwrap(),
                 event: client::wl_output::Event => [
                     Description { description },
-                    Done
                 ]
             },
         }
