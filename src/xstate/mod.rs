@@ -273,10 +273,10 @@ impl XState {
         // Republish _NET_CLIENT_LIST and _NET_CLIENT_LIST_STACKING on the root window
         self.set_root_property(self.atoms.client_list, x::ATOM_WINDOW, &self.client_windows);
 
-        let stacking = match self
-            .connection
-            .wait_for_reply(self.connection.send_request(&x::QueryTree { window: self.root }))
-        {
+        let stacking = match self.connection.wait_for_reply(
+            self.connection
+                .send_request(&x::QueryTree { window: self.root }),
+        ) {
             Ok(reply) => reply
                 .children()
                 .iter()
