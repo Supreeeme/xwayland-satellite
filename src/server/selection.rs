@@ -15,7 +15,6 @@ use smithay_client_toolkit::primary_selection::PrimarySelectionManagerState;
 use smithay_client_toolkit::primary_selection::device::PrimarySelectionDevice;
 use smithay_client_toolkit::primary_selection::offer::PrimarySelectionOffer;
 use smithay_client_toolkit::primary_selection::selection::PrimarySelectionSource;
-use std::io::Read;
 use std::rc::{Rc, Weak};
 
 pub(super) struct SelectionStates<S: X11Selection> {
@@ -158,11 +157,12 @@ impl<T: SelectionType> ForeignSelection<T> {
         mime_type: String,
         state: &ServerState<impl XConnection>,
     ) -> Vec<u8> {
-        let mut pipe = T::receive_offer(&self.inner, mime_type).unwrap();
+        let Ok(pipe) = T::receive_offer(&self.inner, mime_type) else {
+            warn!("Could not receive selection data from Wayland");
+            return Vec::new();
+        };
         state.queue.flush().unwrap();
-        let mut data = Vec::new();
-        pipe.read_to_end(&mut data).unwrap();
-        data
+        super::dnd::read_pipe(pipe)
     }
 }
 

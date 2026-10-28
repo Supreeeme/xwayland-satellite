@@ -6,7 +6,7 @@ use smithay_client_toolkit::{
     activation::{ActivationHandler, RequestData, RequestDataExt},
     data_device_manager::{
         data_device::{DataDeviceData, DataDeviceHandler},
-        data_offer::{DataOfferHandler, SelectionOffer},
+        data_offer::{DataOfferHandler, DragOffer, SelectionOffer},
         data_source::DataSourceHandler,
     },
     delegate_activation, delegate_data_device, delegate_primary_selection,
@@ -121,6 +121,15 @@ pub(super) struct MyWorld {
     pub clipboard: SelectionEvents<SelectionOffer>,
     pub primary: SelectionEvents<PrimarySelectionOffer>,
     pub pending_activations: Vec<(xcb::x::Window, String)>,
+    pub dnd: Vec<WlDndEvent>,
+}
+
+/// Wayland drag-and-drop events over our surfaces, bridged to XDND by XState.
+pub(crate) enum WlDndEvent {
+    Enter(DragOffer),
+    Motion(f64, f64),
+    Leave,
+    Drop(DragOffer),
 }
 
 impl MyWorld {
@@ -135,6 +144,7 @@ impl MyWorld {
             clipboard: Default::default(),
             primary: Default::default(),
             pending_activations: Vec::new(),
+            dnd: Vec::new(),
         }
     }
 }
@@ -452,8 +462,12 @@ impl DataDeviceHandler for MyWorld {
         &mut self,
         _: &wayland_client::Connection,
         _: &wayland_client::QueueHandle<Self>,
-        _: &wayland_client::protocol::wl_data_device::WlDataDevice,
+        data_device: &wayland_client::protocol::wl_data_device::WlDataDevice,
     ) {
+        let data: &DataDeviceData = data_device.data().unwrap();
+        if let Some(offer) = data.drag_offer() {
+            self.dnd.push(WlDndEvent::Drop(offer));
+        }
     }
 
     fn motion(
@@ -461,9 +475,10 @@ impl DataDeviceHandler for MyWorld {
         _: &wayland_client::Connection,
         _: &wayland_client::QueueHandle<Self>,
         _: &wayland_client::protocol::wl_data_device::WlDataDevice,
-        _: f64,
-        _: f64,
+        x: f64,
+        y: f64,
     ) {
+        self.dnd.push(WlDndEvent::Motion(x, y));
     }
 
     fn leave(
@@ -472,17 +487,22 @@ impl DataDeviceHandler for MyWorld {
         _: &wayland_client::QueueHandle<Self>,
         _: &wayland_client::protocol::wl_data_device::WlDataDevice,
     ) {
+        self.dnd.push(WlDndEvent::Leave);
     }
 
     fn enter(
         &mut self,
         _: &wayland_client::Connection,
         _: &wayland_client::QueueHandle<Self>,
-        _: &wayland_client::protocol::wl_data_device::WlDataDevice,
+        data_device: &wayland_client::protocol::wl_data_device::WlDataDevice,
         _: f64,
         _: f64,
         _: &wayland_client::protocol::wl_surface::WlSurface,
     ) {
+        let data: &DataDeviceData = data_device.data().unwrap();
+        if let Some(offer) = data.drag_offer() {
+            self.dnd.push(WlDndEvent::Enter(offer));
+        }
     }
 }
 

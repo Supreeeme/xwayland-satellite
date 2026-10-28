@@ -240,6 +240,8 @@ pub fn main(mut data: impl RunData) -> Option<()> {
             xstate.set_primary_selection(sel);
         }
 
+        xstate.handle_wl_dnd(&mut server_state);
+
         if let Some(scale) = server_state.new_global_scale() {
             xstate.update_global_scale(scale);
         }
