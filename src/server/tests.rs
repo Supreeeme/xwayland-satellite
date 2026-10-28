@@ -1451,11 +1451,26 @@ trait SelectionTest {
         testwl: &mut testwl::Server,
         send_data: impl SendDataForMimeFn,
     ) -> Vec<testwl::PasteData>;
+    fn control_mimes(testwl: &mut testwl::Server) -> Vec<String>;
+    fn control_paste_data(
+        testwl: &mut testwl::Server,
+        send_data: impl SendDataForMimeFn,
+    ) -> Vec<testwl::PasteData>;
+    fn backend(testwl: &testwl::Server) -> Option<testwl::SelectionBackend>;
     fn create_offer(testwl: &mut testwl::Server, data: Vec<testwl::PasteData>);
 }
 
 macro_rules! selection_tests {
-    ($name:ident, $selection_type:ty, $get_mime_fn:ident, $get_paste_data_fn:ident, $create_offer_fn:ident) => {
+    (
+        $name:ident,
+        $selection_type:ty,
+        $get_mime_fn:ident,
+        $get_paste_data_fn:ident,
+        $get_control_mime_fn:ident,
+        $get_control_paste_data_fn:ident,
+        $get_backend_fn:ident,
+        $create_offer_fn:ident
+    ) => {
         impl SelectionTest for $selection_type {
             type SelectionType = $selection_type;
             fn mimes(testwl: &mut testwl::Server) -> Vec<String> {
@@ -1467,6 +1482,18 @@ macro_rules! selection_tests {
             ) -> Vec<testwl::PasteData> {
                 testwl.$get_paste_data_fn(send_data)
             }
+            fn control_mimes(testwl: &mut testwl::Server) -> Vec<String> {
+                testwl.$get_control_mime_fn()
+            }
+            fn control_paste_data(
+                testwl: &mut testwl::Server,
+                send_data: impl SendDataForMimeFn,
+            ) -> Vec<testwl::PasteData> {
+                testwl.$get_control_paste_data_fn(send_data)
+            }
+            fn backend(testwl: &testwl::Server) -> Option<testwl::SelectionBackend> {
+                testwl.$get_backend_fn()
+            }
             fn create_offer(testwl: &mut testwl::Server, data: Vec<testwl::PasteData>) {
                 testwl.$create_offer_fn(data);
             }
@@ -1477,6 +1504,21 @@ macro_rules! selection_tests {
             #[test]
             fn copy_from_x11() {
                 super::copy_from_x11::<$selection_type>();
+            }
+
+            #[test]
+            fn copy_from_x11_without_x11_focus() {
+                super::copy_from_x11_without_x11_focus::<$selection_type>();
+            }
+
+            #[test]
+            fn copy_from_x11_without_ext_data_control() {
+                super::copy_from_x11_without_ext_data_control::<$selection_type>();
+            }
+
+            #[test]
+            fn selection_ext_then_core() {
+                super::selection_ext_then_core::<$selection_type>();
             }
 
             #[test]
@@ -1497,6 +1539,9 @@ selection_tests!(
     Clipboard,
     data_source_mimes,
     clipboard_paste_data,
+    control_data_source_mimes,
+    control_clipboard_paste_data,
+    clipboard_source_backend,
     create_data_offer
 );
 selection_tests!(
@@ -1504,6 +1549,9 @@ selection_tests!(
     Primary,
     primary_source_mimes,
     primary_paste_data,
+    control_primary_source_mimes,
+    control_primary_paste_data,
+    primary_source_backend,
     create_primary_offer
 );
 
@@ -1526,6 +1574,8 @@ fn copy_from_x11<T: SelectionTest>() {
     f.satellite.set_selection_source::<T::SelectionType>(&mimes);
     f.run();
 
+    assert_eq!(T::backend(&f.testwl), Some(testwl::SelectionBackend::Core));
+
     let server_mimes = T::mimes(&mut f.testwl);
     for mime in mimes.iter() {
         assert!(server_mimes.contains(&mime.mime_type));
@@ -1536,6 +1586,81 @@ fn copy_from_x11<T: SelectionTest>() {
         true
     });
     assert_eq!(*mimes, data);
+}
+
+fn copy_from_x11_without_x11_focus<T: SelectionTest>() {
+    let (mut f, _comp) = TestFixture::new_with_compositor();
+
+    let mimes = std::rc::Rc::new(vec![testwl::PasteData {
+        mime_type: "text".to_string(),
+        data: b"abc".to_vec(),
+    }]);
+
+    f.satellite.set_selection_source::<T::SelectionType>(&mimes);
+    f.run();
+
+    assert_eq!(
+        T::backend(&f.testwl),
+        Some(testwl::SelectionBackend::ExtDataControl)
+    );
+
+    let server_mimes = T::control_mimes(&mut f.testwl);
+    for mime in mimes.iter() {
+        assert!(server_mimes.contains(&mime.mime_type));
+    }
+
+    let data = T::control_paste_data(&mut f.testwl, |_, _| {
+        f.satellite.run();
+        true
+    });
+    assert_eq!(*mimes, data);
+}
+
+fn copy_from_x11_without_ext_data_control<T: SelectionTest>() {
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.disable_ext_data_control_global();
+    });
+    let comp = f.compositor();
+    let win = Window::new(1);
+    let (_surface, _id) = f.create_toplevel(&comp, win);
+    let mimes = std::rc::Rc::new(vec![testwl::PasteData {
+        mime_type: "text".to_string(),
+        data: b"abc".to_vec(),
+    }]);
+
+    f.satellite.set_selection_source::<T::SelectionType>(&mimes);
+    f.run();
+
+    assert_eq!(T::backend(&f.testwl), Some(testwl::SelectionBackend::Core));
+    assert_eq!(T::mimes(&mut f.testwl), vec!["text"]);
+}
+
+fn selection_ext_then_core<T: SelectionTest>() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let initial = std::rc::Rc::new(vec![testwl::PasteData {
+        mime_type: "initial".to_string(),
+        data: b"ext".to_vec(),
+    }]);
+    f.satellite
+        .set_selection_source::<T::SelectionType>(&initial);
+    f.run();
+    assert_eq!(
+        T::backend(&f.testwl),
+        Some(testwl::SelectionBackend::ExtDataControl)
+    );
+
+    let win = Window::new(1);
+    let (_surface, _id) = f.create_toplevel(&comp, win);
+    let replacement = std::rc::Rc::new(vec![testwl::PasteData {
+        mime_type: "replacement".to_string(),
+        data: b"core".to_vec(),
+    }]);
+    f.satellite
+        .set_selection_source::<T::SelectionType>(&replacement);
+    f.run();
+
+    assert_eq!(T::backend(&f.testwl), Some(testwl::SelectionBackend::Core));
+    assert_eq!(T::mimes(&mut f.testwl), vec!["replacement"]);
 }
 
 fn copy_from_wayland<T: SelectionTest>() {
