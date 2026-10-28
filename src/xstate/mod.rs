@@ -111,6 +111,8 @@ pub struct XState {
     selection_state: SelectionState,
     settings: Settings,
     max_req_bytes: usize,
+    // List of mapped managed windows in stacking order
+    client_windows: Vec<x::Window>,
 }
 
 impl XState {
@@ -231,6 +233,7 @@ impl XState {
             selection_state,
             settings,
             max_req_bytes,
+            client_windows: Vec::new(),
         };
         r.create_ewmh_window();
         r.set_xsettings_owner();
@@ -266,6 +269,33 @@ impl XState {
             .unwrap();
     }
 
+    fn update_client_list(&self) {
+        // Republish _NET_CLIENT_LIST and _NET_CLIENT_LIST_STACKING on the root window
+        self.set_root_property(self.atoms.client_list, x::ATOM_WINDOW, &self.client_windows);
+
+        let stacking = match self
+            .connection
+            .wait_for_reply(self.connection.send_request(&x::QueryTree { window: self.root }))
+        {
+            Ok(reply) => reply
+                .children()
+                .iter()
+                .copied()
+                .filter(|w| self.client_windows.contains(w))
+                .collect(),
+            Err(_) => self.client_windows.clone(),
+        };
+        self.set_root_property(self.atoms.client_list_stacking, x::ATOM_WINDOW, &stacking);
+    }
+
+    fn remove_client(&mut self, window: x::Window) {
+        if let Some(pos) = self.client_windows.iter().position(|w| *w == window) {
+            // Drop a window from the client list
+            self.client_windows.remove(pos);
+            self.update_client_list();
+        }
+    }
+
     fn create_ewmh_window(&mut self) {
         self.connection
             .send_and_check_request(&x::CreateWindow {
@@ -290,6 +320,8 @@ impl XState {
             x::ATOM_ATOM,
             &[
                 self.atoms.active_win,
+                self.atoms.client_list,
+                self.atoms.client_list_stacking,
                 self.atoms.motif_wm_hints,
                 self.atoms.net_wm_state,
                 self.atoms.wm_fullscreen,
@@ -426,6 +458,12 @@ impl XState {
                             data: &[WmState::Normal as u32, x::Window::none().resource_id()],
                         }
                     ));
+
+                    // Skip unmanaged override-redirect windows in the client list
+                    if !e.override_redirect() && !self.client_windows.contains(&e.window()) {
+                        self.client_windows.push(e.window());
+                        self.update_client_list();
+                    }
                 }
                 xcb::Event::X(x::Event::ConfigureNotify(e)) => {
                     server_state.reconfigure_window(e);
@@ -433,6 +471,7 @@ impl XState {
                 xcb::Event::X(x::Event::UnmapNotify(e)) => {
                     trace!("unmap event: {:?}", e.event());
                     server_state.unmap_window(e.window());
+                    self.remove_client(e.window());
                     let active_win = self
                         .connection
                         .wait_for_reply(self.get_property_cookie(
@@ -469,6 +508,7 @@ impl XState {
                 xcb::Event::X(x::Event::DestroyNotify(e)) => {
                     debug!("destroying window {:?}", e.window());
                     server_state.destroy_window(e.window());
+                    self.remove_client(e.window());
                 }
                 xcb::Event::X(x::Event::PropertyNotify(e)) => {
                     if ignored_windows.contains(&e.window()) {
@@ -910,6 +950,7 @@ xcb::atoms_struct! {
         wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
         active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
+        client_list_stacking => b"_NET_CLIENT_LIST_STACKING" only_if_exists = false,
         supported => b"_NET_SUPPORTED" only_if_exists = false,
         motif_wm_hints => b"_MOTIF_WM_HINTS" only_if_exists = false,
         utf8_string => b"UTF8_STRING" only_if_exists = false,
