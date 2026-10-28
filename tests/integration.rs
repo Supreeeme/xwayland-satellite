@@ -910,6 +910,40 @@ fn toplevel_flow() {
 }
 
 #[test]
+fn root_unmap_notify_does_not_disable_new_windows() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let existing_window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut connection, existing_window);
+
+    connection
+        .send_and_check_request(&x::SendEvent {
+            propagate: false,
+            destination: x::SendEventDest::Window(connection.root),
+            event_mask: x::EventMask::SUBSTRUCTURE_REDIRECT,
+            event: &x::UnmapNotifyEvent::new(connection.root, connection.root, false),
+        })
+        .unwrap();
+
+    // Send an event which triggers the event loop
+    connection.unmap_window(existing_window);
+    f.wait_and_dispatch();
+
+    let reply = connection.get_reply(&x::GetWindowAttributes {
+        window: connection.root,
+    });
+    assert!(
+        reply
+            .all_event_masks()
+            .contains(x::EventMask::SUBSTRUCTURE_NOTIFY)
+    );
+    // Assert the mapping of windows continues to work
+    let new_window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut connection, new_window);
+}
+
+#[test]
 fn reparent() {
     let mut f = Fixture::new();
     let mut connection = Connection::new(&f.display);
