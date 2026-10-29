@@ -399,6 +399,15 @@ impl SurfaceEvents {
                             decorations.handle_fullscreen(toplevel.fullscreen);
                         }
                     }
+
+                    let prev_max = toplevel.maximized;
+                    toplevel.maximized =
+                        states.contains(&(u32::from(xdg_toplevel::State::Maximized) as u8));
+                    if toplevel.maximized != prev_max {
+                        state
+                            .connection
+                            .set_maximized(*data.get::<&x::Window>().unwrap(), toplevel.maximized);
+                    }
                 };
 
                 role.xdg_mut().unwrap().pending = Some(PendingSurfaceState {
