@@ -204,8 +204,12 @@ impl XState {
             .unwrap();
         {
             // Setup default cursor theme
-            let ctx = CursorContext::new(&connection, screen).unwrap();
-            let left_ptr = ctx.load_cursor(Cursor::LeftPtr);
+            let left_ptr = {
+                // xcb-util-cursor reads XCURSOR_* and HOME with getenv.
+                let _env = crate::env_read_guard();
+                let ctx = CursorContext::new(&connection, screen).unwrap();
+                ctx.load_cursor(Cursor::LeftPtr)
+            };
             connection
                 .send_and_check_request(&x::ChangeWindowAttributes {
                     window: root,
@@ -243,6 +247,11 @@ impl XState {
         // integration tests, so this overly simple check is fine.
         assert!(self.max_req_bytes >= max_req_bytes);
         self.max_req_bytes = max_req_bytes;
+    }
+
+    /// Whether the connection to Xwayland has failed (Xwayland exited).
+    pub fn connection_lost(&self) -> bool {
+        self.connection.has_error().is_err()
     }
 
     pub fn server_state_setup(
@@ -343,7 +352,15 @@ impl XState {
 
         let mut handled = false;
         let mut ignored_windows = Vec::new();
-        while let Some(event) = self.connection.poll_for_event().unwrap() {
+        while let Some(event) = match self.connection.poll_for_event() {
+            Ok(event) => event,
+            // Xwayland went away; the main loop notices and stops.
+            Err(xcb::Error::Connection(e)) => {
+                debug!("X connection lost: {e:?}");
+                None
+            }
+            Err(e) => panic!("{e:?}"),
+        } {
             handled = true;
             trace!("x11 event: {event:?}");
 
