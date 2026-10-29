@@ -101,10 +101,10 @@ impl CursorImageIndex {
                 entry.insert(Some(name));
             }
             Entry::Occupied(mut entry) => {
-                if let Some(existing) = *entry.get()
-                    && !same_cursor(existing, name)
-                {
-                    entry.insert(None);
+                if let Some(existing) = *entry.get() {
+                    if !same_cursor(existing, name) {
+                        entry.insert(None);
+                    }
                 }
             }
         }
@@ -120,11 +120,10 @@ impl CursorImageIndex {
 pub(super) fn candidate_themes(resources: &str) -> Vec<String> {
     let mut themes = Vec::new();
     let mut push = |theme: Option<String>| {
-        if let Some(theme) = theme.map(|t| t.trim().to_owned())
-            && !theme.is_empty()
-            && !themes.contains(&theme)
-        {
-            themes.push(theme);
+        if let Some(theme) = theme.map(|t| t.trim().to_owned()) {
+            if !theme.is_empty() && !themes.contains(&theme) {
+                themes.push(theme);
+            }
         }
     };
     push(std::env::var("XCURSOR_THEME").ok());
