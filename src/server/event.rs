@@ -1003,7 +1003,7 @@ impl Event for client::wl_touch::Event {
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(super) struct OnOutput(pub Entity);
-struct OutputName(String);
+pub(super) struct OutputName(pub String);
 fn get_output_name(output: Option<&OnOutput>, world: &World) -> Option<String> {
     output.map(|o| world.get::<&OutputName>(o.0).unwrap().0.clone())
 }

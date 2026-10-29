@@ -158,6 +158,7 @@ pub struct Toplevel {
     pub min_size: Option<Vec2>,
     pub max_size: Option<Vec2>,
     pub states: Vec<xdg_toplevel::State>,
+    pub fullscreen_output: Option<WlOutput>,
     pub closed: bool,
     pub title: Option<String>,
     pub app_id: Option<String>,
@@ -1573,11 +1574,12 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                     None
                 };
             }
-            xdg_toplevel::Request::SetFullscreen { .. } => {
+            xdg_toplevel::Request::SetFullscreen { output } => {
                 let data = state.surfaces.get_mut(surface_id).unwrap();
                 let Some(SurfaceRole::Toplevel(toplevel)) = &mut data.role else {
                     unreachable!();
                 };
+                toplevel.fullscreen_output = output;
                 toplevel.states.push(xdg_toplevel::State::Fullscreen);
                 let states = toplevel.states.clone();
                 state.configure_toplevel(*surface_id, 100, 100, states);
@@ -1596,6 +1598,7 @@ impl Dispatch<XdgToplevel, SurfaceId> for State {
                     return;
                 };
                 toplevel.states.swap_remove(pos);
+                toplevel.fullscreen_output = None;
                 let states = toplevel.states.clone();
                 state.configure_toplevel(*surface_id, 100, 100, states);
             }
@@ -1663,6 +1666,7 @@ impl Dispatch<XdgSurface, SurfaceId> for State {
                     min_size: None,
                     max_size: None,
                     states: Vec::new(),
+                    fullscreen_output: None,
                     closed: false,
                     title: None,
                     app_id: None,

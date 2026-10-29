@@ -1335,6 +1335,49 @@ fn fullscreen() {
 }
 
 #[test]
+fn fullscreen_output() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let (_, output1) = f.new_output(0, 0);
+    let (_, output2) = f.new_output(1000, 0);
+    let win = Window::new(1);
+    let (_, id) = f.create_toplevel(&comp, win);
+
+    f.satellite.set_fullscreen_output(win, Some("WL-2".into()));
+    f.satellite.set_fullscreen(win, SetState::Add);
+    f.run();
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    assert!(
+        data.toplevel()
+            .states
+            .contains(&xdg_toplevel::State::Fullscreen)
+    );
+    assert_eq!(data.toplevel().fullscreen_output, Some(output2));
+
+    // Changing the output of a fullscreen window moves it there.
+    f.satellite.set_fullscreen_output(win, Some("WL-1".into()));
+    f.run();
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    assert_eq!(data.toplevel().fullscreen_output, Some(output1));
+
+    // An output that is gone leaves the choice to the compositor.
+    f.satellite.set_fullscreen_output(win, Some("WL-3".into()));
+    f.run();
+    f.run();
+
+    let data = f.testwl.get_surface_data(id).unwrap();
+    assert!(
+        data.toplevel()
+            .states
+            .contains(&xdg_toplevel::State::Fullscreen)
+    );
+    assert_eq!(data.toplevel().fullscreen_output, None);
+}
+
+#[test]
 fn window_title_and_class() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     let win = Window::new(1);
