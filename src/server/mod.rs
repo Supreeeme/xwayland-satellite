@@ -112,6 +112,8 @@ struct WindowAttributes {
     group: Option<x::Window>,
     decorations: Option<Decorations>,
     transient_for: Option<x::Window>,
+    /// Output requested through `_NET_WM_FULLSCREEN_MONITORS`. `None` lets the compositor choose.
+    fullscreen_output: Option<String>,
 }
 
 impl WindowAttributes {
@@ -1214,18 +1216,65 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             return;
         };
 
+        let output = self.fullscreen_output(&data.get::<&WindowData>().unwrap().attrs);
+
         use crate::xstate::SetState;
         match state {
-            SetState::Add => toplevel.toplevel.set_fullscreen(None),
+            SetState::Add => toplevel.toplevel.set_fullscreen(output.as_ref()),
             SetState::Remove => toplevel.toplevel.unset_fullscreen(),
             SetState::Toggle => {
                 if toplevel.fullscreen {
                     toplevel.toplevel.unset_fullscreen()
                 } else {
-                    toplevel.toplevel.set_fullscreen(None)
+                    toplevel.toplevel.set_fullscreen(output.as_ref())
                 }
             }
         }
+    }
+
+    /// Sets the output a window should be fullscreened on (`_NET_WM_FULLSCREEN_MONITORS`).
+    /// `None` leaves the choice to the compositor.
+    pub fn set_fullscreen_output(&mut self, window: x::Window, output: Option<String>) {
+        let Some(data) = self
+            .windows
+            .get(&window)
+            .copied()
+            .and_then(|id| self.world.entity(id).ok())
+        else {
+            debug!("not setting fullscreen output for unknown window {window:?}");
+            return;
+        };
+
+        let mut win = data.get::<&mut WindowData>().unwrap();
+        if win.attrs.fullscreen_output == output {
+            return;
+        }
+        debug!("setting {window:?} fullscreen output {output:?}");
+        win.attrs.fullscreen_output = output;
+
+        // Move the window if it is already fullscreen.
+        if let Some(role) = data.get::<&SurfaceRole>() {
+            if let SurfaceRole::Toplevel(Some(toplevel)) = &*role {
+                if toplevel.fullscreen {
+                    let output = self.fullscreen_output(&win.attrs);
+                    toplevel.toplevel.set_fullscreen(output.as_ref());
+                }
+            }
+        }
+    }
+
+    /// The Wayland output matching a window's requested fullscreen output, if it still exists.
+    fn fullscreen_output(&self, attrs: &WindowAttributes) -> Option<client::wl_output::WlOutput> {
+        let name = attrs.fullscreen_output.as_deref()?;
+        let output = self
+            .world
+            .query::<(&client::wl_output::WlOutput, &OutputName)>()
+            .iter()
+            .find_map(|(_, (output, OutputName(n)))| (n == name).then(|| output.clone()));
+        if output.is_none() {
+            warn!("Couldn't find output {name} to fullscreen on, letting the compositor choose");
+        }
+        output
     }
 
     pub fn set_transient_for(&mut self, window: x::Window, parent: x::Window) {
@@ -1510,7 +1559,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         }
 
         if fullscreen {
-            toplevel.set_fullscreen(None);
+            toplevel.set_fullscreen(self.fullscreen_output(&window.attrs).as_ref());
         }
 
         let wl_decoration = self.decoration_manager.as_ref().map(|decoration_manager| {

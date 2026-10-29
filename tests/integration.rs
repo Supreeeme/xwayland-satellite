@@ -351,6 +351,9 @@ xcb::atoms_struct! {
         net_active_window => b"_NET_ACTIVE_WINDOW",
         wm_delete_window => b"WM_DELETE_WINDOW",
         net_wm_state => b"_NET_WM_STATE",
+        wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
+        fullscreen_monitors => b"_NET_WM_FULLSCREEN_MONITORS" only_if_exists = false,
+        net_supported => b"_NET_SUPPORTED" only_if_exists = false,
         skip_taskbar => b"_NET_WM_STATE_SKIP_TASKBAR",
         transient_for => b"WM_TRANSIENT_FOR",
         clipboard => b"CLIPBOARD",
@@ -1704,6 +1707,114 @@ fn primary_output() {
         .unwrap();
     let reply = conn.get_reply(&xcb::randr::GetOutputPrimary { window: conn.root });
     assert_eq!(reply.output(), output3);
+}
+
+#[test]
+fn fullscreen_monitors() {
+    let mut f = Fixture::new();
+    let mut conn = Connection::new(&f.display);
+    f.create_output(0, 0);
+    f.create_output(1000, 0);
+
+    let reply = conn.get_reply(&x::GetProperty {
+        delete: false,
+        window: conn.root,
+        property: conn.atoms.net_supported,
+        r#type: x::ATOM_ATOM,
+        long_offset: 0,
+        long_length: 32,
+    });
+    assert!(
+        reply
+            .value::<x::Atom>()
+            .contains(&conn.atoms.fullscreen_monitors)
+    );
+
+    // Monitor indices as clients see them, in RRGetMonitors/Xinerama order.
+    let start = Instant::now();
+    let monitors = loop {
+        let reply = conn.get_reply(&xcb::randr::GetMonitors {
+            window: conn.root,
+            get_active: true,
+        });
+        let monitors: Vec<String> = reply
+            .monitors()
+            .map(|m| {
+                conn.get_reply(&x::GetAtomName { atom: m.name() })
+                    .name()
+                    .to_string()
+            })
+            .collect();
+        if monitors.len() == 2 {
+            break monitors;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "Expected 2 monitors, got {monitors:?}"
+        );
+        f.wait_and_dispatch();
+    };
+    let target = 1;
+    let wl_output = f.testwl.get_output(&monitors[target as usize]).unwrap();
+
+    let window = conn.new_window(conn.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut conn, window);
+    conn.send_client_message(&x::ClientMessageEvent::new(
+        window,
+        conn.atoms.fullscreen_monitors,
+        x::ClientMessageData::Data32([target, target, target, target, 1]),
+    ));
+    conn.send_client_message(&x::ClientMessageEvent::new(
+        window,
+        conn.atoms.net_wm_state,
+        x::ClientMessageData::Data32([1, conn.atoms.wm_fullscreen.resource_id(), 0, 1, 0]),
+    ));
+    f.wait_and_dispatch();
+
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert!(
+        data.toplevel()
+            .states
+            .contains(&xdg_toplevel::State::Fullscreen)
+    );
+    assert_eq!(data.toplevel().fullscreen_output, Some(wl_output.clone()));
+
+    // The window manager reflects the request on the window.
+    let reply = conn.get_reply(&x::GetProperty {
+        delete: false,
+        window,
+        property: conn.atoms.fullscreen_monitors,
+        r#type: x::ATOM_CARDINAL,
+        long_offset: 0,
+        long_length: 4,
+    });
+    assert_eq!(reply.value::<u32>(), [target; 4]);
+
+    // The property is also honored when set before mapping.
+    let window = conn.new_window(conn.root, 0, 0, 20, 20, false);
+    conn.send_and_check_request(&x::ChangeProperty {
+        mode: x::PropMode::Replace,
+        window,
+        property: conn.atoms.fullscreen_monitors,
+        r#type: x::ATOM_CARDINAL,
+        data: &[target; 4],
+    })
+    .unwrap();
+    let surface = f.map_as_toplevel(&mut conn, window);
+    conn.send_client_message(&x::ClientMessageEvent::new(
+        window,
+        conn.atoms.net_wm_state,
+        x::ClientMessageData::Data32([1, conn.atoms.wm_fullscreen.resource_id(), 0, 1, 0]),
+    ));
+    f.wait_and_dispatch();
+
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert!(
+        data.toplevel()
+            .states
+            .contains(&xdg_toplevel::State::Fullscreen)
+    );
+    assert_eq!(data.toplevel().fullscreen_output, Some(wl_output));
 }
 
 #[test]
