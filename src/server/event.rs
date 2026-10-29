@@ -51,6 +51,96 @@ use wayland_server::protocol::{
 #[derive(Copy, Clone)]
 pub(super) struct SurfaceScaleFactor(pub f64);
 
+/// Pixel size of a buffer, recorded when Xwayland creates it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) struct BufferSize {
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Nominal cursor size in logical pixels: `XCURSOR_SIZE`, or libXcursor's
+/// default of 24.
+pub(super) fn cursor_base_size() -> i32 {
+    static SIZE: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *SIZE.get_or_init(|| {
+        std::env::var("XCURSOR_SIZE")
+            .ok()
+            .and_then(|size| size.trim().parse().ok())
+            .filter(|&size: &i32| size > 0)
+            .unwrap_or(24)
+    })
+}
+
+/// The object a cursor surface was set on.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) enum CursorOwner {
+    Pointer(Entity),
+    TabletTool(Entity),
+}
+
+/// A surface Xwayland has handed to `wl_pointer.set_cursor` or
+/// `zwp_tablet_tool_v2.set_cursor`.
+///
+/// X clients that follow `Xft.dpi` draw their cursors scaled by the same factor
+/// as their windows, and those cursors have to be shrunk back to logical size
+/// like the windows are (with a viewport). Clients that ignore the DPI, or read
+/// a fixed `XCURSOR_SIZE`, draw the nominal size instead, and shrinking those
+/// makes them tiny. Both can happen inside one application (a GTK part and a
+/// self-drawn part, e.g. the Unity editor), so the factor is chosen per cursor
+/// image: `scale` or 1, whichever brings the image closer to the nominal size.
+///
+/// Xwayland sends `set_cursor` before it attaches the image, so the hotspot is
+/// first forwarded with the factor used last and sent again, corrected, when
+/// the image turns out to need the other one.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(super) struct CursorSurface {
+    /// X-side scale when the cursor was set.
+    pub scale: f64,
+    pub owner: CursorOwner,
+    pub serial: u32,
+    /// Hotspot in X pixels, as Xwayland sent it.
+    pub hotspot: (i32, i32),
+    /// Factor the forwarded hotspot and viewport are currently divided by.
+    pub factor: f64,
+}
+
+impl CursorSurface {
+    /// Divide by `scale` or by 1, whichever lands closer to `base` in ratio
+    /// terms. Ties go to `scale`, i.e. to trusting the DPI.
+    pub fn factor_for(scale: f64, base: i32, size: BufferSize) -> f64 {
+        let longest = size.width.max(size.height);
+        if scale == 1.0 || longest <= 0 || base <= 0 {
+            return 1.0;
+        }
+        let distance = |factor: f64| (longest as f64 / factor / base as f64).ln().abs();
+        if distance(scale) <= distance(1.0) {
+            scale
+        } else {
+            1.0
+        }
+    }
+
+    /// Viewport destination for an image of `size` X pixels, or `None` to
+    /// leave the viewport unset when nothing is scaled.
+    pub fn destination(&self, size: BufferSize) -> Option<(i32, i32)> {
+        if self.factor == 1.0 || size.width <= 0 || size.height <= 0 {
+            return None;
+        }
+        Some((
+            ((size.width as f64 / self.factor).round() as i32).max(1),
+            ((size.height as f64 / self.factor).round() as i32).max(1),
+        ))
+    }
+
+    /// The hotspot in logical coordinates under the current factor.
+    pub fn logical_hotspot(&self) -> (i32, i32) {
+        (
+            (self.hotspot.0 as f64 / self.factor).round() as i32,
+            (self.hotspot.1 as f64 / self.factor).round() as i32,
+        )
+    }
+}
+
 #[derive(hecs::Bundle)]
 pub(super) struct SurfaceBundle {
     pub client: client::wl_surface::WlSurface,
