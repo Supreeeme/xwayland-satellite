@@ -1396,12 +1396,17 @@ impl XConnection for RealConnection {
             debug!("SetInputFocus failed ({window:?}: {e:?})");
             return;
         }
+        let active = if window.is_none() {
+            self.root_window()
+        } else {
+            window
+        };
         if let Err(e) = self.connection.send_and_check_request(&x::ChangeProperty {
             mode: x::PropMode::Replace,
             window: self.root_window(),
             property: self.atoms.active_win,
             r#type: x::ATOM_WINDOW,
-            data: &[window],
+            data: &[active],
         }) {
             debug!("ChangeProperty failed ({window:?}: {e:?})");
         }
