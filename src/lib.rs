@@ -19,7 +19,14 @@ pub trait XConnection: Sized + 'static {
 
     fn set_window_dims(&mut self, window: x::Window, dims: PendingSurfaceState) -> bool;
     fn set_fullscreen(&mut self, window: x::Window, fullscreen: bool);
+    /// Gives the window keyboard focus and activates it (see [`activate_window`]).
+    ///
+    /// [`activate_window`]: XConnection::activate_window
     fn focus_window(&mut self, window: x::Window, output_name: Option<String>);
+    /// Marks the window as the active one (`_NET_ACTIVE_WINDOW`, `WM_STATE`, primary output)
+    /// without touching keyboard focus.
+    fn activate_window(&mut self, window: x::Window, output_name: Option<String>);
+    /// Sends the `WM_TAKE_FOCUS` client message to the window.
     fn send_take_focus(&mut self, window: x::Window);
     fn close_window(&mut self, window: x::Window);
     fn unmap_window(&mut self, window: x::Window);
