@@ -191,6 +191,8 @@ delegate_noop!(MyWorld: ZwpTabletManagerV2);
 delegate_noop!(MyWorld: XdgActivationV1);
 delegate_noop!(MyWorld: ZxdgDecorationManagerV1);
 delegate_noop!(MyWorld: WpFractionalScaleManagerV1);
+delegate_noop!(MyWorld: wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_manager_v1::WpCursorShapeManagerV1);
+delegate_noop!(MyWorld: wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1);
 delegate_noop!(MyWorld: ZwpPrimarySelectionDeviceManagerV1);
 delegate_noop!(MyWorld: WlSubsurface);
 delegate_noop!(MyWorld: WpLinuxDrmSyncobjManagerV1);

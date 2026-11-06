@@ -1,4 +1,5 @@
 mod clientside;
+pub(crate) mod cursor_shape;
 mod decoration;
 mod dispatch;
 mod event;
@@ -34,6 +35,9 @@ use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1
 use wayland_protocols::xdg::shell::client::xdg_positioner::ConstraintAdjustment;
 use wayland_protocols::{
     wp::{
+        cursor_shape::v1::client::{
+            wp_cursor_shape_device_v1::Shape, wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
+        },
         fractional_scale::v1::client::wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
         linux_dmabuf::zv1::{client as c_dmabuf, server as s_dmabuf},
         linux_drm_syncobj::v1::server::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1,
@@ -491,6 +495,10 @@ pub struct InnerServerState<S: X11Selection> {
     updated_outputs: Vec<Entity>,
     new_scale: Option<f64>,
     current_scale: f64,
+    cursor_shape_manager: Option<WpCursorShapeManagerV1>,
+    /// Cursor-shape equivalent of the X cursor currently displayed, from its
+    /// XFixes name. `None` when it has no name or no equivalent.
+    x_cursor_shape: Option<Shape>,
 }
 
 impl<S: X11Selection> ServerState<NoConnection<S>> {
@@ -553,6 +561,13 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             .bind::<ZxdgDecorationManagerV1, _, _>(&qh, 1..=1, ())
             .ok();
 
+        let cursor_shape_manager = global_list
+            .bind::<WpCursorShapeManagerV1, _, _>(&qh, 1..=1, ())
+            .inspect_err(|e| {
+                warn!("Couldn't bind cursor shape manager: {e}. X cursors will be sent as images.")
+            })
+            .ok();
+
         let selection_states = selection::SelectionStates::new(&global_list, &qh);
 
         dh.create_global::<InnerServerState<S>, XwaylandShellV1, _>(1, ());
@@ -600,6 +615,8 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
             updated_outputs: Vec::new(),
             new_scale: None,
             current_scale: 1.0,
+            cursor_shape_manager,
+            x_cursor_shape: None,
             decoration_manager,
             world,
         };
