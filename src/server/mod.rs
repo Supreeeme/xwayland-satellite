@@ -240,6 +240,7 @@ struct ToplevelData {
     toplevel: XdgToplevel,
     xdg: XdgSurfaceData,
     fullscreen: bool,
+    maximized: bool,
     decoration: decoration::DecorationsData,
 }
 
@@ -438,6 +439,9 @@ impl<S: X11Selection> XConnection for NoConnection<S> {
     }
     fn set_fullscreen(&mut self, _: x::Window, _: bool) {
         debug!("could not toggle fullscreen without XWayland initialized");
+    }
+    fn set_maximized(&mut self, _: x::Window, _: bool) {
+        debug!("could not toggle maximized without XWayland initialized");
     }
     fn set_window_dims(&mut self, _: x::Window, _: crate::server::PendingSurfaceState) -> bool {
         debug!("could not set window dimensions without XWayland initialized");
@@ -1193,29 +1197,35 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
         self.last_focused_toplevel.unwrap_or(x::WINDOW_NONE)
     }
 
-    pub fn set_fullscreen(&mut self, window: x::Window, state: super::xstate::SetState) {
+    /// Run `f` on the mapped toplevel backing `window`, logging why we couldn't otherwise.
+    /// `action` is spliced into that log, e.g. "set fullscreen on".
+    fn with_toplevel(&self, window: x::Window, action: &str, f: impl FnOnce(&ToplevelData)) {
         let Some(data) = self
             .windows
             .get(&window)
             .copied()
             .and_then(|id| self.world.entity(id).ok())
         else {
-            warn!("Tried to set unknown window {window:?} fullscreen");
+            warn!("Tried to {action} unknown window {window:?}");
             return;
         };
 
         let Some(role) = data.get::<&SurfaceRole>() else {
-            warn!("Tried to set window without role fullscreen: {window:?}");
+            warn!("Tried to {action} window without role: {window:?}");
             return;
         };
 
         let SurfaceRole::Toplevel(Some(toplevel)) = &*role else {
-            warn!("Tried to set an unmapped toplevel or non toplevel fullscreen: {window:?}");
+            warn!("Tried to {action} an unmapped toplevel or non toplevel: {window:?}");
             return;
         };
 
+        f(toplevel);
+    }
+
+    pub fn set_fullscreen(&mut self, window: x::Window, state: super::xstate::SetState) {
         use crate::xstate::SetState;
-        match state {
+        self.with_toplevel(window, "set fullscreen on", |toplevel| match state {
             SetState::Add => toplevel.toplevel.set_fullscreen(None),
             SetState::Remove => toplevel.toplevel.unset_fullscreen(),
             SetState::Toggle => {
@@ -1225,7 +1235,28 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
                     toplevel.toplevel.set_fullscreen(None)
                 }
             }
-        }
+        });
+    }
+
+    pub fn set_maximized(&mut self, window: x::Window, state: super::xstate::SetState) {
+        use crate::xstate::SetState;
+        self.with_toplevel(window, "set maximized on", |toplevel| match state {
+            SetState::Add => toplevel.toplevel.set_maximized(),
+            SetState::Remove => toplevel.toplevel.unset_maximized(),
+            SetState::Toggle => {
+                if toplevel.maximized {
+                    toplevel.toplevel.unset_maximized()
+                } else {
+                    toplevel.toplevel.set_maximized()
+                }
+            }
+        });
+    }
+
+    pub fn minimize_window(&mut self, window: x::Window) {
+        self.with_toplevel(window, "minimize", |toplevel| {
+            toplevel.toplevel.set_minimized()
+        });
     }
 
     pub fn set_transient_for(&mut self, window: x::Window, parent: x::Window) {
@@ -1589,6 +1620,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             },
             toplevel,
             fullscreen: false,
+            maximized: false,
             decoration: DecorationsData {
                 wl: wl_decoration,
                 satellite: sat_decoration,
