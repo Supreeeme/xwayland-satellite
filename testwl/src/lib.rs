@@ -281,6 +281,8 @@ struct State {
     primary: Option<ZwpPrimarySelectionSourceV1>,
     data_device_man: Option<WlDataDeviceManager>,
     data_device: Option<WlDataDevice>,
+    drag_accepted: Option<String>,
+    drag_finished: bool,
     primary_man: Option<ZwpPrimarySelectionDeviceManagerV1>,
     primary_device: Option<ZwpPrimarySelectionDeviceV1>,
     xdg_activation: Option<XdgActivationV1>,
@@ -315,6 +317,8 @@ impl Default for State {
             primary_device: None,
             data_device_man: None,
             data_device: None,
+            drag_accepted: None,
+            drag_finished: false,
             xdg_activation: None,
             valid_tokens: HashSet::new(),
             token_counter: 0,
@@ -815,6 +819,61 @@ impl Server {
         self.display.flush_clients().unwrap();
     }
 
+    /// Start a drag over `surface` offering `data`, as a Wayland client's drag would.
+    #[track_caller]
+    pub fn start_drag(&mut self, surface: SurfaceId, x: f64, y: f64, data: Vec<PasteData>) {
+        let dev = self
+            .state
+            .data_device
+            .as_ref()
+            .expect("No data device created");
+        let mimes: Vec<_> = data.iter().map(|m| m.mime_type.clone()).collect();
+        let offer = self
+            .client
+            .as_ref()
+            .unwrap()
+            .create_resource::<WlDataOffer, _, State>(&self.dh, 3, data)
+            .unwrap();
+        dev.data_offer(&offer);
+        for mime in mimes {
+            offer.offer(mime);
+        }
+        offer.source_actions(
+            wl_data_device_manager::DndAction::Copy | wl_data_device_manager::DndAction::Move,
+        );
+        let surface = &self
+            .state
+            .surfaces
+            .get(&surface)
+            .expect("No such surface")
+            .surface;
+        dev.enter(25, surface, x, y, Some(&offer));
+        self.state.drag_accepted = None;
+        self.state.drag_finished = false;
+        self.display.flush_clients().unwrap();
+    }
+
+    #[track_caller]
+    pub fn drop_drag(&mut self) {
+        let dev = self
+            .state
+            .data_device
+            .as_ref()
+            .expect("No data device created");
+        dev.drop();
+        dev.leave();
+        self.display.flush_clients().unwrap();
+    }
+
+    /// The mime type the drag target last accepted.
+    pub fn drag_accepted(&self) -> Option<&str> {
+        self.state.drag_accepted.as_deref()
+    }
+
+    pub fn drag_finished(&self) -> bool {
+        self.state.drag_finished
+    }
+
     #[track_caller]
     pub fn create_primary_offer(&mut self, data: Vec<PasteData>) {
         let Some(dev) = &self.state.primary_device else {
@@ -1303,7 +1362,7 @@ impl GlobalDispatch<WlDataDeviceManager, ()> for State {
 
 impl Dispatch<WlDataOffer, Vec<PasteData>> for State {
     fn request(
-        _: &mut Self,
+        state: &mut Self,
         _: &Client,
         _: &WlDataOffer,
         request: <WlDataOffer as Resource>::Request,
@@ -1319,6 +1378,13 @@ impl Dispatch<WlDataOffer, Vec<PasteData>> for State {
                     .unwrap_or_else(|| panic!("Invalid mime type: {mime_type}"));
 
                 TransferFd::from(fd).write_all(&data[pos].data).unwrap();
+            }
+            wl_data_offer::Request::Accept { mime_type, .. } => {
+                state.drag_accepted = mime_type;
+            }
+            wl_data_offer::Request::SetActions { .. } => {}
+            wl_data_offer::Request::Finish => {
+                state.drag_finished = true;
             }
             wl_data_offer::Request::Destroy => {}
             other => todo!("unhandled request: {other:?}"),
