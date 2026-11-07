@@ -3358,3 +3358,934 @@ fn decorations_max_height_int_max() {
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}
+
+/// Move candidate wiring for the `_NET_WM_MOVERESIZE` button 0 path.
+///
+/// Unlike the helper level tests in `event.rs`, these drive the production event handlers and
+/// dispatch implementations: pointer/seat events come from testwl over the wire where a compliant
+/// compositor can produce them, and the few conditions that a compliant wire cannot produce
+/// (a stale enter target, a dead leave surface, an unresolvable pending enter) call
+/// `Event::handle` directly on the real fixture state.
+mod move_candidate_wiring {
+    use super::*;
+    use crate::server::event::{CurrentSurface, LastClickSerial, MoveCandidate, PendingEnter};
+    use wayland_client::protocol::{wl_pointer, wl_surface};
+
+    /// from linux/input-event-codes.h
+    const BTN_LEFT: u32 = 0x110;
+    const BTN_RIGHT: u32 = 0x111;
+
+    type PointerEvent = wl_pointer::Event;
+
+    /// Serials of the button events satellite has forwarded to (fake) Xwayland, in order.
+    ///
+    /// Only meaningful after [`TestFixture::flush_to_xwayland`], which is what actually moves
+    /// those events onto the socket and reads them back here.
+    fn forwarded_buttons(pointer: &TestObject<WlPointer>) -> Vec<u32> {
+        pointer
+            .data
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                PointerEvent::Button { serial, .. } => Some(*serial),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Motion events satellite has forwarded to (fake) Xwayland, in order.
+    fn forwarded_motions(pointer: &TestObject<WlPointer>) -> Vec<(u32, f64, f64)> {
+        pointer
+            .data
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                PointerEvent::Motion {
+                    time,
+                    surface_x,
+                    surface_y,
+                } => Some((*time, *surface_x, *surface_y)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Serials of the enter events satellite has forwarded to (fake) Xwayland, in order.
+    fn forwarded_enters(pointer: &TestObject<WlPointer>) -> Vec<u32> {
+        pointer
+            .data
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                PointerEvent::Enter { serial, .. } => Some(*serial),
+                _ => None,
+            })
+            .collect()
+    }
+
+    impl TestFixture<FakeXConnection> {
+        fn get_pointer(&mut self, comp: &Compositor) -> TestObject<WlPointer> {
+            let pointer = TestObject::<WlPointer>::from_request(
+                &comp.seat.obj,
+                wl_seat::Request::GetPointer {},
+            );
+            self.run();
+            pointer
+        }
+
+        /// (seat entity, candidate source, candidate serial) for every live candidate.
+        fn candidates(&self) -> Vec<(hecs::Entity, hecs::Entity, u32)> {
+            self.satellite
+                .world
+                .query::<&MoveCandidate>()
+                .iter()
+                .map(|(seat, candidate)| (seat, candidate.source, candidate.serial))
+                .collect()
+        }
+
+        fn seat_entities(&self) -> Vec<hecs::Entity> {
+            self.satellite
+                .world
+                .query::<&WlSeat>()
+                .iter()
+                .map(|(entity, _)| entity)
+                .collect()
+        }
+
+        #[track_caller]
+        fn seat_entity(&self) -> hecs::Entity {
+            let seats = self.seat_entities();
+            assert_eq!(seats.len(), 1, "expected exactly one seat: {seats:?}");
+            seats[0]
+        }
+
+        #[track_caller]
+        fn window_entity(&self, window: Window) -> hecs::Entity {
+            self.satellite.windows[&window]
+        }
+
+        fn last_click_serial(&self, window: Window) -> Option<u32> {
+            let entity = self.satellite.windows.get(&window).copied()?;
+            self.satellite
+                .world
+                .get::<&LastClickSerial>(entity)
+                .ok()
+                .map(|click| click.1)
+        }
+
+        /// Completes the send side of what satellite produced for Xwayland during this batch.
+        ///
+        /// `TestFixture::run` flushes the server display *before* `satellite.run()` handles the
+        /// compositor's input, so anything satellite sends to Xwayland while handling that input
+        /// is still sitting in the display's outgoing buffer. This writes it out and reads it on
+        /// the (fake) Xwayland side, which is the boundary the assertions need - not a delay.
+        fn flush_to_xwayland(&mut self) {
+            self.xwls_display.flush_clients().unwrap();
+            let res = self.xwls_connection.prepare_read().unwrap().read();
+            if res.is_err()
+                && matches!(res, Err(WaylandError::Io(ref e)) if e.kind() != std::io::ErrorKind::WouldBlock)
+            {
+                panic!("Read failed: {res:?}")
+            }
+        }
+
+        /// Sends a button through testwl's current pointer, lets satellite process it, and
+        /// completes the send to Xwayland.
+        fn pointer_button(&mut self, button: u32, pressed: bool, serial: u32) {
+            let state = if pressed {
+                s_proto::wl_pointer::ButtonState::Pressed
+            } else {
+                s_proto::wl_pointer::ButtonState::Released
+            };
+            let pointer = self.testwl.pointer();
+            pointer.button(serial, serial, button, state);
+            pointer.frame();
+            // Flush the queued events to satellite, then let it read and handle them.
+            self.testwl.dispatch();
+            self.run();
+            self.flush_to_xwayland();
+        }
+
+        fn press_left(&mut self, serial: u32) {
+            self.pointer_button(BTN_LEFT, true, serial);
+        }
+
+        fn release_left(&mut self, serial: u32) {
+            self.pointer_button(BTN_LEFT, false, serial);
+        }
+
+        fn enter(&mut self, surface: testwl::SurfaceId) {
+            self.testwl.move_pointer_to(surface, 10.0, 10.0);
+            self.run();
+            self.flush_to_xwayland();
+        }
+
+        /// Asks satellite to handle a button 0 + Move request and flushes the result.
+        fn request_move_from_press(&mut self, window: Window) {
+            self.satellite.move_window_from_press(window);
+            self.run();
+        }
+
+        fn client_surface(&self, entity: hecs::Entity) -> wl_surface::WlSurface {
+            (*self
+                .satellite
+                .world
+                .get::<&wl_surface::WlSurface>(entity)
+                .expect("no client surface"))
+            .clone()
+        }
+    }
+
+    /// Baseline: a real press creates a candidate and exactly one move is forwarded with that
+    /// press's seat and serial.
+    #[test]
+    fn real_press_produces_one_move() {
+        let (mut f, comp) = TestFixture::new_with_compositor();
+        let pointer = f.get_pointer(&comp);
+        let window = Window::new(1);
+        let (_surface, id) = f.create_toplevel(&comp, window);
+
+        f.enter(id);
+        f.press_left(100);
+
+        let entity = f.window_entity(window);
+        assert_eq!(f.candidates(), vec![(f.seat_entity(), entity, 100)]);
+        assert_eq!(f.last_click_serial(window), Some(100));
+        assert_eq!(forwarded_buttons(&pointer), vec![100]);
+
+        f.request_move_from_press(window);
+        let moves = f.testwl.move_requests().to_vec();
+        assert_eq!(moves.len(), 1, "{moves:?}");
+        assert_eq!(moves[0].surface, id);
+        assert_eq!(moves[0].serial, 100);
+        assert_eq!(moves[0].seat, *f.testwl.seat());
+        assert!(f.candidates().is_empty(), "candidate was not consumed");
+
+        // Consumed once only.
+        f.request_move_from_press(window);
+        assert_eq!(f.testwl.move_requests().len(), 1);
+    }
+
+    /// An enter we cannot resolve (here: a surface with no window role yet) drops the previous
+    /// owner. The next press is still delivered to Xwayland, but is not attributed to that stale
+    /// owner and cannot authorize a move.
+    #[test]
+    fn stale_enter_does_not_hand_the_press_to_the_old_window() {
+        let (mut f, comp) = TestFixture::new_with_compositor();
+        let pointer = f.get_pointer(&comp);
+        let window = Window::new(1);
+        let (_surface, id) = f.create_toplevel(&comp, window);
+
+        f.enter(id);
+        f.press_left(100);
+        f.release_left(101);
+        let buttons_before = forwarded_buttons(&pointer);
+
+        // A surface that exists but has no x window/role: satellite cannot tell what the pointer
+        // is over.
+        let (_buffer, _unassociated) = comp.create_surface();
+        f.run();
+        let unassociated_id = f.check_new_surface();
+        assert_ne!(unassociated_id, id);
+        f.enter(unassociated_id);
+
+        f.press_left(200);
+
+        assert!(
+            f.candidates().is_empty(),
+            "a stale enter must not let a press create a candidate: {:?}",
+            f.candidates()
+        );
+        assert_eq!(
+            f.last_click_serial(window),
+            Some(100),
+            "the old window's click serial must not be overwritten"
+        );
+        let mut after_unknown = buttons_before.clone();
+        after_unknown.push(200);
+        assert_eq!(
+            forwarded_buttons(&pointer),
+            after_unknown,
+            "ordinary input must still be forwarded with an unknown owner"
+        );
+
+        f.request_move_from_press(window);
+        assert!(f.testwl.move_requests().is_empty());
+
+        // Positive barrier on the same connection: a later, valid press is attributed normally.
+        f.enter(id);
+        f.press_left(300);
+        let mut expected = after_unknown;
+        expected.push(300);
+        assert_eq!(forwarded_buttons(&pointer), expected);
+        assert_eq!(
+            f.candidates(),
+            vec![(f.seat_entity(), f.window_entity(window), 300)]
+        );
+    }
+
+    /// Motion can arrive before satellite has resolved a pointer owner and surface scale. It is
+    /// still ordinary input and must be forwarded at unit scale without creating authorization.
+    #[test]
+    fn motion_without_owner_or_scale_is_forwarded_at_unit_scale() {
+        let (mut f, comp) = TestFixture::new_with_compositor();
+        let pointer = f.get_pointer(&comp);
+        let seat = f.seat_entity();
+
+        crate::server::Event::handle(
+            PointerEvent::Motion {
+                time: 55,
+                surface_x: 3.0,
+                surface_y: 4.0,
+            },
+            seat,
+            &mut f.satellite,
+        );
+        f.flush_to_xwayland();
+
+        assert_eq!(forwarded_motions(&pointer), vec![(55, 3.0, 4.0)]);
+        assert!(f.candidates().is_empty());
+        assert!(f.satellite.world.get::<&CurrentSurface>(seat).is_err());
+    }
+
+    /// A leave for a surface that is already dead still ends the press ownership, before the
+    /// early return that skips the rest of the leave handling.
+    #[test]
+    fn dead_leave_invalidates_candidate_and_owner() {
+        let (mut f, comp) = TestFixture::new_with_compositor();
+        let pointer = f.get_pointer(&comp);
+        let window_a = Window::new(1);
+        let window_b = Window::new(2);
+        let (_surface_a, id_a) = f.create_toplevel(&comp, window_a);
+        let (surface_b, _id_b) = f.create_toplevel(&comp, window_b);
+
+        f.enter(id_a);
+        f.press_left(100);
+        assert_eq!(f.candidates().len(), 1);
+
+        // Kill B's surface so we have a dead client side surface to leave.
+        let dead = f.client_surface(f.window_entity(window_b));
+        surface_b.send_request(Req::<WlSurface>::Destroy).unwrap();
+        f.run();
+        assert!(!dead.is_alive(), "surface should be dead");
+
+        let seat = f.seat_entity();
+        crate::server::Event::handle(
+            PointerEvent::Leave {
+                serial: 7,
+                surface: dead,
+            },
+            seat,
+            &mut f.satellite,
+        );
+
+        assert!(
+            f.candidates().is_empty(),
+            "dead leave must invalidate the candidate"
+        );
+
+        let buttons_before = forwarded_buttons(&pointer);
+        f.press_left(200);
+        assert!(
+            f.candidates().is_empty(),
+            "press after a dead leave must not borrow the old owner"
+        );
+        let mut after_unknown = buttons_before.clone();
+        after_unknown.push(200);
+        assert_eq!(forwarded_buttons(&pointer), after_unknown);
+        f.request_move_from_press(window_a);
+        assert!(f.testwl.move_requests().is_empty());
+
+        // Same connection barrier: a valid press afterwards still arrives.
+        f.enter(id_a);
+        f.press_left(300);
+        let mut expected = after_unknown;
+        expected.push(300);
+        assert_eq!(forwarded_buttons(&pointer), expected);
+        assert_eq!(f.candidates().len(), 1);
+    }
+
+    /// A queued enter whose surface is gone by the time it is replayed invalidates the owner and
+    /// the candidate. The press still reaches Xwayland without authorizing a move.
+    #[test]
+    fn unresolvable_pending_enter_invalidates_candidate_and_owner() {
+        let (mut f, comp) = TestFixture::new_with_compositor();
+        let pointer = f.get_pointer(&comp);
+        let window = Window::new(1);
+        let (_surface, id) = f.create_toplevel(&comp, window);
+
+        f.enter(id);
+        f.press_left(100);
+        assert_eq!(f.candidates().len(), 1);
+
+        // A surface whose entity satellite drops entirely when it is destroyed.
+        let (_buffer, doomed) = comp.create_surface();
+        f.run();
+        let doomed_id = f.check_new_surface();
+        let doomed_client = {
+            let data = f.testwl.get_surface_data(doomed_id).unwrap();
+            assert!(data.role.is_none());
+            let entity = f
+                .satellite
+                .world
+                .query::<&s_proto::wl_surface::WlSurface>()
+                .iter()
+                .find(|(_, server)| server.id().protocol_id() == doomed.obj.id().protocol_id())
+                .map(|(entity, _)| entity);
+            f.client_surface(entity.expect("no entity for the new surface"))
+        };
+        doomed.send_request(Req::<WlSurface>::Destroy).unwrap();
+        f.run();
+
+        // Queue it as the pending enter, which is the state a popup enter leaves behind.
+        let seat = f.seat_entity();
+        f.satellite
+            .world
+            .insert_one(
+                seat,
+                PendingEnter(PointerEvent::Enter {
+                    serial: 9,
+                    surface: doomed_client,
+                    surface_x: 1.0,
+                    surface_y: 1.0,
+                }),
+            )
+            .unwrap();
+
+        let buttons_before = forwarded_buttons(&pointer);
+        f.press_left(200);
+
+        assert!(
+            f.candidates().is_empty(),
+            "an unresolvable pending enter must invalidate the candidate"
+        );
+        let mut after_unknown = buttons_before.clone();
+        after_unknown.push(200);
+        assert_eq!(
+            forwarded_buttons(&pointer),
+            after_unknown,
+            "ordinary input must survive an unresolvable pending enter"
+        );
+        f.request_move_from_press(window);
+        assert!(f.testwl.move_requests().is_empty());
+
+        // Barrier: a new enter clears the stale pending enter, and the next press arrives.
+        f.enter(id);
+        f.press_left(300);
+        let mut expected = after_unknown;
+        expected.push(300);
+        assert_eq!(forwarded_buttons(&pointer), expected);
+        assert_eq!(f.candidates().len(), 1);
+    }
+
+    /// The normal popup flow still works: the first enter is held back, and the next button
+    /// replays it, updates the owner and is forwarded.
+    #[test]
+    fn pending_popup_enter_resolves_on_the_next_button() {
+        let (mut f, comp) = TestFixture::new_with_compositor();
+        let pointer = f.get_pointer(&comp);
+        let window = Window::new(1);
+        let popup_window = Window::new(2);
+        let (_surface, id) = f.create_toplevel(&comp, window);
+        let (_popup_surface, popup_id) =
+            f.create_popup(&comp, PopupBuilder::new(popup_window, window, id));
+
+        f.enter(id);
+        let enters_before = forwarded_enters(&pointer);
+        let buttons_before = forwarded_buttons(&pointer);
+
+        // A popup enter is queued instead of being applied right away.
+        f.enter(popup_id);
+        assert_eq!(
+            forwarded_enters(&pointer),
+            enters_before,
+            "the popup enter should still be pending"
+        );
+
+        // The next button replays it.
+        f.press_left(400);
+        assert_eq!(
+            forwarded_enters(&pointer).len(),
+            enters_before.len() + 1,
+            "the pending popup enter was not replayed"
+        );
+        let mut expected = buttons_before.clone();
+        expected.push(400);
+        assert_eq!(
+            forwarded_buttons(&pointer),
+            expected,
+            "the popup press must still be forwarded"
+        );
+        assert_eq!(
+            f.candidates(),
+            vec![(f.seat_entity(), f.window_entity(popup_window), 400)],
+            "the owner should have moved to the popup"
+        );
+    }
+
+    /// Losing the pointer capability invalidates immediately, without waiting for Xwayland to
+    /// release the pointer.
+    #[test]
+    fn pointer_capability_loss_invalidates_candidate() {
+        let (mut f, comp) = TestFixture::new_with_compositor();
+        let _pointer = f.get_pointer(&comp);
+        let window = Window::new(1);
+        let (_surface, id) = f.create_toplevel(&comp, window);
+
+        f.enter(id);
+        f.press_left(100);
+        assert_eq!(f.candidates().len(), 1);
+
+        let seat = f.seat_entity();
+        crate::server::Event::handle(
+            wl_seat::Event::Capabilities {
+                capabilities: WEnum::Value(wl_seat::Capability::Keyboard),
+            },
+            seat,
+            &mut f.satellite,
+        );
+
+        assert!(f.candidates().is_empty());
+        // The client side pointer is still bound: we did not wait for a release.
+        assert!(f.satellite.world.get::<&WlPointer>(seat).is_ok());
+        f.request_move_from_press(window);
+        assert!(f.testwl.move_requests().is_empty());
+    }
+
+    /// Releasing the pointer, and creating a new one, both end the press.
+    #[test]
+    fn pointer_release_and_recreation_invalidate_candidate() {
+        let (mut f, comp) = TestFixture::new_with_compositor();
+        let pointer = f.get_pointer(&comp);
+        let window = Window::new(1);
+        let (_surface, id) = f.create_toplevel(&comp, window);
+
+        f.enter(id);
+        f.press_left(100);
+        assert_eq!(f.candidates().len(), 1);
+
+        pointer.send_request(Req::<WlPointer>::Release).unwrap();
+        f.run();
+        assert!(f.candidates().is_empty(), "release must invalidate");
+
+        // A fresh pointer, a fresh press, and then a second get_pointer.
+        let _pointer2 = f.get_pointer(&comp);
+        f.enter(id);
+        f.press_left(200);
+        assert_eq!(
+            f.candidates(),
+            vec![(f.seat_entity(), f.window_entity(window), 200)]
+        );
+
+        let _pointer3 = f.get_pointer(&comp);
+        assert!(
+            f.candidates().is_empty(),
+            "a new pointer must not inherit the old press"
+        );
+        f.request_move_from_press(window);
+        assert!(f.testwl.move_requests().is_empty());
+    }
+
+    /// Events that arrive for a seat with no bound pointer are discarded by the pointer specific
+    /// clientside dispatch instead of being queued (which would later be handled against whatever
+    /// components happen to be left) or unwrapped.
+    #[test]
+    fn events_without_a_bound_pointer_are_dropped() {
+        let (mut f, comp) = TestFixture::new_with_compositor();
+        let pointer = f.get_pointer(&comp);
+        let window = Window::new(1);
+        let (_surface, id) = f.create_toplevel(&comp, window);
+
+        f.enter(id);
+        f.press_left(100);
+        f.release_left(101);
+        let buttons_before = forwarded_buttons(&pointer);
+
+        // Drop satellite's binding while the compositor side pointer stays alive, so the events
+        // below still name a real source that no longer belongs to this seat.
+        let seat = f.seat_entity();
+        f.satellite
+            .world
+            .remove_one::<WlPointer>(seat)
+            .expect("no bound pointer to remove");
+
+        f.press_left(200);
+
+        assert!(f.candidates().is_empty(), "{:?}", f.candidates());
+        assert_eq!(
+            forwarded_buttons(&pointer),
+            buttons_before,
+            "an event with no bound pointer must not be forwarded"
+        );
+        assert_eq!(
+            f.last_click_serial(window),
+            Some(100),
+            "the click serial must not be updated either"
+        );
+    }
+
+    /// The pointer specific clientside dispatch drops events from a pointer that is no longer the
+    /// bound one, and keeps working for the current one.
+    #[test]
+    fn events_from_a_replaced_pointer_are_dropped() {
+        let (mut f, comp) = TestFixture::new_with_compositor();
+        let pointer = f.get_pointer(&comp);
+        let window = Window::new(1);
+        let (_surface, id) = f.create_toplevel(&comp, window);
+
+        f.enter(id);
+        f.press_left(100);
+        f.release_left(101);
+
+        // Keep the old compositor side pointer around, then let Xwayland create a new one.
+        let old_pointer = f.testwl.pointer().clone();
+        let pointer2 = f.get_pointer(&comp);
+        assert!(f.candidates().is_empty());
+        let buttons_before = forwarded_buttons(&pointer);
+
+        let surface = f
+            .testwl
+            .get_object::<s_proto::wl_surface::WlSurface>(id)
+            .unwrap();
+        old_pointer.enter(30, &surface, 10.0, 10.0);
+        old_pointer.frame();
+        old_pointer.button(31, 31, BTN_LEFT, s_proto::wl_pointer::ButtonState::Pressed);
+        old_pointer.frame();
+        f.testwl.dispatch();
+        f.run();
+        f.flush_to_xwayland();
+
+        assert!(
+            f.candidates().is_empty(),
+            "events from the replaced pointer must be discarded"
+        );
+        assert_eq!(
+            forwarded_buttons(&pointer),
+            buttons_before,
+            "a discarded event must not be forwarded"
+        );
+        assert!(
+            forwarded_buttons(&pointer2).is_empty(),
+            "the discarded event must not reach the new pointer either: {:?}",
+            forwarded_buttons(&pointer2)
+        );
+
+        // Same connection barrier: the current pointer still works, and only its press shows up.
+        f.enter(id);
+        f.press_left(300);
+        assert_eq!(forwarded_buttons(&pointer2), vec![300]);
+        assert_eq!(forwarded_buttons(&pointer), buttons_before);
+        assert_eq!(
+            f.candidates(),
+            vec![(f.seat_entity(), f.window_entity(window), 300)]
+        );
+    }
+
+    /// A fixture plus the registry name of the seat global, which `compositor()` would otherwise
+    /// consume, so tests can bind the same global a second time.
+    fn fixture_with_seat_name() -> (TestFixture<FakeXConnection>, Compositor, u32) {
+        let mut f = TestFixture::new();
+        let seat_name = f
+            .registry
+            .data
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|event| match event {
+                Ev::<WlRegistry>::Global {
+                    name, interface, ..
+                } if *interface == WlSeat::interface().name => Some(*name),
+                _ => None,
+            })
+            .expect("no seat global");
+        let comp = f.compositor();
+        (f, comp, seat_name)
+    }
+
+    /// Queues an enter and a left press on a specific compositor side pointer. The caller flushes.
+    fn press_via(
+        pointer: &s_proto::wl_pointer::WlPointer,
+        surface: &s_proto::wl_surface::WlSurface,
+        serial: u32,
+    ) {
+        pointer.enter(serial, surface, 10.0, 10.0);
+        pointer.frame();
+        pointer.button(
+            serial,
+            serial,
+            BTN_LEFT,
+            s_proto::wl_pointer::ButtonState::Pressed,
+        );
+        pointer.frame();
+    }
+
+    /// Removing the seat global invalidates every seat bound from it, and a press consumed in the
+    /// same batch as the removal cannot recreate a candidate.
+    #[test]
+    fn seat_global_removal_invalidates_every_bind() {
+        let (mut f, comp, seat_name) = fixture_with_seat_name();
+        let _pointer = f.get_pointer(&comp);
+        let pointer1_res = f.testwl.pointer().clone();
+
+        // A second bind of the same global, as a client is allowed to do.
+        let seat2 = TestObject::<WlSeat>::from_request(
+            &f.registry.obj,
+            Req::<WlRegistry>::Bind {
+                name: seat_name,
+                id: (WlSeat::interface(), 5),
+            },
+        );
+        let pointer2 =
+            TestObject::<WlPointer>::from_request(&seat2.obj, wl_seat::Request::GetPointer {});
+        f.run();
+
+        let window = Window::new(1);
+        let (_surface, id) = f.create_toplevel(&comp, window);
+        let seats = f.seat_entities();
+        assert_eq!(seats.len(), 2, "expected two seat binds: {seats:?}");
+
+        // Both binds get a real press: testwl only tracks the newest pointer, so the first bind's
+        // pointer resource is kept from before the second bind.
+        let surface = f
+            .testwl
+            .get_object::<s_proto::wl_surface::WlSurface>(id)
+            .unwrap();
+        press_via(&pointer1_res, &surface, 100);
+        press_via(f.testwl.pointer(), &surface, 200);
+        f.testwl.dispatch();
+        f.run();
+        f.flush_to_xwayland();
+        assert_eq!(
+            f.candidates().len(),
+            2,
+            "both binds should hold a press: {:?}",
+            f.candidates()
+        );
+
+        // Queue the global removal and another press together, so satellite consumes both in one
+        // batch: handle_globals runs first, and the press must not undo it.
+        f.testwl.remove_seat_global();
+        press_via(f.testwl.pointer(), &surface, 300);
+        f.testwl.dispatch();
+        f.run();
+        f.flush_to_xwayland();
+
+        assert!(
+            forwarded_buttons(&pointer2).contains(&300),
+            "the queued press was not processed in this batch: {:?}",
+            forwarded_buttons(&pointer2)
+        );
+        assert!(
+            f.candidates().is_empty(),
+            "every bind of the removed global must be cleared, and the press in the same batch \
+             must not recreate one: {:?}",
+            f.candidates()
+        );
+
+        f.request_move_from_press(window);
+        assert!(f.testwl.move_requests().is_empty());
+    }
+
+    /// Two seats holding a press for the same window is ambiguous: an X11 client message has no
+    /// seat field, so nothing is sent.
+    #[test]
+    fn two_seats_pressing_the_same_window_are_ambiguous() {
+        let (mut f, comp, seat_name) = fixture_with_seat_name();
+        let pointer1 = f.get_pointer(&comp);
+        let pointer1_res = f.testwl.pointer().clone();
+
+        let seat2 = TestObject::<WlSeat>::from_request(
+            &f.registry.obj,
+            Req::<WlRegistry>::Bind {
+                name: seat_name,
+                id: (WlSeat::interface(), 5),
+            },
+        );
+        let _pointer2 =
+            TestObject::<WlPointer>::from_request(&seat2.obj, wl_seat::Request::GetPointer {});
+        f.run();
+
+        let window = Window::new(1);
+        let (_surface, id) = f.create_toplevel(&comp, window);
+        let surface = f
+            .testwl
+            .get_object::<s_proto::wl_surface::WlSurface>(id)
+            .unwrap();
+
+        press_via(&pointer1_res, &surface, 100);
+        press_via(f.testwl.pointer(), &surface, 200);
+        f.testwl.dispatch();
+        f.run();
+        f.flush_to_xwayland();
+        assert_eq!(f.candidates().len(), 2, "{:?}", f.candidates());
+        assert_eq!(forwarded_buttons(&pointer1), vec![100]);
+
+        f.request_move_from_press(window);
+        assert!(
+            f.testwl.move_requests().is_empty(),
+            "an ambiguous request must not pick a seat: {:?}",
+            f.testwl.move_requests()
+        );
+        assert_eq!(
+            f.candidates().len(),
+            2,
+            "an ambiguous request must not consume anything"
+        );
+    }
+
+    /// Unmapping and remapping the same window keeps the same entity, so the candidate has to be
+    /// dropped explicitly.
+    #[test]
+    fn same_entity_unmap_remap_drops_candidate() {
+        let (mut f, comp) = TestFixture::new_with_compositor();
+        let pointer = f.get_pointer(&comp);
+        let window = Window::new(1);
+        let (_surface, id) = f.create_toplevel(&comp, window);
+
+        f.enter(id);
+        f.press_left(100);
+        let entity = f.window_entity(window);
+        assert_eq!(f.candidates(), vec![(f.seat_entity(), entity, 100)]);
+
+        f.satellite.unmap_window(window);
+        assert_eq!(
+            f.window_entity(window),
+            entity,
+            "this test is only meaningful while the entity is reused"
+        );
+        assert!(f.candidates().is_empty(), "unmap must invalidate");
+        assert!(
+            f.satellite
+                .world
+                .get::<&CurrentSurface>(f.seat_entity())
+                .is_err(),
+            "unmap must clear the pointer owner"
+        );
+
+        let buttons_before = forwarded_buttons(&pointer);
+        f.press_left(200);
+        assert!(
+            f.candidates().is_empty(),
+            "a queued press after unmap must not recreate a candidate"
+        );
+        let mut expected = buttons_before;
+        expected.push(200);
+        assert_eq!(
+            forwarded_buttons(&pointer),
+            expected,
+            "clearing ownership must not swallow ordinary input"
+        );
+
+        f.satellite.map_window(window);
+        f.run();
+        assert_eq!(f.window_entity(window), entity);
+        assert!(f.candidates().is_empty());
+        f.request_move_from_press(window);
+        assert!(f.testwl.move_requests().is_empty());
+    }
+
+    /// Destroying the window drops the candidate, and reusing the XID afterwards does not bring
+    /// it back.
+    #[test]
+    fn destroyed_and_reused_window_drops_candidate() {
+        let (mut f, comp) = TestFixture::new_with_compositor();
+        let _pointer = f.get_pointer(&comp);
+        let window = Window::new(1);
+        let (_surface, id) = f.create_toplevel(&comp, window);
+
+        f.enter(id);
+        f.press_left(100);
+        let entity = f.window_entity(window);
+        assert_eq!(f.candidates().len(), 1);
+
+        // Destroy directly, with the candidate still live: unmapping first would clear it and
+        // hide whether destroy_window does its own invalidation (that path has its own test).
+        f.satellite.destroy_window(window);
+        assert!(f.candidates().is_empty(), "destroy must invalidate");
+
+        // Same XID, new entity.
+        f.new_window(
+            window,
+            false,
+            WindowData {
+                mapped: false,
+                dims: WindowDims {
+                    x: 0,
+                    y: 0,
+                    width: 50,
+                    height: 50,
+                },
+                fullscreen: false,
+            },
+        );
+        assert_ne!(f.window_entity(window), entity);
+        assert!(f.candidates().is_empty());
+        f.request_move_from_press(window);
+        assert!(f.testwl.move_requests().is_empty());
+    }
+
+    /// Destroying just the surface (without an unmap) also drops the candidate.
+    #[test]
+    fn surface_destroy_drops_candidate() {
+        let (mut f, comp) = TestFixture::new_with_compositor();
+        let _pointer = f.get_pointer(&comp);
+        let window = Window::new(1);
+        let (surface, id) = f.create_toplevel(&comp, window);
+
+        f.enter(id);
+        f.press_left(100);
+        assert_eq!(f.candidates().len(), 1);
+
+        surface.send_request(Req::<WlSurface>::Destroy).unwrap();
+        f.run();
+
+        assert!(
+            f.candidates().is_empty(),
+            "destroying the surface must invalidate the candidate"
+        );
+        f.request_move_from_press(window);
+        assert!(f.testwl.move_requests().is_empty());
+    }
+
+    /// Regressions for the untouched paths: a known owner still gets its click serial and its
+    /// button, and a right button press neither creates nor destroys a candidate.
+    #[test]
+    fn known_owner_button_handling_is_unchanged() {
+        let (mut f, comp) = TestFixture::new_with_compositor();
+        let pointer = f.get_pointer(&comp);
+        let window = Window::new(1);
+        let (_surface, id) = f.create_toplevel(&comp, window);
+
+        f.enter(id);
+        f.pointer_button(BTN_RIGHT, true, 50);
+        assert!(
+            f.candidates().is_empty(),
+            "the right button must not create a candidate"
+        );
+        assert_eq!(forwarded_buttons(&pointer), vec![50]);
+        assert_eq!(f.last_click_serial(window), None);
+
+        f.press_left(100);
+        assert_eq!(f.last_click_serial(window), Some(100));
+        assert_eq!(f.candidates().len(), 1);
+        assert_eq!(forwarded_buttons(&pointer), vec![50, 100]);
+
+        // A right press while the left is held leaves the candidate alone.
+        f.pointer_button(BTN_RIGHT, true, 101);
+        assert_eq!(f.candidates().len(), 1);
+
+        // The left release ends it, even with the right button still down.
+        f.release_left(102);
+        assert!(f.candidates().is_empty());
+        assert_eq!(forwarded_buttons(&pointer), vec![50, 100, 101, 102]);
+        // The legacy button 1 path still has its serial.
+        assert_eq!(f.last_click_serial(window), Some(100));
+    }
+}
