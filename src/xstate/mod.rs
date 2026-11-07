@@ -293,6 +293,7 @@ impl XState {
                 self.atoms.motif_wm_hints,
                 self.atoms.net_wm_state,
                 self.atoms.wm_fullscreen,
+                self.atoms.fullscreen_monitors,
                 self.atoms.moveresize,
             ],
         );
@@ -568,6 +569,36 @@ impl XState {
                     }
                 }
             }
+            x if x == self.atoms.fullscreen_monitors => {
+                let x::ClientMessageData::Data32(data) = e.data() else {
+                    unreachable!();
+                };
+                let monitors = [data[0], data[1], data[2], data[3]];
+                trace!("_NET_WM_FULLSCREEN_MONITORS props: {monitors:?}");
+
+                let Some(output) = self.get_fullscreen_monitors_output(monitors) else {
+                    warn!(
+                        "ignoring _NET_WM_FULLSCREEN_MONITORS with unknown monitors for {:?}: {monitors:?}",
+                        e.window()
+                    );
+                    return;
+                };
+
+                // EWMH has the window manager keep the property in sync with the current state.
+                if let Err(err) = self.connection.send_and_check_request(&x::ChangeProperty {
+                    mode: x::PropMode::Replace,
+                    window: e.window(),
+                    property: self.atoms.fullscreen_monitors,
+                    r#type: x::ATOM_CARDINAL,
+                    data: &monitors,
+                }) {
+                    warn!(
+                        "Failed to set _NET_WM_FULLSCREEN_MONITORS on {:?} ({err})",
+                        e.window()
+                    );
+                }
+                server_state.set_fullscreen_output(e.window(), output);
+            }
             x if x == self.atoms.active_win => {
                 server_state.activate_window(e.window());
             }
@@ -623,6 +654,38 @@ impl XState {
         }
     }
 
+    /// Resolves the monitor edges (top, bottom, left, right) of a `_NET_WM_FULLSCREEN_MONITORS`
+    /// request to the name of the Wayland output to fullscreen on. Monitor indices are those of
+    /// `RRGetMonitors`/Xinerama, and Xwayland names its emulated RandR monitors after the outputs
+    /// they stand in for.
+    ///
+    /// Returns `None` if an index doesn't name a current monitor. Returns `Some(None)` when the
+    /// edges span several monitors: Wayland can't fullscreen a toplevel across outputs, so the
+    /// output is left for the compositor to choose, like a plain `_NET_WM_STATE_FULLSCREEN`.
+    fn get_fullscreen_monitors_output(&self, monitors: [u32; 4]) -> Option<Option<String>> {
+        let reply = self
+            .connection
+            .wait_for_reply(self.connection.send_request(&xcb::randr::GetMonitors {
+                window: self.root,
+                get_active: true,
+            }))
+            .ok()?;
+        let names: Vec<x::Atom> = reply.monitors().map(|m| m.name()).collect();
+        if monitors.iter().any(|i| *i as usize >= names.len()) {
+            return None;
+        }
+        if monitors.iter().any(|i| *i != monitors[0]) {
+            debug!(
+                "_NET_WM_FULLSCREEN_MONITORS spans several monitors, letting the compositor choose"
+            );
+            return Some(None);
+        }
+        Some(Some(get_atom_name(
+            &self.connection,
+            names[monitors[0] as usize],
+        )))
+    }
+
     fn handle_window_properties(
         &self,
         server_state: &mut super::RealServerState,
@@ -653,6 +716,15 @@ impl XState {
         let motif_wm_hints = self.get_motif_wm_hints(window)?;
         if let Some(decorations) = motif_wm_hints.as_ref().and_then(|m| m.decorations) {
             server_state.set_win_decorations(window, decorations);
+        }
+
+        if let Some(monitors) = self.get_fullscreen_monitors(window)? {
+            match self.get_fullscreen_monitors_output(monitors) {
+                Some(output) => server_state.set_fullscreen_output(window, output),
+                None => warn!(
+                    "ignoring _NET_WM_FULLSCREEN_MONITORS with unknown monitors for {window:?}: {monitors:?}"
+                ),
+            }
         }
 
         let wm_hints = self.get_wm_hints(window)?;
@@ -803,6 +875,15 @@ impl XState {
             .map(Option::flatten)
     }
 
+    fn get_fullscreen_monitors(&self, window: x::Window) -> XResult<Option<[u32; 4]>> {
+        let cookie =
+            self.get_property_cookie(window, self.atoms.fullscreen_monitors, x::ATOM_CARDINAL, 4);
+        let resolver = |reply: x::GetPropertyReply| reply.value::<u32>().try_into().ok();
+        Ok(PropertyCookieWrapper::new(&self.connection, cookie)
+            .resolve(resolver)?
+            .flatten())
+    }
+
     fn get_net_wm_window_types(&self, window: x::Window) -> XResult<Option<Vec<x::Atom>>> {
         let cookie = self.get_property_cookie(window, self.window_atoms.ty, x::ATOM_ATOM, 10);
         let resolver = |reply: x::GetPropertyReply| reply.value::<x::Atom>().to_vec();
@@ -913,6 +994,7 @@ xcb::atoms_struct! {
         wm_pid => b"_NET_WM_PID" only_if_exists = false,
         net_wm_state => b"_NET_WM_STATE" only_if_exists = false,
         wm_fullscreen => b"_NET_WM_STATE_FULLSCREEN" only_if_exists = false,
+        fullscreen_monitors => b"_NET_WM_FULLSCREEN_MONITORS" only_if_exists = false,
         active_win => b"_NET_ACTIVE_WINDOW" only_if_exists = false,
         client_list => b"_NET_CLIENT_LIST" only_if_exists = false,
         supported => b"_NET_SUPPORTED" only_if_exists = false,
