@@ -2145,6 +2145,88 @@ fn reconfigure_popup() {
 }
 
 #[test]
+fn reconfigure_popup_parent_on_other_output() {
+    // #528 (Steam on niri, two outputs): the parent keeps the offset of an output it only
+    // touched, its menu surface sits on the real one. A reconfigure must stay relative to
+    // the parent instead of jumping by the distance between the outputs.
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let (_, output_a) = f.new_output(0, 0);
+    let (_, output_b) = f.new_output(1000, 0);
+    f.run();
+
+    let toplevel = Window::new(1);
+    let (_, t_id) = f.create_toplevel(&comp, toplevel);
+    f.testwl.move_surface_to_output(t_id, &output_a);
+    f.run();
+    f.testwl.move_surface_to_output(t_id, &output_b);
+    f.run();
+
+    let popup = Window::new(2);
+    let (_, p_id) = f.create_popup(
+        &comp,
+        PopupBuilder::new(popup, toplevel, t_id).x(1145).y(40),
+    );
+    f.testwl.move_surface_to_output(p_id, &output_a);
+    f.run();
+    f.run();
+    let data = f.testwl.get_surface_data(p_id).unwrap();
+    assert_eq!(
+        data.popup().positioner_state.offset,
+        testwl::Vec2 { x: 145, y: 40 }
+    );
+
+    f.reconfigure_window(
+        popup,
+        WindowDims {
+            x: 1155,
+            y: 50,
+            width: 50,
+            height: 50,
+        },
+        true,
+    );
+    f.run();
+    f.run();
+    let data = f.testwl.get_surface_data(p_id).unwrap();
+    assert_eq!(
+        data.popup().positioner_state.offset,
+        testwl::Vec2 { x: 155, y: 50 }
+    );
+}
+
+#[test]
+fn leave_output_restores_offset() {
+    // #528: a window that only touched a neighbouring output goes back to the one it is on.
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let (_, output_a) = f.new_output(0, 0);
+    let (_, output_b) = f.new_output(1000, 0);
+    f.run();
+
+    let toplevel = Window::new(1);
+    let (_, t_id) = f.create_toplevel(&comp, toplevel);
+    f.testwl.move_surface_to_output(t_id, &output_a);
+    f.run();
+    f.testwl.move_surface_to_output(t_id, &output_b);
+    f.run();
+    macro_rules! x {
+        () => {
+            f.satellite
+                .world
+                .get::<&super::WindowData>(f.satellite.windows[&toplevel])
+                .unwrap()
+                .attrs
+                .dims
+                .x
+        };
+    }
+    assert_eq!(x!(), 1000);
+
+    f.testwl.leave_surface_output(t_id, &output_b);
+    f.run();
+    assert_eq!(x!(), 0);
+}
+
+#[test]
 fn reconfigure_popup_after_map() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     let toplevel = Window::new(1);
