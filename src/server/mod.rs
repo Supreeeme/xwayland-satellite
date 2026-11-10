@@ -132,10 +132,16 @@ struct WindowData {
     attrs: WindowAttributes,
     output_offset: WindowOutputOffset,
     activation_token: Option<String>,
+    pid: Option<u32>,
 }
 
 impl WindowData {
-    fn new(override_redirect: bool, dims: WindowDims, activation_token: Option<String>) -> Self {
+    fn new(
+        override_redirect: bool,
+        dims: WindowDims,
+        activation_token: Option<String>,
+        pid: Option<u32>,
+    ) -> Self {
         Self {
             mapped: false,
             attrs: WindowAttributes {
@@ -146,6 +152,7 @@ impl WindowData {
             },
             output_offset: WindowOutputOffset::default(),
             activation_token,
+            pid,
         }
     }
 
@@ -892,7 +899,7 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         let id = self.world.spawn((
             window,
-            WindowData::new(override_redirect, dims, activation_token),
+            WindowData::new(override_redirect, dims, activation_token, pid),
         ));
 
         self.windows.insert(window, id);
@@ -1266,14 +1273,25 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
             warn!("Last focused toplevel has no surface, cannot focus window {window:?}");
             return;
         };
+        let focused = data.get::<&WindowData>().unwrap();
+        let window_pid = self
+            .windows
+            .get(&window)
+            .and_then(|id| self.world.get::<&WindowData>(*id).ok())
+            .and_then(|data| data.pid);
+        // Lending the focused app's input serial would let any other app take focus from it.
+        let (seat_and_serial, surface) = match (window_pid, focused.pid) {
+            (Some(window_pid), Some(focused_pid)) if window_pid != focused_pid => (None, None),
+            _ => (self.last_kb_serial.clone(), Some((*surface).clone())),
+        };
         activation_state.request_token_with_data(
             &self.qh,
             clientside::ActivationData::new(
                 window,
                 smithay_client_toolkit::activation::RequestData {
-                    app_id: data.get::<&WindowData>().unwrap().attrs.class.clone(),
-                    seat_and_serial: self.last_kb_serial.clone(),
-                    surface: Some((*surface).clone()),
+                    app_id: focused.attrs.class.clone(),
+                    seat_and_serial,
+                    surface,
                 },
             ),
         );
