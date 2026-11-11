@@ -59,6 +59,8 @@ a display number to satellite as the first argument, and then the `-listenfd` ar
 You can view [Niri's implementation of this integration](https://github.com/YaLTeR/niri/pull/1728/files) for understanding
 how it should work.
 
+When integrated, xwayland-satellite logs at `debug` level by default, to simplify bug reporting.  But you can specify RUST_LOG environment variable with other log levels, e.g: `RUST_LOG="niri=debug,xwayland_satellite=warn"`.
+
 If `satellite` is integrated into your compositor, updating either `xwayland-satellite` or your compositor's satellite settings requires restarting the compositor. To test latest commit and/or patches without restarting the compositor, add a display when launching `xwayland-satellite` and use the same `DISPLAY` environment variables for applications you wish to test.
 
 ## Wayland protocols
