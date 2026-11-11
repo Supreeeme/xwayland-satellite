@@ -551,3 +551,41 @@ mod window_role_heuristics {
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Splash);
     }
 }
+
+// These properties are client data, so they can be shorter than their flags claim.
+#[test]
+fn short_hints() {
+    let size_flags = WmSizeHintsFlags::ProgramMinSize | WmSizeHintsFlags::ProgramMaxSize;
+    for value in [&[][..], &[size_flags.bits()]] {
+        assert_eq!(
+            crate::xstate::WmNormalHints::from(value),
+            crate::xstate::WmNormalHints::default()
+        );
+    }
+    assert_eq!(
+        crate::xstate::WmNormalHints::from([size_flags.bits(), 0, 0, 0, 0, 1, 2].as_slice()),
+        crate::xstate::WmNormalHints {
+            min_size: Some(WinSize {
+                width: 1,
+                height: 2,
+            }),
+            max_size: None,
+        }
+    );
+
+    let hints_flags = WmHintsFlags::Input | WmHintsFlags::WindowGroup;
+    for value in [&[][..], &[hints_flags.bits()]] {
+        assert_eq!(
+            WmHints::from(value),
+            WmHints {
+                window_group: None,
+                accepts_input: true,
+            }
+        );
+    }
+
+    for value in [&[][..], &[0x3], &[0x3, 0]] {
+        let hints = motif::Hints::from(value);
+        assert_eq!(hints.decorations, None);
+    }
+}
