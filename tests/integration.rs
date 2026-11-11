@@ -306,6 +306,19 @@ impl Fixture {
         surface
     }
 
+    /// Maps a new window, to check that satellite is still managing windows.
+    #[track_caller]
+    fn verify_still_managing_windows(&mut self, connection: &mut Connection) {
+        let surfaces = self.testwl.created_surfaces().len();
+        let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+        connection.map_window(window);
+        self.wait_and_dispatch();
+        assert!(
+            self.testwl.created_surfaces().len() > surfaces,
+            "No surface created for new window"
+        );
+    }
+
     /// Triggers a Wayland side toplevel Close event and processes the corresponding
     /// X11 side WM_DELETE_WINDOW client message
     fn wm_delete_window(
@@ -377,6 +390,9 @@ xcb::atoms_struct! {
         xsettings_setting => b"_XSETTINGS_SETTINGS",
         resource_manager => b"RESOURCE_MANAGER",
         moveresize => b"_NET_WM_MOVERESIZE",
+        net_wm_name => b"_NET_WM_NAME",
+        wl_surface_id => b"WL_SURFACE_ID" only_if_exists = false,
+        wl_surface_serial => b"WL_SURFACE_SERIAL" only_if_exists = false,
     }
 }
 
@@ -2573,4 +2589,235 @@ fn client_init_resize() {
         "Got wrong resizing edge: {:?}",
         data.resizing
     );
+}
+
+#[test]
+fn client_message_wrong_format() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut connection, window);
+
+    // Any client can send these with any format.
+    for ty in [
+        connection.atoms.wl_surface_serial,
+        connection.atoms.net_wm_state,
+        connection.atoms.moveresize,
+    ] {
+        connection.send_client_message(&x::ClientMessageEvent::new(
+            window,
+            ty,
+            x::ClientMessageData::Data8([0; 20]),
+        ));
+    }
+    connection.send_client_message(&x::ClientMessageEvent::new(
+        window,
+        connection.atoms.wl_surface_id,
+        x::ClientMessageData::Data32([0; 5]),
+    ));
+    f.wait_and_dispatch();
+
+    f.verify_still_managing_windows(&mut connection);
+}
+
+#[test]
+fn unmap_without_net_active_window() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut connection, window);
+
+    connection
+        .send_and_check_request(&x::DeleteProperty {
+            window: connection.root,
+            property: connection.atoms.net_active_window,
+        })
+        .unwrap();
+    connection.unmap_window(window);
+    f.wait_and_dispatch();
+
+    f.verify_still_managing_windows(&mut connection);
+}
+
+#[test]
+fn short_window_hints() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    // Flags only, without the fields they announce.
+    let set_short_hints = |connection: &Connection, window| {
+        connection.set_property(
+            window,
+            x::ATOM_WM_SIZE_HINTS,
+            x::ATOM_WM_NORMAL_HINTS,
+            &[(WmSizeHintsFlags::ProgramMinSize | WmSizeHintsFlags::ProgramMaxSize).bits()],
+        );
+        // InputHint | WindowGroupHint
+        connection.set_property(window, x::ATOM_WM_HINTS, x::ATOM_WM_HINTS, &[1u32 | 64]);
+        // MWM_HINTS_FUNCTIONS | MWM_HINTS_DECORATIONS
+        connection.set_property(
+            window,
+            connection.atoms.motif_wm_hints,
+            connection.atoms.motif_wm_hints,
+            &[3u32],
+        );
+    };
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    set_short_hints(&connection, window);
+    f.map_as_toplevel(&mut connection, window);
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut connection, window);
+    set_short_hints(&connection, window);
+    f.wait_and_dispatch();
+
+    f.verify_still_managing_windows(&mut connection);
+}
+
+#[test]
+fn window_property_wrong_type_or_format() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let set_bad_properties = |connection: &Connection, window| {
+        // The server returns no data when the type doesn't match the one requested.
+        connection.set_property(window, x::ATOM_CARDINAL, x::ATOM_WM_NORMAL_HINTS, &[16u32]);
+        connection.set_property(window, x::ATOM_CARDINAL, x::ATOM_WM_HINTS, &[1u32]);
+        // Right type, wrong format.
+        connection.set_property(
+            window,
+            x::ATOM_WM_SIZE_HINTS,
+            x::ATOM_WM_NORMAL_HINTS,
+            &[0u8; 8],
+        );
+        connection.set_property(window, x::ATOM_WM_HINTS, x::ATOM_WM_HINTS, &[0u16; 4]);
+        connection.set_property(window, x::ATOM_STRING, x::ATOM_WM_NAME, &[0u32; 2]);
+        connection.set_property(window, x::ATOM_STRING, x::ATOM_WM_CLASS, &[0u16; 2]);
+        connection.set_property(
+            window,
+            x::ATOM_ATOM,
+            connection.atoms.wm_protocols,
+            &[0u8; 4],
+        );
+        connection.set_property(window, x::ATOM_ATOM, connection.atoms.win_type, &[0u8; 4]);
+        connection.set_property(
+            window,
+            x::ATOM_WINDOW,
+            connection.atoms.transient_for,
+            &[0u8],
+        );
+    };
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    set_bad_properties(&connection, window);
+    f.map_as_toplevel(&mut connection, window);
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, window);
+    set_bad_properties(&connection, window);
+    f.wait_and_dispatch();
+
+    // Reads WM_PROTOCOLS and kills the client, since WM_DELETE_WINDOW isn't in it.
+    let mut other = Connection::new(&f.display);
+    let window = other.new_window(other.root, 0, 0, 20, 20, false);
+    let surface_other = f.map_as_toplevel(&mut other, window);
+    other.set_property(window, x::ATOM_ATOM, other.atoms.wm_protocols, &[0u8; 4]);
+    f.testwl.close_toplevel(surface_other);
+    f.wait_and_dispatch();
+    assert!(other.poll_for_event().is_err());
+
+    assert!(f.testwl.get_surface_data(surface).is_some());
+    f.verify_still_managing_windows(&mut connection);
+}
+
+#[test]
+fn window_property_deleted_before_read() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut connection, window);
+
+    // Satellite gets the NewValue PropertyNotify, but by the time it reads the property, it's gone.
+    for (property, r#type) in [
+        (x::ATOM_WM_HINTS, x::ATOM_WM_HINTS),
+        (x::ATOM_WM_NORMAL_HINTS, x::ATOM_WM_SIZE_HINTS),
+        (x::ATOM_WM_NAME, x::ATOM_STRING),
+        (connection.atoms.net_wm_name, x::ATOM_STRING),
+        (x::ATOM_WM_CLASS, x::ATOM_STRING),
+        (
+            connection.atoms.motif_wm_hints,
+            connection.atoms.motif_wm_hints,
+        ),
+    ] {
+        connection.send_request(&x::ChangeProperty {
+            mode: x::PropMode::Replace,
+            window,
+            property,
+            r#type,
+            data: &[0u32; 9],
+        });
+        connection.send_request(&x::DeleteProperty { window, property });
+    }
+    connection.flush().unwrap();
+    f.wait_and_dispatch();
+
+    f.verify_still_managing_windows(&mut connection);
+}
+
+#[test]
+fn selection_targets_wrong_format() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut connection, window);
+    connection.set_selection_owner(window, connection.atoms.clipboard);
+
+    let request = connection.await_selection_request();
+    assert_eq!(request.target(), connection.atoms.targets);
+    connection.set_property(
+        request.requestor(),
+        x::ATOM_ATOM,
+        request.property(),
+        &[0u8; 4],
+    );
+    connection.send_selection_notify(&request);
+    f.wait_and_dispatch();
+
+    f.verify_still_managing_windows(&mut connection);
+}
+
+#[test]
+fn resource_manager_wrong_format() {
+    let mut f = Fixture::new_preset(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let mut connection = Connection::new(&f.display);
+    f.testwl.enable_xdg_output_manager();
+    let output = f.create_output(0, 0);
+
+    connection.set_property(
+        connection.root,
+        x::ATOM_STRING,
+        connection.atoms.resource_manager,
+        &[0u32; 4],
+    );
+
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, window);
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    let fractional = data.fractional.as_ref().unwrap();
+    fractional.preferred_scale(180); // 1.5 scale
+    f.testwl.move_surface_to_output(surface, &output);
+    f.wait_and_dispatch();
+
+    // Left alone, since it can't be parsed.
+    let reply = connection.get_reply(&x::GetProperty {
+        delete: false,
+        window: connection.root,
+        property: connection.atoms.resource_manager,
+        r#type: x::ATOM_STRING,
+        long_offset: 0,
+        long_length: 4,
+    });
+    assert_eq!(reply.format(), 32);
+    f.verify_still_managing_windows(&mut connection);
 }

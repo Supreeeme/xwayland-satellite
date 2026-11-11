@@ -444,7 +444,7 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
             }
         };
 
-        let targets: &[x::Atom] = reply.value();
+        let targets: &[x::Atom] = super::prop_value(&reply);
         if targets.is_empty() {
             warn!("Got empty selection target list, trying again...");
             match connection.wait_for_reply(connection.send_request(&x::GetSelectionOwner {

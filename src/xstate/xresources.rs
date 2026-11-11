@@ -19,9 +19,12 @@ impl XState {
 
         let resources = match reply.r#type() {
             x::ATOM_NONE => &[],
-            x::ATOM_STRING => reply.value::<u8>(),
+            x::ATOM_STRING if reply.format() == 8 => reply.value::<u8>(),
             other => {
-                warn!("RESOURCE_MANAGER has unexpected type {other:?}");
+                warn!(
+                    "RESOURCE_MANAGER has unexpected type {other:?} (format {})",
+                    reply.format()
+                );
                 return;
             }
         };
