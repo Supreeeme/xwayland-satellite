@@ -675,6 +675,7 @@ impl XState {
             motif_wm_hints,
             wm_class,
             wm_normal_hints: size_hints,
+            wm_hints,
         };
         let role = heuristics.guess_window_role(&self.window_atoms);
         if log::log_enabled!(target: "window_role_heuristics", log::Level::Debug) {
@@ -1159,6 +1160,7 @@ struct WindowRoleHeuristics {
     motif_wm_hints: Option<motif::Hints>,
     wm_class: Option<String>,
     wm_normal_hints: Option<WmNormalHints>,
+    wm_hints: Option<WmHints>,
 }
 impl WindowRoleHeuristics {
     fn guess_window_role(&self, window_atoms: &WindowTypes) -> WindowRole {
@@ -1208,8 +1210,11 @@ impl WindowRoleHeuristics {
                     );
                 }
                 x if x == window_atoms.utility => {
+                    let non_input_popup = self.wm_hints.is_some_and(|hints| !hints.accepts_input);
                     return WindowRole::new_basic(
-                        self.has_transient_for && motif_no_decor && forced_size,
+                        self.has_transient_for
+                            && motif_no_decor
+                            && (forced_size || non_input_popup),
                     );
                 }
                 x if x == window_atoms.splash => return WindowRole::Splash,
@@ -1235,7 +1240,7 @@ impl WindowRoleHeuristics {
     fn log(&self, connection: &xcb::Connection) -> String {
         format!(
             "override_redirect: {}, has_transient_for: {}, window_types: {:?}, \
-            motif_wm_hints: {:?}, wm_class: {:?}, wm_normal_hints: {:?}",
+            motif_wm_hints: {:?}, wm_class: {:?}, wm_normal_hints: {:?}, wm_hints: {:?}",
             self.override_redirect,
             self.has_transient_for,
             self.window_types
@@ -1245,6 +1250,7 @@ impl WindowRoleHeuristics {
             self.motif_wm_hints,
             self.wm_class,
             self.wm_normal_hints,
+            self.wm_hints,
         )
     }
 }

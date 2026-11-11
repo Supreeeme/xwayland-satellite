@@ -103,7 +103,7 @@ impl WmNormalHints {
 
 mod window_role_heuristics {
     use super::WmNormalHints;
-    use crate::xstate::{WindowRole, WindowRoleHeuristics, WindowTypes, motif};
+    use crate::xstate::{WindowRole, WindowRoleHeuristics, WindowTypes, WmHints, motif};
     use xcb::x::Gravity;
 
     #[test]
@@ -240,6 +240,7 @@ mod window_role_heuristics {
             window_types: vec![win_types.utility, win_types.normal],
             wm_class: Some("wechat".into()),
             wm_normal_hints: Some(wm_normal_hints.into()),
+            wm_hints: None,
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
@@ -261,6 +262,7 @@ mod window_role_heuristics {
             window_types: vec![win_types.utility],
             motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
             wm_class: Some("Godot".into()),
+            wm_hints: None,
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
@@ -356,8 +358,30 @@ mod window_role_heuristics {
             window_types: vec![win_types.utility],
             wm_class: Some("steamwebhelper".into()),
             wm_normal_hints: Some(wm_normal_hints.into()),
+            wm_hints: Some(WmHints {
+                accepts_input: false,
+                ..Default::default()
+            }),
         };
         assert_eq!(win.guess_window_role(&win_types), WindowRole::Toplevel);
+    }
+
+    #[test]
+    fn non_input_utility_popup() {
+        let win_types = WindowTypes::new();
+        let wm_normal_hints = WmNormalHints::new().min_size(300, 123).max_size(300, 32767);
+        let win = WindowRoleHeuristics {
+            has_transient_for: true,
+            window_types: vec![win_types.utility, win_types.normal],
+            motif_wm_hints: Some(motif::Hints::from([0x2_u32, 0, 0, 0, 0].as_slice())),
+            wm_normal_hints: Some(wm_normal_hints.into()),
+            wm_hints: Some(WmHints {
+                accepts_input: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(win.guess_window_role(&win_types), WindowRole::Popup);
     }
 
     // https://github.com/Supreeeme/xwayland-satellite/issues/356
