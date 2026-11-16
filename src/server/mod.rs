@@ -499,10 +499,13 @@ impl<S: X11Selection> ServerState<NoConnection<S>> {
         server_connection: Option<UnixStream>,
         client: UnixStream,
     ) -> Self {
-        let connection = if let Some(stream) = server_connection {
-            Connection::from_socket(stream).unwrap()
-        } else {
-            Connection::connect_to_env().unwrap()
+        let connection = {
+            let _env = crate::env_read_guard();
+            if let Some(stream) = server_connection {
+                Connection::from_socket(stream).unwrap()
+            } else {
+                Connection::connect_to_env().unwrap()
+            }
         };
 
         let (global_list, queue) = registry_queue_init::<MyWorld>(&connection).unwrap();
