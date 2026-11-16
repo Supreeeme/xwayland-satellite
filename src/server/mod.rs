@@ -828,7 +828,10 @@ impl<S: X11Selection + 'static> InnerServerState<S> {
 
         let globals = std::mem::take(&mut self.world.removed_globals);
         for global in globals {
-            let (global_struct, global_id) = self.globals_map.remove(&global).unwrap();
+            let Some((global_struct, global_id)) = self.globals_map.remove(&global) else {
+                debug!("ignoring removal of unknown global {global:?}");
+                continue;
+            };
             self.dh.disable_global::<InnerServerState<S>>(global_id);
             if global_struct.interface == <WlOutput>::interface().name {
                 self.remove_output(global);
