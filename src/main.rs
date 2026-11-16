@@ -245,12 +245,46 @@ fn parse_args() -> RealData {
     data
 }
 
+struct SyslogLogger {
+    logger: syslog::BasicLogger,
+    filter: pretty_env_logger::env_logger::filter::Filter,
+}
+
+impl log::Log for SyslogLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        self.filter.enabled(metadata)
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.filter.matches(record) {
+            self.logger.log(record);
+        }
+    }
+
+    fn flush(&self) {
+        self.logger.flush();
+    }
+}
+
 fn init_logger(integrated: bool) {
     if integrated {
         match syslog::unix(syslog::Formatter3164::default()) {
             Ok(syslog) => {
-                log::set_boxed_logger(Box::new(syslog::BasicLogger::new(syslog))).unwrap();
-                log::set_max_level(log::LevelFilter::Debug);
+                let mut filter = pretty_env_logger::env_logger::filter::Builder::new();
+                filter.filter_level(log::LevelFilter::Debug);
+                if let Ok(ref env_log) =
+                    std::env::var(pretty_env_logger::env_logger::DEFAULT_FILTER_ENV)
+                {
+                    filter.parse(env_log);
+                }
+                let filter = filter.build();
+                let max_level = filter.filter();
+                let logger = SyslogLogger {
+                    logger: syslog::BasicLogger::new(syslog),
+                    filter,
+                };
+                log::set_boxed_logger(Box::new(logger)).unwrap();
+                log::set_max_level(max_level);
                 std::panic::set_hook(Box::new(|info| {
                     let thread = std::thread::current();
                     let name = thread.name().unwrap_or("<unnamed");
