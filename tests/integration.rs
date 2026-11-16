@@ -18,7 +18,7 @@ use wayland_server::Resource;
 use wayland_server::protocol::{wl_output, wl_pointer};
 use xcb::{Xid, x};
 use xwayland_satellite as xwls;
-use xwayland_satellite::xstate::{MoveResizeDirection, WmSizeHintsFlags, WmState};
+use xwayland_satellite::xstate::{MoveResizeDirection, SetState, WmSizeHintsFlags, WmState};
 use xwls::timespec_from_millis;
 
 #[derive(Default)]
@@ -352,6 +352,9 @@ xcb::atoms_struct! {
         wm_delete_window => b"WM_DELETE_WINDOW",
         net_wm_state => b"_NET_WM_STATE",
         skip_taskbar => b"_NET_WM_STATE_SKIP_TASKBAR",
+        maximized_vert => b"_NET_WM_STATE_MAXIMIZED_VERT" only_if_exists = false,
+        maximized_horz => b"_NET_WM_STATE_MAXIMIZED_HORZ" only_if_exists = false,
+        wm_change_state => b"WM_CHANGE_STATE" only_if_exists = false,
         transient_for => b"WM_TRANSIENT_FOR",
         clipboard => b"CLIPBOARD",
         primary => b"PRIMARY",
@@ -2573,4 +2576,117 @@ fn client_init_resize() {
         "Got wrong resizing edge: {:?}",
         data.resizing
     );
+}
+
+/// EWMH lets clients leave the button field unspecified (0), which is what every
+/// Chromium/Electron app does when dragging its titlebar.
+#[test]
+fn client_init_move_unspecified_button() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let win_toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, win_toplevel);
+    connection.get_button_press_events(win_toplevel);
+    f.testwl.move_pointer_to(surface, 10., 10.);
+    let ptr = f.testwl.pointer();
+    ptr.motion(10, 10.0, 10.0);
+    ptr.frame();
+    ptr.button(10, 20, BTN_LEFT, wl_pointer::ButtonState::Pressed);
+    ptr.frame();
+    f.testwl.dispatch();
+    let press = connection.await_button_press();
+    assert_eq!(press.event(), win_toplevel);
+    assert_eq!(press.detail(), 1);
+
+    connection.send_client_message(&x::ClientMessageEvent::new(
+        win_toplevel,
+        connection.atoms.moveresize,
+        x::ClientMessageData::Data32([0, 0, MoveResizeDirection::Move.into(), 0, 0]),
+    ));
+
+    f.wait_and_dispatch();
+    let data = f.testwl.get_surface_data(surface).unwrap();
+    assert!(data.moving);
+}
+
+#[test]
+fn client_maximize() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let win_toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, win_toplevel);
+
+    let set_maximized = |f: &mut Fixture, action: SetState| {
+        connection.send_client_message(&x::ClientMessageEvent::new(
+            win_toplevel,
+            connection.atoms.net_wm_state,
+            x::ClientMessageData::Data32([
+                action as u32,
+                connection.atoms.maximized_vert.resource_id(),
+                connection.atoms.maximized_horz.resource_id(),
+                0,
+                0,
+            ]),
+        ));
+        f.wait_and_dispatch();
+
+        let maximized = f
+            .testwl
+            .get_surface_data(surface)
+            .unwrap()
+            .toplevel()
+            .states
+            .contains(&xdg_toplevel::State::Maximized);
+
+        // The compositor's answer has to make it back onto _NET_WM_STATE, or the client
+        // will keep drawing itself (titlebar buttons included) as if it were unmaximized.
+        let reply = connection.get_reply(&x::GetProperty {
+            delete: false,
+            window: win_toplevel,
+            property: connection.atoms.net_wm_state,
+            r#type: x::ATOM_ATOM,
+            long_offset: 0,
+            long_length: 8,
+        });
+        let states = reply.value::<x::Atom>();
+        assert_eq!(
+            states.contains(&connection.atoms.maximized_vert),
+            maximized,
+            "_NET_WM_STATE ({states:?}) disagrees with the toplevel state"
+        );
+        assert_eq!(
+            states.contains(&connection.atoms.maximized_horz),
+            maximized,
+            "_NET_WM_STATE ({states:?}) disagrees with the toplevel state"
+        );
+
+        maximized
+    };
+
+    assert!(set_maximized(&mut f, SetState::Add));
+    assert!(!set_maximized(&mut f, SetState::Remove));
+    assert!(set_maximized(&mut f, SetState::Toggle));
+    assert!(!set_maximized(&mut f, SetState::Toggle));
+}
+
+#[test]
+fn client_minimize() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+
+    let win_toplevel = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    let surface = f.map_as_toplevel(&mut connection, win_toplevel);
+    assert!(!f.testwl.get_surface_data(surface).unwrap().minimized);
+
+    // This is what XIconifyWindow sends.
+    connection.send_client_message(&x::ClientMessageEvent::new(
+        win_toplevel,
+        connection.atoms.wm_change_state,
+        x::ClientMessageData::Data32([WmState::Iconic as u32, 0, 0, 0, 0]),
+    ));
+
+    f.wait_and_dispatch();
+    assert!(f.testwl.get_surface_data(surface).unwrap().minimized);
 }
