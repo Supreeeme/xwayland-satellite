@@ -2013,6 +2013,54 @@ fn output_offset_surface_positioning() {
 }
 
 #[test]
+fn output_offset_popup_before_output_enter() {
+    // A popup on an offset output is positioned correctly even before its surface has entered
+    // the output, including when the X server echoes the popup's position back.
+    let (mut f, comp) = TestFixture::new_with_compositor();
+
+    f.new_output(0, 0);
+    let (_, output) = f.new_output(500, 100);
+    f.run();
+
+    let window = Window::new(1);
+    let (_, toplevel_id) = f.create_toplevel(&comp, window);
+    f.testwl.move_surface_to_output(toplevel_id, &output);
+    f.run();
+
+    let popup = Window::new(2);
+    let (_, p_id) = f.create_popup(
+        &comp,
+        PopupBuilder::new(popup, window, toplevel_id).x(510).y(110),
+    );
+    let popup_dims = WindowDims {
+        x: 510,
+        y: 110,
+        width: 50,
+        height: 50,
+    };
+    f.assert_window_dimensions(popup, p_id, popup_dims);
+
+    f.reconfigure_window(popup, popup_dims, true);
+    f.run();
+    f.run();
+    let data = f.testwl.get_surface_data(p_id).unwrap();
+    assert_eq!(
+        data.popup().positioner_state.offset,
+        testwl::Vec2 { x: 10, y: 10 }
+    );
+
+    f.testwl.move_surface_to_output(p_id, &output);
+    f.run();
+    f.run();
+    let data = f.testwl.get_surface_data(p_id).unwrap();
+    assert_eq!(
+        data.popup().positioner_state.offset,
+        testwl::Vec2 { x: 10, y: 10 }
+    );
+    f.assert_window_dimensions(popup, p_id, popup_dims);
+}
+
+#[test]
 fn output_offset_xdg_override() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     f.new_output(0, 0);
