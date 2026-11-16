@@ -1215,6 +1215,42 @@ fn last_activated_toplevel_is_focused() {
 }
 
 #[test]
+fn activation_serial_only_for_same_process() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let dims = WindowDims {
+        x: 0,
+        y: 0,
+        width: 50,
+        height: 50,
+    };
+    // Mapping a toplevel requests its activation.
+    let map = |f: &mut TestFixture<FakeXConnection>, window: Window, pid: u32| {
+        let (buffer, surface) = comp.create_surface();
+        let data = WindowData {
+            mapped: true,
+            dims,
+            fullscreen: false,
+        };
+        f.register_window(window, data);
+        f.satellite.new_window(window, false, dims, Some(pid));
+        f.map_window(&comp, window, &surface.obj, &buffer);
+        f.run();
+        f.run();
+        (surface, f.check_new_surface())
+    };
+
+    let (_surface, focused) = map(&mut f, Window::new(1), 1);
+    f.testwl.focus_toplevel(focused);
+    f.run();
+
+    let _other = map(&mut f, Window::new(2), 2);
+    assert_eq!(f.testwl.get_focused(), Some(focused));
+
+    let (_surface, same_process) = map(&mut f, Window::new(3), 1);
+    assert_eq!(f.testwl.get_focused(), Some(same_process));
+}
+
+#[test]
 fn popup_window_changes_surface() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     let t_win = Window::new(1);
