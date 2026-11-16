@@ -508,6 +508,26 @@ impl XState {
                             value_list: &list,
                         }
                     ));
+
+                    // ICCCM 4.1.5: a window manager that intercepts a
+                    // ConfigureRequest must tell the client the resulting
+                    // geometry with a synthetic ConfigureNotify. The X server
+                    // only generates a real ConfigureNotify when the geometry
+                    // actually changes, and it frequently does not here: the
+                    // compositor has usually already configured the window to
+                    // the size the client is now asking for (a toplevel
+                    // entering fullscreen gets its output-sized configure the
+                    // moment it requests _NET_WM_STATE_FULLSCREEN, before the
+                    // client's own resize arrives). Wine ≥ 10 tracks every
+                    // request it sends by serial and refuses to send any
+                    // further _NET_WM_STATE, _MOTIF_WM_HINTS or configure
+                    // request until a ConfigureNotify at or after that serial
+                    // arrives, so without this event a Proton game that
+                    // entered fullscreen could never leave it (or re-enter it)
+                    // again — every later state change was "delaying request"
+                    // inside winex11 until some unrelated compositor-driven
+                    // configure happened to produce a notify.
+                    self.send_synthetic_configure_notify(e.window());
                 }
                 xcb::Event::X(x::Event::ClientMessage(e)) => {
                     self.handle_client_message(e, server_state);
@@ -526,6 +546,40 @@ impl XState {
             server_state.run();
         }
         handled
+    }
+
+    /// Tell `window` its current geometry with a synthetic ConfigureNotify,
+    /// as ICCCM 4.1.5 requires from a window manager after a ConfigureRequest.
+    fn send_synthetic_configure_notify(&self, window: x::Window) {
+        let cookie = self.connection.send_request(&x::GetGeometry {
+            drawable: x::Drawable::Window(window),
+        });
+        let geometry = match self.connection.wait_for_reply(cookie) {
+            Ok(geometry) => geometry,
+            Err(e) => {
+                debug!("GetGeometry failed for synthetic ConfigureNotify ({window:?}: {e:?})");
+                return;
+            }
+        };
+        let event = x::ConfigureNotifyEvent::new(
+            window,
+            window,
+            x::Window::none(),
+            geometry.x(),
+            geometry.y(),
+            geometry.width(),
+            geometry.height(),
+            geometry.border_width(),
+            false,
+        );
+        if let Err(e) = self.connection.send_and_check_request(&x::SendEvent {
+            propagate: false,
+            destination: x::SendEventDest::Window(window),
+            event_mask: x::EventMask::STRUCTURE_NOTIFY,
+            event: &event,
+        }) {
+            debug!("synthetic ConfigureNotify failed ({window:?}: {e:?})");
+        }
     }
 
     fn handle_client_message(
