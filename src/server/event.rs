@@ -247,6 +247,13 @@ impl SurfaceEvents {
                         }
                     }
                 }
+                let mut entered = data
+                    .get::<&EnteredOutputs>()
+                    .map(|e| e.0.clone())
+                    .unwrap_or_default();
+                entered.retain(|o| *o != output_entity);
+                entered.push(output_entity);
+                cmd.insert_one(target, EnteredOutputs(entered));
                 cmd.insert_one(target, on_output);
             }
             Event::Leave { output } => {
@@ -255,12 +262,42 @@ impl SurfaceEvents {
                     return;
                 };
                 surface.leave(&output);
+                let mut entered = data
+                    .get::<&EnteredOutputs>()
+                    .map(|e| e.0.clone())
+                    .unwrap_or_default();
+                entered.retain(|o| *o != output_entity);
                 if data
                     .get::<&OnOutput>()
                     .is_some_and(|o| o.0 == output_entity)
                 {
-                    cmd.remove_one::<OnOutput>(target);
+                    // Touched a neighbouring output and came back: the X window must not keep
+                    // that output's offset (#528), so move it to an output it is still on.
+                    let fallback = entered.last().copied().and_then(|o| {
+                        let dims = state.world.get::<&OutputDimensions>(o).ok()?;
+                        Some((o, dims.x, dims.y))
+                    });
+                    match fallback {
+                        Some((o, x, y)) => {
+                            if let Some((window, win_data)) =
+                                data.query::<(&x::Window, &mut WindowData)>().get()
+                            {
+                                debug!("{} left its output, back to {o:?}", surface.id());
+                                win_data.update_output_offset(
+                                    *window,
+                                    WindowOutputOffset {
+                                        x: x - state.global_output_offset.x.value,
+                                        y: y - state.global_output_offset.y.value,
+                                    },
+                                    connection,
+                                );
+                            }
+                            cmd.insert_one(target, OnOutput(o));
+                        }
+                        None => cmd.remove_one::<OnOutput>(target),
+                    }
                 }
+                cmd.insert_one(target, EnteredOutputs(entered));
             }
             Event::PreferredBufferScale { .. } => {}
             other => warn!("unhandled surface request: {other:?}"),
@@ -1003,6 +1040,9 @@ impl Event for client::wl_touch::Event {
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(super) struct OnOutput(pub Entity);
+/// Every output the surface is on, latest last: on leaving the current one, fall back.
+#[derive(Default)]
+struct EnteredOutputs(Vec<Entity>);
 struct OutputName(String);
 fn get_output_name(output: Option<&OnOutput>, world: &World) -> Option<String> {
     output.map(|o| world.get::<&OutputName>(o.0).unwrap().0.clone())

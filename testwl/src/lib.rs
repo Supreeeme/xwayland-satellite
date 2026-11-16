@@ -901,6 +901,12 @@ impl Server {
         self.display.flush_clients().unwrap();
     }
 
+    pub fn leave_surface_output(&mut self, surface: SurfaceId, output: &WlOutput) {
+        let data = self.state.surfaces.get(&surface).expect("No such surface");
+        data.surface.leave(output);
+        self.display.flush_clients().unwrap();
+    }
+
     pub fn remove_output(&mut self, output: WlOutput) {
         let output = self.state.outputs.remove(&output).unwrap();
         self.dh.remove_global::<State>(output.global_id.unwrap());
