@@ -151,6 +151,68 @@ impl Compositor {
     }
 }
 
+impl Compositor {
+    /// A new surface set as the cursor of `pointer`; see [`Self::set_cursor_on`].
+    fn set_cursor(
+        &self,
+        pointer: &TestObject<WlPointer>,
+        width: i32,
+        height: i32,
+        hotspot: (i32, i32),
+    ) -> TestObject<WlSurface> {
+        let surface = TestObject::<WlSurface>::from_request(
+            &self.compositor.obj,
+            Req::<WlCompositor>::CreateSurface {},
+        );
+        self.set_cursor_on(pointer, &surface, width, height, hotspot);
+        surface
+    }
+
+    /// Set `surface` as the cursor of `pointer` with the given hotspot (in X
+    /// pixels), then attach a `width`x`height` shm buffer and commit, in the
+    /// order Xwayland sends these requests.
+    fn set_cursor_on(
+        &self,
+        pointer: &TestObject<WlPointer>,
+        surface: &TestObject<WlSurface>,
+        width: i32,
+        height: i32,
+        hotspot: (i32, i32),
+    ) {
+        let fd = unsafe { BorrowedFd::borrow_raw(0) };
+        let pool = TestObject::<WlShmPool>::from_request(
+            &self.shm.obj,
+            Req::<WlShm>::CreatePool { fd, size: 1024 },
+        );
+        let buffer = TestObject::<WlBuffer>::from_request(
+            &pool.obj,
+            Req::<WlShmPool>::CreateBuffer {
+                offset: 0,
+                width,
+                height,
+                stride: 1,
+                format: WEnum::Value(Format::Argb8888),
+            },
+        );
+        pointer
+            .send_request(Req::<WlPointer>::SetCursor {
+                serial: 0,
+                surface: Some(surface.obj.clone()),
+                hotspot_x: hotspot.0,
+                hotspot_y: hotspot.1,
+            })
+            .unwrap();
+        surface
+            .send_request(Req::<WlSurface>::Attach {
+                buffer: Some(buffer.obj.clone()),
+                x: 0,
+                y: 0,
+            })
+            .unwrap();
+        surface.send_request(Req::<WlSurface>::Commit).unwrap();
+    }
+}
+
 #[derive(Debug, Default)]
 struct WindowData {
     mapped: bool,
@@ -3358,3 +3420,273 @@ fn decorations_max_height_int_max() {
 /// See Pointer::handle_event for an explanation.
 #[test]
 fn popup_pointer_motion_workaround() {}
+
+fn cursor_viewport(f: &TestFixture<FakeXConnection>) -> (i32, i32) {
+    let id = f
+        .testwl
+        .last_created_surface_id()
+        .expect("cursor surface was not created");
+    let data = f
+        .testwl
+        .get_surface_data(id)
+        .expect("missing cursor surface");
+    let viewport = data
+        .viewport
+        .as_ref()
+        .expect("cursor surface has no viewport");
+    (viewport.width, viewport.height)
+}
+
+fn scaled_cursor_fixture() -> (
+    TestFixture<FakeXConnection>,
+    Compositor,
+    TestObject<WlPointer>,
+) {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let pointer =
+        TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+    let (_, output) = f.new_output(0, 0);
+    output.scale(2);
+    output.done();
+    f.run();
+    f.run();
+    (f, comp, pointer)
+}
+
+// X clients that follow Xft.dpi draw cursors at the same scale as their
+// windows, so a 2x cursor image on a 2x output is shown at the nominal
+// logical size and its hotspot is halved too.
+#[test]
+fn scaled_output_cursor_is_shown_at_logical_size() {
+    let (mut f, comp, pointer) = scaled_cursor_fixture();
+    let base = super::event::cursor_base_size();
+
+    comp.set_cursor(&pointer, base * 2, base * 2, (10, 21));
+    f.run();
+
+    assert_eq!(cursor_viewport(&f), (base, base));
+    assert_eq!(f.testwl.cursor_hotspot(), Some((5, 11)));
+}
+
+// A client that ignores the DPI (e.g. the self-drawn part of the Unity editor)
+// sends a nominal-size image. Halving it would make it tiny, so it is left
+// alone, and the hotspot forwarded before the image was known is re-sent.
+#[test]
+fn scaled_output_nominal_size_cursor_is_left_alone() {
+    let (mut f, comp, pointer) = scaled_cursor_fixture();
+    let base = super::event::cursor_base_size();
+
+    comp.set_cursor(&pointer, base, base, (10, 21));
+    f.run();
+
+    assert_eq!(cursor_viewport(&f), (-1, -1));
+    assert_eq!(f.testwl.cursor_hotspot(), Some((10, 21)));
+}
+
+// Both kinds of cursor can alternate on one surface (Xwayland reuses it), and
+// each image gets its own factor.
+#[test]
+fn scaled_output_cursor_factor_follows_each_image() {
+    let (mut f, comp, pointer) = scaled_cursor_fixture();
+    let base = super::event::cursor_base_size();
+
+    let surface = comp.set_cursor(&pointer, base, base, (10, 20));
+    f.run();
+    assert_eq!(cursor_viewport(&f), (-1, -1));
+    assert_eq!(f.testwl.cursor_hotspot(), Some((10, 20)));
+
+    comp.set_cursor_on(&pointer, &surface, base * 2, base * 2, (10, 20));
+    f.run();
+    assert_eq!(cursor_viewport(&f), (base, base));
+    assert_eq!(f.testwl.cursor_hotspot(), Some((5, 10)));
+
+    comp.set_cursor_on(&pointer, &surface, base, base, (10, 20));
+    f.run();
+    assert_eq!(cursor_viewport(&f), (-1, -1));
+    assert_eq!(f.testwl.cursor_hotspot(), Some((10, 20)));
+}
+
+// Fractional scales use the same factor X is given through Xft.dpi, rounding
+// the logical size to whole pixels.
+#[test]
+fn fractional_scale_cursor_is_shown_at_logical_size() {
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.enable_fractional_scale();
+    });
+    let comp = f.compositor();
+    let pointer =
+        TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+    let (_, output) = f.new_output(0, 0);
+    let window = Window::new(1);
+    let (_, surface_id) = f.create_toplevel(&comp, window);
+    let fractional = f
+        .testwl
+        .get_surface_data(surface_id)
+        .unwrap()
+        .fractional
+        .as_ref()
+        .cloned()
+        .expect("No fractional scale for surface");
+    fractional.preferred_scale(180); // 1.5 scale
+    f.testwl.move_surface_to_output(surface_id, &output);
+    f.run();
+    f.run();
+
+    let base = super::event::cursor_base_size();
+    let size = (base as f64 * 1.5) as i32;
+    comp.set_cursor(&pointer, size, size, (9, 3));
+    f.run();
+
+    assert_eq!(cursor_viewport(&f), (base, base));
+    assert_eq!(f.testwl.cursor_hotspot(), Some((6, 2)));
+}
+
+// Without scaling the cursor passes through untouched.
+#[test]
+fn unscaled_cursor_is_left_alone() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let pointer =
+        TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+    f.new_output(0, 0);
+    f.run();
+
+    comp.set_cursor(&pointer, 48, 48, (10, 21));
+    f.run();
+
+    assert_eq!(cursor_viewport(&f), (-1, -1));
+    assert_eq!(f.testwl.cursor_hotspot(), Some((10, 21)));
+}
+
+#[test]
+fn cursor_factor_picks_the_size_closer_to_nominal() {
+    use super::event::{BufferSize, CursorSurface};
+    let size = |px| BufferSize {
+        width: px,
+        height: px,
+    };
+    // Nominal size: left alone. DPI-scaled size: divided.
+    assert_eq!(CursorSurface::factor_for(2.0, 24, size(24)), 1.0);
+    assert_eq!(CursorSurface::factor_for(2.0, 24, size(48)), 2.0);
+    assert_eq!(CursorSurface::factor_for(1.8, 24, size(24)), 1.0);
+    // 24 × 1.8 ≈ 43, which themes round to their 40 or 48 px images.
+    assert_eq!(CursorSurface::factor_for(1.8, 24, size(40)), 1.8);
+    assert_eq!(CursorSurface::factor_for(1.8, 24, size(48)), 1.8);
+    // The boundary is the geometric midpoint, 24 × √2 ≈ 34 at 2x.
+    assert_eq!(CursorSurface::factor_for(2.0, 24, size(32)), 1.0);
+    assert_eq!(CursorSurface::factor_for(2.0, 24, size(36)), 2.0);
+    // Nothing to do at 1x or without an image.
+    assert_eq!(CursorSurface::factor_for(1.0, 24, size(48)), 1.0);
+    assert_eq!(CursorSurface::factor_for(2.0, 24, size(0)), 1.0);
+}
+
+mod cursor_shapes {
+    use super::*;
+    use testwl::PointerCursorRequest;
+    use wayland_protocols::wp::cursor_shape::v1::server::wp_cursor_shape_device_v1::Shape;
+
+    fn fixture(
+        cursor_shape: bool,
+    ) -> (
+        TestFixture<FakeXConnection>,
+        Compositor,
+        TestObject<WlPointer>,
+    ) {
+        let mut f = TestFixture::new_pre_connect(|testwl| {
+            if cursor_shape {
+                testwl.enable_cursor_shape();
+            }
+        });
+        let comp = f.compositor();
+        let pointer =
+            TestObject::<WlPointer>::from_request(&comp.seat.obj, wl_seat::Request::GetPointer {});
+        f.new_output(0, 0);
+        f.run();
+        (f, comp, pointer)
+    }
+
+    fn cursor_surface(f: &TestFixture<FakeXConnection>) -> PointerCursorRequest {
+        PointerCursorRequest::Surface(f.testwl.last_created_surface_id().unwrap())
+    }
+
+    // A cursor XFixes knows by name is drawn by the compositor from its own
+    // theme, instead of from Xwayland's image.
+    #[test]
+    fn named_x_cursor_is_forwarded_as_shape() {
+        let (mut f, comp, pointer) = fixture(true);
+        f.satellite.set_x_cursor_name(Some("xterm"));
+        comp.set_cursor(&pointer, 24, 24, (12, 12));
+        f.run();
+
+        assert_eq!(
+            f.testwl.pointer_cursor(),
+            Some(PointerCursorRequest::Shape(Shape::Text))
+        );
+    }
+
+    // The name arrives on the X connection and the image on the Wayland one, in
+    // either order; whichever comes last decides.
+    #[test]
+    fn name_arriving_after_the_image_switches_between_shape_and_image() {
+        let (mut f, comp, pointer) = fixture(true);
+        comp.set_cursor(&pointer, 24, 24, (5, 1));
+        f.run();
+        assert_eq!(f.testwl.pointer_cursor(), Some(cursor_surface(&f)));
+
+        f.satellite.set_x_cursor_name(Some("left_ptr"));
+        f.run();
+        assert_eq!(
+            f.testwl.pointer_cursor(),
+            Some(PointerCursorRequest::Shape(Shape::Default))
+        );
+
+        // An unnamed cursor (a custom image) goes back to the image, with the
+        // hotspot Xwayland gave for it.
+        f.satellite.set_x_cursor_name(None);
+        f.run();
+        assert_eq!(f.testwl.pointer_cursor(), Some(cursor_surface(&f)));
+        assert_eq!(f.testwl.cursor_hotspot(), Some((5, 1)));
+    }
+
+    #[test]
+    fn unknown_name_keeps_the_image() {
+        let (mut f, comp, pointer) = fixture(true);
+        f.satellite.set_x_cursor_name(Some("my-custom-crosshair"));
+        comp.set_cursor(&pointer, 24, 24, (12, 12));
+        f.run();
+
+        assert_eq!(f.testwl.pointer_cursor(), Some(cursor_surface(&f)));
+    }
+
+    #[test]
+    fn without_cursor_shape_support_the_image_is_used() {
+        let (mut f, comp, pointer) = fixture(false);
+        f.satellite.set_x_cursor_name(Some("xterm"));
+        comp.set_cursor(&pointer, 24, 24, (12, 12));
+        f.run();
+
+        assert_eq!(f.testwl.pointer_cursor(), Some(cursor_surface(&f)));
+        assert_eq!(f.testwl.cursor_hotspot(), Some((12, 12)));
+    }
+
+    #[test]
+    fn hidden_cursor_stays_hidden_whatever_its_name() {
+        let (mut f, comp, pointer) = fixture(true);
+        f.satellite.set_x_cursor_name(Some("left_ptr"));
+        comp.set_cursor(&pointer, 24, 24, (5, 1));
+        f.run();
+        pointer
+            .send_request(Req::<WlPointer>::SetCursor {
+                serial: 0,
+                surface: None,
+                hotspot_x: 0,
+                hotspot_y: 0,
+            })
+            .unwrap();
+        f.run();
+
+        assert_eq!(
+            f.testwl.pointer_cursor(),
+            Some(PointerCursorRequest::Hidden)
+        );
+    }
+}
