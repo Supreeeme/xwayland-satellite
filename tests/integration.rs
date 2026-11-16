@@ -1037,7 +1037,8 @@ fn input_focus() {
             long_length: 1,
         });
 
-        assert_eq!(&[win], reply.value::<x::Window>());
+        let active = if win.is_none() { connection.root } else { win };
+        assert_eq!(&[active], reply.value::<x::Window>());
     };
 
     let mut create_win = || {
