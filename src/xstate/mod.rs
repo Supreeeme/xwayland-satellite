@@ -8,7 +8,7 @@ mod xresources;
 
 use crate::XConnection;
 use bitflags::bitflags;
-use log::{debug, trace, warn};
+use log::{debug, error, trace, warn};
 use std::collections::HashMap;
 use std::os::fd::BorrowedFd;
 use std::rc::Rc;
@@ -63,6 +63,16 @@ macro_rules! unwrap_or_skip_bad_window_ret {
     ($err:expr) => {
         unwrap_or_skip_bad_window!($err, return)
     };
+}
+
+/// The property's value, or an empty slice if it was not written with the format of `P`.
+/// `GetPropertyReply::value` asserts the format, which is whatever the client chose.
+fn prop_value<P: x::PropEl>(reply: &x::GetPropertyReply) -> &[P] {
+    if reply.format() == P::FORMAT {
+        reply.value()
+    } else {
+        &[]
+    }
 }
 
 struct PropertyCookieWrapper<'a> {
@@ -448,8 +458,9 @@ impl XState {
                         ))
                         .unwrap();
 
-                    let active_win: &[x::Window] = active_win.value();
-                    if active_win[0] == e.window() {
+                    // Any client can change or delete _NET_ACTIVE_WINDOW.
+                    let active_win: &[x::Window] = prop_value(&active_win);
+                    if active_win.first() == Some(&e.window()) {
                         let restore_to = server_state.focus_restore_target();
                         server_state.connection.focus_window(restore_to, None);
                     }
@@ -533,23 +544,26 @@ impl XState {
         e: x::ClientMessageEvent,
         server_state: &mut super::RealServerState,
     ) {
+        // All of the messages below are format 32, but any client can send any format.
+        let x::ClientMessageData::Data32(data) = e.data() else {
+            warn!(
+                "ignoring client message {} with format other than 32",
+                get_atom_name(&self.connection, e.r#type())
+            );
+            return;
+        };
+
         match e.r#type() {
             x if x == self.atoms.wl_surface_id => {
-                panic!(concat!(
-                    "Xserver should be using WL_SURFACE_SERIAL, not WL_SURFACE_ID\n",
+                error!(concat!(
+                    "Xserver should be using WL_SURFACE_SERIAL, not WL_SURFACE_ID. ",
                     "Your Xwayland is likely too old, it should be version 23.1 or greater."
                 ));
             }
             x if x == self.atoms.wl_surface_serial => {
-                let x::ClientMessageData::Data32(data) = e.data() else {
-                    unreachable!();
-                };
                 server_state.set_window_serial(e.window(), [data[0], data[1]]);
             }
             x if x == self.atoms.net_wm_state => {
-                let x::ClientMessageData::Data32(data) = e.data() else {
-                    unreachable!();
-                };
                 let Ok(action) = SetState::try_from(data[0]) else {
                     warn!("unknown action for _NET_WM_STATE: {}", data[0]);
                     return;
@@ -572,10 +586,6 @@ impl XState {
                 server_state.activate_window(e.window());
             }
             x if x == self.atoms.moveresize => {
-                let x::ClientMessageData::Data32(data) = e.data() else {
-                    unreachable!();
-                };
-
                 let (_x_root, _y_root) = (data[0], data[1]);
                 let Ok(direction) = MoveResizeDirection::try_from(data[2]) else {
                     warn!("unknown direction for _NET_WM_MOVERESIZE: {}", data[2]);
@@ -712,7 +722,7 @@ impl XState {
     fn get_wm_class(&self, window: x::Window) -> XResult<Option<String>> {
         let cookie = self.get_property_cookie(window, x::ATOM_WM_CLASS, x::ATOM_STRING, 256);
         let resolver = move |reply: x::GetPropertyReply| {
-            let data: &[u8] = reply.value();
+            let data: &[u8] = prop_value(&reply);
             trace!("wm class data: {data:?}");
             // wm class (normally) is instance + class - ignore instance
             let mut fields = data.split(|b| *b == 0u8).filter(|s| !s.is_empty());
@@ -727,7 +737,7 @@ impl XState {
     fn get_wm_name(&self, window: x::Window) -> XResult<Option<WmName>> {
         let cookie = self.get_property_cookie(window, x::ATOM_WM_NAME, x::ATOM_STRING, 256);
         let resolver = |reply: x::GetPropertyReply| {
-            let data: &[u8] = reply.value();
+            let data: &[u8] = prop_value(&reply);
             // strip trailing zeros or wayland-rs will lose its mind
             // https://github.com/Smithay/wayland-rs/issues/748
             let data = data.split(|byte| *byte == 0).next().unwrap();
@@ -742,7 +752,7 @@ impl XState {
         let cookie =
             self.get_property_cookie(window, self.atoms.net_wm_name, self.atoms.utf8_string, 256);
         let resolver = |reply: x::GetPropertyReply| {
-            let data: &[u8] = reply.value();
+            let data: &[u8] = prop_value(&reply);
             let data = data.split(|byte| *byte == 0).next().unwrap();
             let name = String::from_utf8_lossy(data).to_string();
             WmName::NetWmName(name)
@@ -754,7 +764,7 @@ impl XState {
     fn get_wm_hints(&self, window: x::Window) -> XResult<Option<WmHints>> {
         let cookie = self.get_property_cookie(window, x::ATOM_WM_HINTS, x::ATOM_WM_HINTS, 9);
         let resolver = |reply: x::GetPropertyReply| {
-            let data: &[u32] = reply.value();
+            let data: &[u32] = prop_value(&reply);
             let hints = WmHints::from(data);
             trace!("wm hints: {hints:?}");
             hints
@@ -764,7 +774,7 @@ impl XState {
 
     fn get_protocols(&self, window: x::Window) -> XResult<Option<Vec<x::Atom>>> {
         let cookie = self.get_property_cookie(window, self.atoms.wm_protocols, x::ATOM_ATOM, 10);
-        let resolver = |reply: x::GetPropertyReply| reply.value::<x::Atom>().to_vec();
+        let resolver = |reply: x::GetPropertyReply| prop_value::<x::Atom>(&reply).to_vec();
         PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
@@ -772,7 +782,7 @@ impl XState {
         let cookie =
             self.get_property_cookie(window, x::ATOM_WM_NORMAL_HINTS, x::ATOM_WM_SIZE_HINTS, 9);
         let resolver = |reply: x::GetPropertyReply| {
-            let data: &[u32] = reply.value();
+            let data: &[u32] = prop_value(&reply);
             WmNormalHints::from(data)
         };
 
@@ -787,7 +797,7 @@ impl XState {
             5,
         );
         let resolver = |reply: x::GetPropertyReply| {
-            let data: &[u32] = reply.value();
+            let data: &[u32] = prop_value(&reply);
             motif::Hints::from(data)
         };
 
@@ -797,7 +807,8 @@ impl XState {
     fn get_transient_for(&self, window: x::Window) -> XResult<Option<x::Window>> {
         let cookie =
             self.get_property_cookie(window, self.atoms.wm_transient_for, x::ATOM_WINDOW, 1);
-        let resolver = |reply: x::GetPropertyReply| reply.value::<x::Window>().first().copied();
+        let resolver =
+            |reply: x::GetPropertyReply| prop_value::<x::Window>(&reply).first().copied();
         PropertyCookieWrapper::new(&self.connection, cookie)
             .resolve(resolver)
             .map(Option::flatten)
@@ -805,7 +816,7 @@ impl XState {
 
     fn get_net_wm_window_types(&self, window: x::Window) -> XResult<Option<Vec<x::Atom>>> {
         let cookie = self.get_property_cookie(window, self.window_atoms.ty, x::ATOM_ATOM, 10);
-        let resolver = |reply: x::GetPropertyReply| reply.value::<x::Atom>().to_vec();
+        let resolver = |reply: x::GetPropertyReply| prop_value::<x::Atom>(&reply).to_vec();
         PropertyCookieWrapper::new(&self.connection, cookie).resolve(resolver)
     }
 
@@ -855,31 +866,37 @@ impl XState {
 
         let window = event.window();
 
+        // Each getter returns `None` if the property was deleted again before we read it.
         match event.atom() {
             x if x == x::ATOM_WM_HINTS => {
-                let hints = unwrap_or_skip_bad_window_ret!(self.get_wm_hints(window)).unwrap();
-                server_state.set_win_hints(window, hints);
+                if let Some(hints) = unwrap_or_skip_bad_window_ret!(self.get_wm_hints(window)) {
+                    server_state.set_win_hints(window, hints);
+                }
             }
             x if x == x::ATOM_WM_NORMAL_HINTS => {
-                let hints = unwrap_or_skip_bad_window_ret!(self.get_wm_size_hints(window)).unwrap();
-                server_state.set_size_hints(window, hints);
+                if let Some(hints) = unwrap_or_skip_bad_window_ret!(self.get_wm_size_hints(window))
+                {
+                    server_state.set_size_hints(window, hints);
+                }
             }
             x if x == x::ATOM_WM_NAME => {
-                let name = unwrap_or_skip_bad_window_ret!(self.get_wm_name(window)).unwrap();
-                server_state.set_win_title(window, name);
+                if let Some(name) = unwrap_or_skip_bad_window_ret!(self.get_wm_name(window)) {
+                    server_state.set_win_title(window, name);
+                }
             }
             x if x == self.atoms.net_wm_name => {
-                let name = unwrap_or_skip_bad_window_ret!(self.get_net_wm_name(window)).unwrap();
-                server_state.set_win_title(window, name);
+                if let Some(name) = unwrap_or_skip_bad_window_ret!(self.get_net_wm_name(window)) {
+                    server_state.set_win_title(window, name);
+                }
             }
             x if x == x::ATOM_WM_CLASS => {
-                let class = unwrap_or_skip_bad_window_ret!(self.get_wm_class(window)).unwrap();
-                server_state.set_win_class(window, class);
+                if let Some(class) = unwrap_or_skip_bad_window_ret!(self.get_wm_class(window)) {
+                    server_state.set_win_class(window, class);
+                }
             }
             x if x == self.atoms.motif_wm_hints => {
-                let motif_hints =
-                    unwrap_or_skip_bad_window_ret!(self.get_motif_wm_hints(window)).unwrap();
-                if let Some(decorations) = motif_hints.decorations {
+                let motif_hints = unwrap_or_skip_bad_window_ret!(self.get_motif_wm_hints(window));
+                if let Some(decorations) = motif_hints.and_then(|h| h.decorations) {
                     server_state.set_win_decorations(window, decorations);
                 }
             }
@@ -998,20 +1015,21 @@ pub struct WmNormalHints {
 impl From<&[u32]> for WmNormalHints {
     fn from(value: &[u32]) -> Self {
         let mut ret = Self::default();
-        let flags = WmSizeHintsFlags::from_bits_truncate(value[0]);
+        // The property can be shorter than its flags claim, or empty if it has another type.
+        let flags = WmSizeHintsFlags::from_bits_truncate(value.first().copied().unwrap_or(0));
+        let size = |w: usize, h: usize| {
+            Some(WinSize {
+                width: *value.get(w)? as _,
+                height: *value.get(h)? as _,
+            })
+        };
 
         if flags.contains(WmSizeHintsFlags::ProgramMinSize) {
-            ret.min_size = Some(WinSize {
-                width: value[5] as _,
-                height: value[6] as _,
-            });
+            ret.min_size = size(5, 6);
         }
 
         if flags.contains(WmSizeHintsFlags::ProgramMaxSize) {
-            ret.max_size = Some(WinSize {
-                width: value[7] as _,
-                height: value[8] as _,
-            });
+            ret.max_size = size(7, 8);
         }
 
         ret
@@ -1027,16 +1045,15 @@ pub struct WmHints {
 impl From<&[u32]> for WmHints {
     fn from(value: &[u32]) -> Self {
         let mut ret = Self::default();
-        let flags = WmHintsFlags::from_bits_truncate(value[0]);
+        let flags = WmHintsFlags::from_bits_truncate(value.first().copied().unwrap_or(0));
 
         if flags.contains(WmHintsFlags::WindowGroup) {
-            let window = x::Window::new(value[8]);
-            ret.window_group = Some(window);
+            ret.window_group = value.get(8).map(|&window| x::Window::new(window));
         }
 
         // if input hint isn't present, set it to true anyways in case the client is misbehaving
         ret.accepts_input = true;
-        if flags.contains(WmHintsFlags::Input) && value[1] == 0 {
+        if flags.contains(WmHintsFlags::Input) && value.get(1) == Some(&0) {
             ret.accepts_input = false;
         }
 
@@ -1094,13 +1111,13 @@ mod motif {
         fn from(value: &[u32]) -> Self {
             let mut ret = Self::default();
 
-            let flags = HintsFlags::from_bits_truncate(value[0]);
+            let flags = HintsFlags::from_bits_truncate(value.first().copied().unwrap_or(0));
 
             if flags.contains(HintsFlags::Functions) {
-                ret.functions = Some(Functions::from_bits_truncate(value[1]));
+                ret.functions = value.get(1).copied().map(Functions::from_bits_truncate);
             }
             if flags.contains(HintsFlags::Decorations) {
-                ret.decorations = Some(Decorations::from_bits_truncate(value[2]));
+                ret.decorations = value.get(2).copied().map(Decorations::from_bits_truncate);
             }
 
             ret
@@ -1474,10 +1491,7 @@ impl XConnection for RealConnection {
         });
         let reply = unwrap_or_skip_bad_window_ret!(self.connection.wait_for_reply(cookie));
 
-        if reply
-            .value::<x::Atom>()
-            .contains(&self.atoms.wm_delete_window)
-        {
+        if prop_value::<x::Atom>(&reply).contains(&self.atoms.wm_delete_window) {
             let data = [self.atoms.wm_delete_window.resource_id(), 0, 0, 0, 0];
             let event = &x::ClientMessageEvent::new(
                 window,
