@@ -2,7 +2,7 @@ use super::clientside::SelectionEvents;
 use super::{InnerServerState, MyWorld, ServerState};
 use crate::{X11Selection, XConnection};
 use log::{info, warn};
-use rustix::pipe::{pipe_with, PipeFlags};
+use rustix::pipe::{PipeFlags, pipe_with};
 use smithay_client_toolkit::data_device_manager::ReadPipe;
 use wayland_client::globals::GlobalList;
 use wayland_client::protocol::wl_seat::WlSeat;
@@ -62,7 +62,9 @@ impl<S: X11Selection> SelectionStates<S> {
     /// Whether Wayland selections should be read through ext-data-control. The core protocols
     /// remain the fallback when the compositor does not advertise it or its device is gone.
     fn control_usable(&self) -> bool {
-        self.control.as_ref().is_some_and(DataControlState::is_usable)
+        self.control
+            .as_ref()
+            .is_some_and(DataControlState::is_usable)
     }
 
     pub fn new(global_list: &GlobalList, qh: &QueueHandle<MyWorld>) -> Self {
@@ -149,12 +151,12 @@ enum SelectionSource<T> {
 }
 
 fn destroy_selection<S: X11Selection, T: SelectionType>(selection: SelectionData<S, T>) {
-    match selection {
-        SelectionData::X11 {
-            inner: SelectionSource::Control { inner, .. },
-            ..
-        } => inner.destroy(),
-        _ => {}
+    if let SelectionData::X11 {
+        inner: SelectionSource::Control { inner, .. },
+        ..
+    } = selection
+    {
+        inner.destroy();
     }
 }
 
