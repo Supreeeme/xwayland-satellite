@@ -2,6 +2,7 @@ use super::clientside::SelectionEvents;
 use super::{InnerServerState, MyWorld, ServerState};
 use crate::{X11Selection, XConnection};
 use log::{info, warn};
+use rustix::pipe::{pipe_with, PipeFlags};
 use smithay_client_toolkit::data_device_manager::ReadPipe;
 use wayland_client::globals::GlobalList;
 use wayland_client::protocol::wl_seat::WlSeat;
@@ -16,10 +17,12 @@ use smithay_client_toolkit::primary_selection::device::PrimarySelectionDevice;
 use smithay_client_toolkit::primary_selection::offer::PrimarySelectionOffer;
 use smithay_client_toolkit::primary_selection::selection::PrimarySelectionSource;
 use std::io::Read;
+use std::os::fd::AsFd;
 use std::rc::{Rc, Weak};
 use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_device_v1::ExtDataControlDeviceV1,
     ext_data_control_manager_v1::ExtDataControlManagerV1,
+    ext_data_control_offer_v1::ExtDataControlOfferV1,
     ext_data_control_source_v1::ExtDataControlSourceV1,
 };
 
@@ -40,7 +43,28 @@ struct DataControlState {
     device: Option<ExtDataControlDeviceV1>,
 }
 
+impl DataControlState {
+    /// Whether data-control can carry selections right now. A device that has not been created
+    /// yet (no seat) still counts, since its sources are published once the seat shows up.
+    fn is_usable(&self) -> bool {
+        match &self.device {
+            Some(device) => device.is_alive(),
+            None => true,
+        }
+    }
+
+    fn live_device(&self) -> Option<&ExtDataControlDeviceV1> {
+        self.device.as_ref().filter(|device| device.is_alive())
+    }
+}
+
 impl<S: X11Selection> SelectionStates<S> {
+    /// Whether Wayland selections should be read through ext-data-control. The core protocols
+    /// remain the fallback when the compositor does not advertise it or its device is gone.
+    fn control_usable(&self) -> bool {
+        self.control.as_ref().is_some_and(DataControlState::is_usable)
+    }
+
     pub fn new(global_list: &GlobalList, qh: &QueueHandle<MyWorld>) -> Self {
         Self {
             clipboard: DataDeviceManagerState::bind(global_list, qh)
@@ -125,12 +149,12 @@ enum SelectionSource<T> {
 }
 
 fn destroy_selection<S: X11Selection, T: SelectionType>(selection: SelectionData<S, T>) {
-    if let SelectionData::X11 {
-        inner: SelectionSource::Control { inner, .. },
-        ..
-    } = selection
-    {
-        inner.destroy();
+    match selection {
+        SelectionData::X11 {
+            inner: SelectionSource::Control { inner, .. },
+            ..
+        } => inner.destroy(),
+        _ => {}
     }
 }
 
@@ -157,6 +181,7 @@ impl<S: X11Selection> InnerServerState<S> {
     }
 
     fn handle_impl<T: SelectionType>(&mut self) {
+        let control_usable = self.selection_states.control_usable();
         let (requests, cancelled) = {
             let events = T::get_events(&mut self.world);
             (
@@ -164,31 +189,52 @@ impl<S: X11Selection> InnerServerState<S> {
                 std::mem::take(&mut events.cancelled),
             )
         };
-        let (control_requests, control_cancelled) = {
+        let (control_requests, control_cancellations, control_offer) = {
             let events = T::get_control_events(&mut self.world);
             (
                 std::mem::take(&mut events.requests),
                 std::mem::take(&mut events.cancelled),
+                events.offer.take(),
             )
         };
 
         let Some(state) = T::selection_state(&mut self.selection_states) else {
+            if let Some((offer, _)) = control_offer {
+                offer.destroy();
+            }
             return;
         };
 
-        if let Some(SelectionData::X11 {
-            inner: SelectionSource::Core(inner),
-            data,
-        }) = state.source.as_ref()
-        {
-            let source_id = T::source_id(inner);
-            for (request_source, mime_type, fd) in requests {
-                if request_source == source_id {
-                    if let Some(data) = data.upgrade() {
-                        data.write_to(&mime_type, fd);
+        // Serve requests for the active X11-backed source. Requests are matched against the
+        // protocol object currently parked in the slot, so requests for a replaced source are
+        // dropped instead of being answered with newer data.
+        match state.source.as_ref() {
+            Some(SelectionData::X11 {
+                inner: SelectionSource::Core(inner),
+                data,
+            }) => {
+                let source_id = T::source_id(inner);
+                for (request_source, mime_type, fd) in requests {
+                    if request_source == source_id {
+                        if let Some(data) = data.upgrade() {
+                            data.write_to(&mime_type, fd);
+                        }
                     }
                 }
             }
+            Some(SelectionData::X11 {
+                inner: SelectionSource::Control { inner, .. },
+                data,
+            }) => {
+                for (source, mime_type, fd) in control_requests {
+                    if source == *inner {
+                        if let Some(data) = data.upgrade() {
+                            data.write_to(&mime_type, fd);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
 
         let core_cancelled = matches!(
@@ -199,69 +245,71 @@ impl<S: X11Selection> InnerServerState<S> {
             }) if cancelled.contains(&T::source_id(inner))
         );
         if core_cancelled {
-            state.source = None;
+            let old = state.source.take().unwrap();
+            destroy_selection(old);
         }
 
-        for (source, mime_type, fd) in control_requests {
-            let Some(SelectionData::X11 {
+        // Only clear the slot when the cancelled source is still the active one; a cancellation
+        // for a source that has already been replaced must not drop the newer source.
+        let control_cancelled = matches!(
+            state.source.as_ref(),
+            Some(SelectionData::X11 {
                 inner: SelectionSource::Control { inner, .. },
-                data,
-            }) = state.source.as_ref()
-            else {
-                continue;
-            };
-            if source == *inner {
-                if let Some(data) = data.upgrade() {
-                    data.write_to(&mime_type, fd);
-                }
-            }
-        }
-
-        for source in control_cancelled {
-            let is_current = matches!(
-                state.source.as_ref(),
-                Some(SelectionData::X11 {
-                    inner: SelectionSource::Control { inner, .. },
-                    ..
-                }) if source == *inner
-            );
-            if is_current {
-                let old = state.source.take().unwrap();
-                destroy_selection(old);
-            }
+                ..
+            }) if control_cancellations.contains(inner)
+        );
+        if control_cancelled {
+            let old = state.source.take().unwrap();
+            destroy_selection(old);
         }
 
         if state.source.is_none() {
-            let events = T::get_events(&mut self.world);
-            if let Some(offer) = T::take_offer(&mut events.offer) {
-                let mime_types = T::get_mimes(&offer);
-                let foreign = ForeignSelection {
-                    mime_types,
-                    inner: offer,
-                };
+            if let Some((offer, mime_types)) = control_offer {
+                let foreign = ForeignSelection::from_control(offer, mime_types);
+                state.source = Some(SelectionData::Foreign(foreign));
+            } else if !control_usable {
+                // Compositors without ext-data-control keep delivering Wayland selections
+                // through the core data device and primary-selection protocols.
+                let events = T::get_events(&mut self.world);
+                if let Some(offer) = T::take_offer(&mut events.offer) {
+                    let mime_types = T::get_mimes(&offer);
+                    let foreign = ForeignSelection::from_core(offer, mime_types);
+                    state.source = Some(SelectionData::Foreign(foreign));
+                }
+            }
+        } else if matches!(state.source.as_ref(), Some(SelectionData::Foreign(_))) {
+            // The X11 side has not picked up the previous offer yet, so keep the newest one.
+            if let Some((offer, mime_types)) = control_offer {
+                let old = state.source.take().unwrap();
+                destroy_selection(old);
+                let foreign = ForeignSelection::from_control(offer, mime_types);
                 state.source = Some(SelectionData::Foreign(foreign));
             }
+        } else if let Some((offer, _)) = control_offer {
+            // The slot holds our own X11-backed source. A data-control offer received while we
+            // own the selection is either that source echoed back by the compositor or a
+            // selection change whose cancellation has not been processed yet; neither may be
+            // adopted as a foreign selection.
+            offer.destroy();
         }
     }
 
     pub(crate) fn set_selection_source<T: SelectionType>(&mut self, selection: &Rc<S>) {
+        let control = self
+            .selection_states
+            .control
+            .as_ref()
+            .filter(|control| control.is_usable())
+            .map(|control| (control.manager.clone(), control.live_device().cloned()));
         let serial = self.last_kb_serial.as_ref().map(|(_seat, serial)| *serial);
-        let control = self.selection_states.control.as_ref().map(|control| {
-            (
-                control.manager.clone(),
-                control.device.clone().filter(Proxy::is_alive),
-            )
-        });
 
         let Some(state) = T::selection_state(&mut self.selection_states) else {
             return;
         };
 
-        let inner = if let Some(serial) = serial {
-            let src = T::create_source(&state.manager, &self.qh, selection.mime_types());
-            T::set_selection(&src, state.device.as_ref().unwrap(), serial);
-            SelectionSource::Core(src)
-        } else if let Some((manager, device)) = control {
+        let inner = if let Some((manager, device)) = control {
+            // ext-data-control has no serial requirement, so use it whenever the compositor
+            // advertises it instead of relying on keyboard focus.
             let src = manager.create_data_source(&self.qh, T::KIND);
             for mime in selection.mime_types() {
                 src.offer(mime.to_owned());
@@ -277,13 +325,13 @@ impl<S: X11Selection> InnerServerState<S> {
                 published,
             }
         } else {
-            // Preserve the core-only behavior when ext-data-control is unavailable. The source
-            // is retained, but cannot be published until the client has an input serial.
-            SelectionSource::Core(T::create_source(
-                &state.manager,
-                &self.qh,
-                selection.mime_types(),
-            ))
+            // Preserve the core-only behavior when ext-data-control is unavailable. Without an
+            // input serial the source is retained, but cannot be published.
+            let src = T::create_source(&state.manager, &self.qh, selection.mime_types());
+            if let Some(serial) = serial {
+                T::set_selection(&src, state.device.as_ref().unwrap(), serial);
+            }
+            SelectionSource::Core(src)
         };
 
         if let Some(old) = state.source.take() {
@@ -312,22 +360,62 @@ impl<S: X11Selection> InnerServerState<S> {
 
 pub struct ForeignSelection<T: SelectionType> {
     pub mime_types: Box<[String]>,
-    inner: T::Offer,
+    inner: ForeignOffer<T::Offer>,
+}
+
+enum ForeignOffer<O> {
+    Core(O),
+    Control(ExtDataControlOfferV1),
 }
 
 #[allow(private_bounds)]
 impl<T: SelectionType> ForeignSelection<T> {
+    fn from_core(offer: T::Offer, mime_types: Box<[String]>) -> Self {
+        Self {
+            mime_types,
+            inner: ForeignOffer::Core(offer),
+        }
+    }
+
+    fn from_control(offer: ExtDataControlOfferV1, mime_types: Box<[String]>) -> Self {
+        Self {
+            mime_types,
+            inner: ForeignOffer::Control(offer),
+        }
+    }
+
     pub(crate) fn receive(
         &self,
         mime_type: String,
         state: &ServerState<impl XConnection>,
     ) -> Vec<u8> {
-        let mut pipe = T::receive_offer(&self.inner, mime_type).unwrap();
+        let mut pipe = match &self.inner {
+            ForeignOffer::Core(offer) => T::receive_offer(offer, mime_type),
+            ForeignOffer::Control(offer) => receive_control_offer(offer, mime_type),
+        }
+        .unwrap();
         state.queue.flush().unwrap();
         let mut data = Vec::new();
         pipe.read_to_end(&mut data).unwrap();
         data
     }
+}
+
+impl<T: SelectionType> Drop for ForeignSelection<T> {
+    fn drop(&mut self) {
+        if let ForeignOffer::Control(offer) = &self.inner {
+            offer.destroy();
+        }
+    }
+}
+
+fn receive_control_offer(
+    offer: &ExtDataControlOfferV1,
+    mime_type: String,
+) -> std::io::Result<ReadPipe> {
+    let (read, write) = pipe_with(PipeFlags::CLOEXEC)?;
+    offer.receive(mime_type, write.as_fd());
+    Ok(ReadPipe::from(read))
 }
 
 #[allow(private_bounds, private_interfaces)]

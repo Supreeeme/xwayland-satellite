@@ -128,6 +128,20 @@ pub(super) struct ControlSourceEvents {
         smithay_client_toolkit::data_device_manager::WritePipe,
     )>,
     pub cancelled: Vec<ExtDataControlSourceV1>,
+    /// The most recent selection offer sent by the data-control device, along with the MIME
+    /// types that were advertised for it.
+    pub offer: Option<(ExtDataControlOfferV1, Box<[String]>)>,
+}
+
+#[derive(Default)]
+struct ControlOfferData {
+    mime_types: Mutex<Vec<String>>,
+}
+
+impl ControlOfferData {
+    fn mime_types(&self) -> Box<[String]> {
+        self.mime_types.lock().unwrap().clone().into()
+    }
 }
 
 pub(super) struct MyWorld {
@@ -192,6 +206,33 @@ impl MyWorld {
             false
         });
         events
+    }
+
+    fn set_control_offer(&mut self, kind: SourceKind, offer: Option<ExtDataControlOfferV1>) {
+        let events = match kind {
+            SourceKind::Clipboard => &mut self.control_clipboard,
+            SourceKind::Primary => &mut self.control_primary,
+        };
+        let offer = offer.map(|offer| {
+            let mime_types = offer
+                .data::<ControlOfferData>()
+                .map(ControlOfferData::mime_types)
+                .unwrap_or_default();
+            (offer, mime_types)
+        });
+        // The data-control protocol invalidates the previous offer when a new selection is
+        // announced, and the client must destroy it.
+        if let Some((replaced, _)) = std::mem::replace(&mut events.offer, offer) {
+            replaced.destroy();
+        }
+    }
+
+    fn clear_control_offers(&mut self) {
+        for events in [&mut self.control_clipboard, &mut self.control_primary] {
+            if let Some((offer, _)) = events.offer.take() {
+                offer.destroy();
+            }
+        }
     }
 }
 
@@ -690,22 +731,24 @@ impl Dispatch<ExtDataControlSourceV1, SourceKind> for MyWorld {
     }
 }
 
-impl Dispatch<ExtDataControlOfferV1, ()> for MyWorld {
+impl Dispatch<ExtDataControlOfferV1, ControlOfferData> for MyWorld {
     fn event(
         _: &mut Self,
         _: &ExtDataControlOfferV1,
         event: <ExtDataControlOfferV1 as Proxy>::Event,
-        _: &(),
+        data: &ControlOfferData,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let ext_data_control_offer_v1::Event::Offer { .. } = event {}
+        if let ext_data_control_offer_v1::Event::Offer { mime_type } = event {
+            data.mime_types.lock().unwrap().push(mime_type);
+        }
     }
 }
 
 impl Dispatch<ExtDataControlDeviceV1, ()> for MyWorld {
     fn event(
-        _: &mut Self,
+        state: &mut Self,
         device: &ExtDataControlDeviceV1,
         event: <ExtDataControlDeviceV1 as Proxy>::Event,
         _: &(),
@@ -713,19 +756,22 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for MyWorld {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            ext_data_control_device_v1::Event::Selection { id }
-            | ext_data_control_device_v1::Event::PrimarySelection { id } => {
-                if let Some(offer) = id {
-                    offer.destroy();
-                }
+            ext_data_control_device_v1::Event::Selection { id } => {
+                state.set_control_offer(SourceKind::Clipboard, id);
             }
-            ext_data_control_device_v1::Event::Finished => device.destroy(),
+            ext_data_control_device_v1::Event::PrimarySelection { id } => {
+                state.set_control_offer(SourceKind::Primary, id);
+            }
+            ext_data_control_device_v1::Event::Finished => {
+                device.destroy();
+                state.clear_control_offers();
+            }
             ext_data_control_device_v1::Event::DataOffer { .. } => {}
             _ => {}
         }
     }
 
     event_created_child!(MyWorld, ExtDataControlDeviceV1, [
-        EVT_DATA_OFFER_OPCODE => (ExtDataControlOfferV1, ()),
+        EVT_DATA_OFFER_OPCODE => (ExtDataControlOfferV1, ControlOfferData::default()),
     ]);
 }
