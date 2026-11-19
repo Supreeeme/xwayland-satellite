@@ -97,6 +97,7 @@ impl<S: X11Selection> Dispatch<WlSurface, Entity> for InnerServerState<S> {
         let client = data.get::<&client::wl_surface::WlSurface>().unwrap();
 
         let mut cmd = CommandBuffer::new();
+        let mut destroyed_surface = false;
 
         match request {
             Request::<WlSurface>::Attach { buffer, x, y } => {
@@ -142,6 +143,7 @@ impl<S: X11Selection> Dispatch<WlSurface, Entity> for InnerServerState<S> {
                 }
             }
             Request::<WlSurface>::Destroy => {
+                destroyed_surface = true;
                 if !data.has::<x::Window>() {
                     cmd.despawn(*entity);
                 }
@@ -180,6 +182,12 @@ impl<S: X11Selection> Dispatch<WlSurface, Entity> for InnerServerState<S> {
         drop(role);
 
         cmd.run_on(&mut state.world);
+
+        if destroyed_surface {
+            // The entity outlives the surface when it still has a window, so a candidate created
+            // over this surface has to be dropped explicitly.
+            event::invalidate_pointer_source(&mut state.world, *entity);
+        }
     }
 }
 
@@ -375,6 +383,8 @@ impl<S: X11Selection> Dispatch<WlPointer, Entity> for InnerServerState<S> {
                 c_pointer.set_cursor(serial, c_surface.as_deref(), hotspot_x, hotspot_y);
             }
             Request::<WlPointer>::Release => {
+                // The pointer that observed the press is going away with it.
+                event::invalidate_move_candidate(&mut state.world, *entity);
                 let (client, _) = state
                     .world
                     .remove::<(client::wl_pointer::WlPointer, WlPointer)>(*entity)
@@ -444,6 +454,8 @@ impl<S: X11Selection> Dispatch<WlSeat, Entity> for InnerServerState<S> {
     ) {
         match request {
             Request::<WlSeat>::GetPointer { id } => {
+                // A new pointer instance does not inherit a press observed through the old one.
+                event::invalidate_move_candidate(&mut state.world, *entity);
                 let client = {
                     state
                         .world
@@ -1447,7 +1459,11 @@ impl<S: X11Selection> GlobalDispatch<WlSeat, Global> for InnerServerState<S> {
             .bind::<client::wl_seat::WlSeat, _, _>(data.name, server.version(), &state.qh, entity);
 
         state.selection_states.seat_created(&state.qh, &client);
-        state.world.spawn_at(entity, (server, client));
+        // The global name is kept so move candidates can be invalidated when the seat global is
+        // removed: a removal announcement and the bound objects dying are not the same event.
+        state
+            .world
+            .spawn_at(entity, (server, client, GlobalName(data.name)));
     }
 }
 
