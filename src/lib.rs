@@ -229,11 +229,11 @@ pub fn main(mut data: impl RunData) -> Option<()> {
         server_state.run();
         display.flush_clients().unwrap();
 
-        if let Some(sel) = server_state.new_selection::<Clipboard>() {
+        if let Some(sel) = server_state.take_selection_update::<Clipboard>() {
             xstate.set_clipboard(sel);
         }
 
-        if let Some(sel) = server_state.new_selection::<Primary>() {
+        if let Some(sel) = server_state.take_selection_update::<Primary>() {
             xstate.set_primary_selection(sel);
         }
 

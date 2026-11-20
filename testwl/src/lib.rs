@@ -292,7 +292,8 @@ struct State {
     control_clipboard: Option<ExtDataControlSourceV1>,
     control_primary: Option<ExtDataControlSourceV1>,
     control_data_device_man: Option<ExtDataControlManagerV1>,
-    control_data_device: Option<ExtDataControlDeviceV1>,
+    control_devices: Vec<ExtDataControlDeviceV1>,
+    control_contents: [Option<Vec<PasteData>>; 2],
     xdg_activation: Option<XdgActivationV1>,
     valid_tokens: HashSet<String>,
     token_counter: u32,
@@ -328,7 +329,8 @@ impl Default for State {
             control_clipboard: None,
             control_primary: None,
             control_data_device_man: None,
-            control_data_device: None,
+            control_devices: Vec::new(),
+            control_contents: Default::default(),
             xdg_activation: None,
             valid_tokens: HashSet::new(),
             token_counter: 0,
@@ -956,11 +958,7 @@ impl Server {
         // A compositor announces a new selection to every device it serves. When
         // ext-data-control is available the bridge prefers that path for reads,
         // so the same selection must also be visible through the control device.
-        let control_data = self
-            .state
-            .control_data_device
-            .is_some()
-            .then(|| data.clone());
+        let control_data = (!self.state.control_devices.is_empty()).then(|| data.clone());
         let mimes: Vec<_> = data.iter().map(|m| m.mime_type.clone()).collect();
         let offer = self
             .client
@@ -993,11 +991,7 @@ impl Server {
             selection.cancelled();
         }
 
-        let control_data = self
-            .state
-            .control_data_device
-            .is_some()
-            .then(|| data.clone());
+        let control_data = (!self.state.control_devices.is_empty()).then(|| data.clone());
         let mimes: Vec<_> = data.iter().map(|m| m.mime_type.clone()).collect();
         let offer = self
             .client
@@ -1037,54 +1031,36 @@ impl Server {
 
     /// Send a selection offer through the ext-data-control device, as a compositor
     /// would for a new Wayland selection.
-    fn send_control_offer(&mut self, data: Vec<PasteData>, primary: bool) {
-        let Some(device) = self.state.control_data_device.clone() else {
-            panic!("No data control device created");
-        };
+    pub fn send_control_offer(&mut self, data: Vec<PasteData>, primary: bool) {
+        self.state.control_contents[usize::from(primary)] = Some(data);
+        self.announce_control_selection(primary);
+    }
 
-        let mimes: Vec<_> = data.iter().map(|m| m.mime_type.clone()).collect();
-        let offer = self
-            .client
-            .as_ref()
-            .unwrap()
-            .create_resource::<_, _, State>(&self.dh, 1, data)
-            .unwrap();
-        device.data_offer(&offer);
-        for mime in mimes {
-            offer.offer(mime);
-        }
-        if primary {
-            device.primary_selection(Some(&offer));
-        } else {
-            device.selection(Some(&offer));
+    fn announce_control_selection(&mut self, primary: bool) {
+        for device in &self.state.control_devices {
+            self.state.announce_control_selection(
+                &self.dh,
+                self.client.as_ref().unwrap(),
+                device,
+                primary,
+            );
         }
         self.display.flush_clients().unwrap();
     }
 
-    fn control_source_offer_data(&self, primary: bool) -> Vec<PasteData> {
-        let source = if primary {
-            self.state.control_primary.as_ref()
+    pub fn cancel_previous_source(&mut self, primary: bool) {
+        if primary {
+            self.cancel_primary_sources();
         } else {
-            self.state.control_clipboard.as_ref()
-        };
-        let Some(source) = source else {
-            panic!(
-                "No {} selection set on ext data control device",
-                if primary { "primary" } else { "clipboard" }
-            );
-        };
-        source
-            .data::<Mutex<DataSourceData>>()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .mimes
-            .iter()
-            .map(|mime| PasteData {
-                mime_type: mime.clone(),
-                data: Vec::new(),
-            })
-            .collect()
+            self.cancel_clipboard_sources();
+        }
+        self.display.flush_clients().unwrap();
+    }
+
+    pub fn clear_control_offer(&mut self, primary: bool) {
+        self.cancel_previous_source(primary);
+        self.state.control_contents[usize::from(primary)] = None;
+        self.announce_control_selection(primary);
     }
 
     /// Set a foreign selection on the ext-data-control device. This replaces the
@@ -1106,41 +1082,33 @@ impl Server {
     /// modeling a compositor that echoes a selection back to the client that set it.
     #[track_caller]
     pub fn echo_control_selection(&mut self) {
-        let data = self.control_source_offer_data(false);
-        self.send_control_offer(data, false);
+        self.announce_control_selection(false);
     }
 
     #[track_caller]
     pub fn echo_control_primary_selection(&mut self) {
-        let data = self.control_source_offer_data(true);
-        self.send_control_offer(data, true);
+        self.announce_control_selection(true);
     }
 
     /// Cancel the client's ext-data-control source without installing a replacement.
     #[track_caller]
     pub fn cancel_control_selection(&mut self) {
-        let Some(device) = self.state.control_data_device.clone() else {
-            panic!("No data control device created");
-        };
         let Some(selection) = self.state.control_clipboard.take() else {
             panic!("No selection set on ext data control device");
         };
         selection.cancelled();
-        device.selection(None);
-        self.display.flush_clients().unwrap();
+        self.state.control_contents[0] = None;
+        self.announce_control_selection(false);
     }
 
     #[track_caller]
     pub fn cancel_control_primary_selection(&mut self) {
-        let Some(device) = self.state.control_data_device.clone() else {
-            panic!("No data control device created");
-        };
         let Some(selection) = self.state.control_primary.take() else {
             panic!("No primary selection set on ext data control device");
         };
         selection.cancelled();
-        device.primary_selection(None);
-        self.display.flush_clients().unwrap();
+        self.state.control_contents[1] = None;
+        self.announce_control_selection(true);
     }
 
     #[track_caller]
@@ -1157,10 +1125,8 @@ impl Server {
         }
 
         dev.selection(None);
-        if let Some(control) = self.state.control_data_device.as_ref() {
-            control.selection(None);
-        }
-        self.display.flush_clients().unwrap();
+        self.state.control_contents[0] = None;
+        self.announce_control_selection(false);
     }
 
     #[track_caller]
@@ -1756,14 +1722,62 @@ impl GlobalDispatch<ExtDataControlManagerV1, ()> for State {
     }
 }
 
+impl State {
+    fn announce_control_selection(
+        &self,
+        dh: &DisplayHandle,
+        client: &Client,
+        device: &ExtDataControlDeviceV1,
+        primary: bool,
+    ) {
+        let source = if primary {
+            self.control_primary.as_ref()
+        } else {
+            self.control_clipboard.as_ref()
+        };
+        let data = self.control_contents[usize::from(primary)]
+            .clone()
+            .or_else(|| {
+                source.map(|s| {
+                    s.data::<Mutex<DataSourceData>>()
+                        .unwrap()
+                        .lock()
+                        .unwrap()
+                        .mimes
+                        .iter()
+                        .map(|mime| PasteData {
+                            mime_type: mime.clone(),
+                            data: Vec::new(),
+                        })
+                        .collect()
+                })
+            });
+        let offer = data.map(|data| {
+            let offer = client
+                .create_resource::<ExtDataControlOfferV1, _, State>(dh, 1, data)
+                .unwrap();
+            device.data_offer(&offer);
+            for mime in offer.data::<Vec<PasteData>>().unwrap() {
+                offer.offer(mime.mime_type.clone());
+            }
+            offer
+        });
+        if primary {
+            device.primary_selection(offer.as_ref());
+        } else {
+            device.selection(offer.as_ref());
+        }
+    }
+}
+
 impl Dispatch<ExtDataControlManagerV1, ()> for State {
     fn request(
         state: &mut Self,
-        _: &Client,
+        client: &Client,
         _: &ExtDataControlManagerV1,
         request: <ExtDataControlManagerV1 as Resource>::Request,
         _: &(),
-        _: &DisplayHandle,
+        dh: &DisplayHandle,
         data_init: &mut wayland_server::DataInit<'_, Self>,
     ) {
         match request {
@@ -1771,7 +1785,10 @@ impl Dispatch<ExtDataControlManagerV1, ()> for State {
                 data_init.init(id, DataSourceData::default().into());
             }
             ext_data_control_manager_v1::Request::GetDataDevice { id, seat } => {
-                state.control_data_device = Some(data_init.init(id, seat));
+                let device = data_init.init(id, seat);
+                state.announce_control_selection(dh, client, &device, false);
+                state.announce_control_selection(dh, client, &device, true);
+                state.control_devices.push(device);
             }
             ext_data_control_manager_v1::Request::Destroy => {
                 state.control_data_device_man = None;
@@ -1837,7 +1854,7 @@ impl Dispatch<ExtDataControlDeviceV1, WlSeat> for State {
     fn request(
         state: &mut Self,
         _: &Client,
-        _: &ExtDataControlDeviceV1,
+        device: &ExtDataControlDeviceV1,
         request: <ExtDataControlDeviceV1 as Resource>::Request,
         _: &WlSeat,
         _: &DisplayHandle,
@@ -1854,6 +1871,7 @@ impl Dispatch<ExtDataControlDeviceV1, WlSeat> for State {
                 if let Some(old) = state.control_clipboard.take() {
                     old.cancelled();
                 }
+                state.control_contents[0] = None;
                 state.control_clipboard = source;
             }
             ext_data_control_device_v1::Request::SetPrimarySelection { source } => {
@@ -1863,10 +1881,11 @@ impl Dispatch<ExtDataControlDeviceV1, WlSeat> for State {
                 if let Some(old) = state.control_primary.take() {
                     old.cancelled();
                 }
+                state.control_contents[1] = None;
                 state.control_primary = source;
             }
             ext_data_control_device_v1::Request::Destroy => {
-                state.control_data_device = None;
+                state.control_devices.retain(|d| d != device);
             }
             _ => unreachable!(),
         }

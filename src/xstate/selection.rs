@@ -1,5 +1,7 @@
 use super::{XState, get_atom_name};
-use crate::server::selection::{Clipboard, ForeignSelection, Primary, SelectionType};
+use crate::server::selection::{
+    Clipboard, ForeignSelection, Primary, SelectionType, SelectionUpdate,
+};
 use crate::{RealServerState, X11Selection};
 use log::{debug, error, warn};
 use rustix::event::{PollFd, PollFlags, poll};
@@ -339,6 +341,31 @@ impl<T: SelectionType> SelectionData<T> {
             current_selection: None,
         }
     }
+    fn clear_wayland_owner(&mut self, connection: &xcb::Connection, wm_window: x::Window) {
+        if !matches!(self.current_selection, Some(CurrentSelection::Wayland(_))) {
+            return;
+        }
+        self.current_selection = None;
+        // An X client may have claimed ownership since we last dispatched XFixes.
+        // Make the ownership check and release atomic with respect to other clients.
+        connection.send_request(&x::GrabServer {});
+        match connection.wait_for_reply(connection.send_request(&x::GetSelectionOwner {
+            selection: self.atom,
+        })) {
+            Ok(reply) if reply.owner() == wm_window => {
+                connection.send_request(&x::SetSelectionOwner {
+                    owner: x::WINDOW_NONE,
+                    selection: self.atom,
+                    time: x::CURRENT_TIME,
+                });
+            }
+            Err(error) => warn!("Could not query selection owner: {error:?}"),
+            _ => {}
+        }
+        connection.send_request(&x::UngrabServer {});
+        let _ = connection.flush();
+    }
+
     fn wayland_selection_mut(&mut self) -> Option<&mut WaylandSelection<T>> {
         match &mut self.current_selection {
             Some(CurrentSelection::Wayland(sel)) => Some(sel),
@@ -679,7 +706,13 @@ impl XState {
         (target, property)
     }
 
-    pub(crate) fn set_clipboard(&mut self, selection: ForeignSelection<Clipboard>) {
+    pub(crate) fn set_clipboard(&mut self, update: SelectionUpdate<ForeignSelection<Clipboard>>) {
+        let SelectionUpdate::Set(selection) = update else {
+            self.selection_state
+                .clipboard
+                .clear_wayland_owner(&self.connection, self.wm_window);
+            return;
+        };
         let mut utf8_xwl = false;
         let mut utf8_wl = false;
         let mut mimes: Vec<SelectionTargetId> = selection
@@ -731,7 +764,16 @@ impl XState {
         }
     }
 
-    pub(crate) fn set_primary_selection(&mut self, selection: ForeignSelection<Primary>) {
+    pub(crate) fn set_primary_selection(
+        &mut self,
+        update: SelectionUpdate<ForeignSelection<Primary>>,
+    ) {
+        let SelectionUpdate::Set(selection) = update else {
+            self.selection_state
+                .primary
+                .clear_wayland_owner(&self.connection, self.wm_window);
+            return;
+        };
         let mut utf8_xwl = false;
         let mut utf8_wl = false;
         let mut mimes: Vec<SelectionTargetId> = selection
@@ -909,6 +951,10 @@ impl XState {
 
                         let data = get_selection_data!(x);
 
+                        if e.owner() == x::WINDOW_NONE {
+                            data.selection_clear();
+                            return true;
+                        }
                         data.handle_new_owner(
                             &self.connection,
                             self.wm_window,
@@ -920,7 +966,7 @@ impl XState {
                     xcb::xfixes::SelectionEvent::SelectionClientClose
                     | xcb::xfixes::SelectionEvent::SelectionWindowDestroy => {
                         debug!("Selection owner destroyed, selection will be unset");
-                        self.selection_state.clipboard.current_selection = None;
+                        get_selection_data!(x).selection_clear();
                     }
                 },
                 x if x == self.atoms.xsettings => match e.subtype() {

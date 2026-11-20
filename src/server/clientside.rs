@@ -16,6 +16,7 @@ use smithay_client_toolkit::{
         selection::PrimarySelectionSourceHandler,
     },
 };
+use std::rc::Rc;
 use std::sync::{Mutex, OnceLock, mpsc};
 use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
@@ -98,10 +99,16 @@ use wayland_server::protocol as server;
 use wl_drm::client::wl_drm::WlDrm;
 use xcb::x;
 
-use super::selection::SourceKind;
+use super::selection::{SelectionUpdate, SourceKind};
 
 pub(super) struct SelectionEvents<T> {
     pub offer: Option<T>,
+    pub source: SourceEvents,
+    pub control: ControlSubscription,
+}
+
+#[derive(Default)]
+pub(super) struct SourceEvents {
     pub requests: Vec<(
         wayland_client::backend::ObjectId,
         String,
@@ -114,23 +121,17 @@ impl<T> Default for SelectionEvents<T> {
     fn default() -> Self {
         Self {
             offer: None,
-            requests: Default::default(),
-            cancelled: Default::default(),
+            source: Default::default(),
+            control: Default::default(),
         }
     }
 }
 
 #[derive(Default)]
-pub(super) struct ControlSourceEvents {
-    pub requests: Vec<(
-        ExtDataControlSourceV1,
-        String,
-        smithay_client_toolkit::data_device_manager::WritePipe,
-    )>,
-    pub cancelled: Vec<ExtDataControlSourceV1>,
-    /// The most recent selection offer sent by the data-control device, along with the MIME
-    /// types that were advertised for it.
-    pub offer: Option<(ExtDataControlOfferV1, Box<[String]>)>,
+pub(super) struct ControlSubscription {
+    /// Latest notification from the subscribed device, including an explicit clear.
+    pub offer: Option<SelectionUpdate<ControlOffer>>,
+    device: Option<Rc<ControlDevice>>,
 }
 
 #[derive(Default)]
@@ -138,9 +139,43 @@ struct ControlOfferData {
     mime_types: Mutex<Vec<String>>,
 }
 
-impl ControlOfferData {
-    fn mime_types(&self) -> Box<[String]> {
-        self.mime_types.lock().unwrap().clone().into()
+pub(super) struct ControlOffer(pub ExtDataControlOfferV1);
+
+impl ControlOffer {
+    pub fn mime_types(&self) -> Box<[String]> {
+        self.0
+            .data::<ControlOfferData>()
+            .unwrap()
+            .mime_types
+            .lock()
+            .unwrap()
+            .clone()
+            .into()
+    }
+}
+
+impl Drop for ControlOffer {
+    fn drop(&mut self) {
+        self.0.destroy();
+    }
+}
+
+pub(super) struct ControlDevice(pub ExtDataControlDeviceV1);
+
+impl Drop for ControlDevice {
+    fn drop(&mut self) {
+        self.0.destroy();
+    }
+}
+
+impl ControlSubscription {
+    pub fn device(&self) -> Option<&ExtDataControlDeviceV1> {
+        self.device.as_ref().map(|device| &device.0)
+    }
+
+    pub fn subscribe(&mut self, device: Rc<ControlDevice>) {
+        self.offer = None;
+        self.device = Some(device);
     }
 }
 
@@ -153,8 +188,6 @@ pub(super) struct MyWorld {
     queued_events: Vec<mpsc::Receiver<(Entity, ObjectEvent)>>,
     pub clipboard: SelectionEvents<SelectionOffer>,
     pub primary: SelectionEvents<PrimarySelectionOffer>,
-    pub control_clipboard: ControlSourceEvents,
-    pub control_primary: ControlSourceEvents,
     pub pending_activations: Vec<(xcb::x::Window, String)>,
 }
 
@@ -169,8 +202,6 @@ impl MyWorld {
             queued_events: Vec::new(),
             clipboard: Default::default(),
             primary: Default::default(),
-            control_clipboard: Default::default(),
-            control_primary: Default::default(),
             pending_activations: Vec::new(),
         }
     }
@@ -206,33 +237,6 @@ impl MyWorld {
             false
         });
         events
-    }
-
-    fn set_control_offer(&mut self, kind: SourceKind, offer: Option<ExtDataControlOfferV1>) {
-        let events = match kind {
-            SourceKind::Clipboard => &mut self.control_clipboard,
-            SourceKind::Primary => &mut self.control_primary,
-        };
-        let offer = offer.map(|offer| {
-            let mime_types = offer
-                .data::<ControlOfferData>()
-                .map(ControlOfferData::mime_types)
-                .unwrap_or_default();
-            (offer, mime_types)
-        });
-        // The data-control protocol invalidates the previous offer when a new selection is
-        // announced, and the client must destroy it.
-        if let Some((replaced, _)) = std::mem::replace(&mut events.offer, offer) {
-            replaced.destroy();
-        }
-    }
-
-    fn clear_control_offers(&mut self) {
-        for events in [&mut self.control_clipboard, &mut self.control_primary] {
-            if let Some((offer, _)) = events.offer.take() {
-                offer.destroy();
-            }
-        }
     }
 }
 
@@ -559,7 +563,7 @@ impl DataSourceHandler for MyWorld {
         mime: String,
         fd: smithay_client_toolkit::data_device_manager::WritePipe,
     ) {
-        self.clipboard.requests.push((source.id(), mime, fd));
+        self.clipboard.source.requests.push((source.id(), mime, fd));
     }
 
     fn cancelled(
@@ -568,7 +572,7 @@ impl DataSourceHandler for MyWorld {
         _: &wayland_client::QueueHandle<Self>,
         source: &wayland_client::protocol::wl_data_source::WlDataSource,
     ) {
-        self.clipboard.cancelled.push(source.id());
+        self.clipboard.source.cancelled.push(source.id());
     }
 
     fn action(
@@ -687,7 +691,10 @@ impl PrimarySelectionSourceHandler for MyWorld {
         mime: String,
         write_pipe: smithay_client_toolkit::data_device_manager::WritePipe,
     ) {
-        self.primary.requests.push((source.id(), mime, write_pipe));
+        self.primary
+            .source
+            .requests
+            .push((source.id(), mime, write_pipe));
     }
 
     fn cancelled(
@@ -696,7 +703,7 @@ impl PrimarySelectionSourceHandler for MyWorld {
         _: &QueueHandle<Self>,
         source: &ZwpPrimarySelectionSourceV1,
     ) {
-        self.primary.cancelled.push(source.id());
+        self.primary.source.cancelled.push(source.id());
     }
 }
 
@@ -712,19 +719,19 @@ impl Dispatch<ExtDataControlSourceV1, SourceKind> for MyWorld {
         _: &QueueHandle<Self>,
     ) {
         let events = match kind {
-            SourceKind::Clipboard => &mut state.control_clipboard,
-            SourceKind::Primary => &mut state.control_primary,
+            SourceKind::Clipboard => &mut state.clipboard.source,
+            SourceKind::Primary => &mut state.primary.source,
         };
         match event {
             ext_data_control_source_v1::Event::Send { mime_type, fd } => {
                 events.requests.push((
-                    source.clone(),
+                    source.id(),
                     mime_type,
                     smithay_client_toolkit::data_device_manager::WritePipe::from(fd),
                 ));
             }
             ext_data_control_source_v1::Event::Cancelled => {
-                events.cancelled.push(source.clone());
+                events.cancelled.push(source.id());
             }
             _ => {}
         }
@@ -755,19 +762,27 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for MyWorld {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        match event {
+        let (events, offer) = match event {
             ext_data_control_device_v1::Event::Selection { id } => {
-                state.set_control_offer(SourceKind::Clipboard, id);
+                (&mut state.clipboard.control, id)
             }
             ext_data_control_device_v1::Event::PrimarySelection { id } => {
-                state.set_control_offer(SourceKind::Primary, id);
+                (&mut state.primary.control, id)
             }
             ext_data_control_device_v1::Event::Finished => {
-                device.destroy();
-                state.clear_control_offers();
+                for events in [&mut state.clipboard.control, &mut state.primary.control] {
+                    if events.device() == Some(device) {
+                        events.offer = None;
+                        events.device = None;
+                    }
+                }
+                return;
             }
-            ext_data_control_device_v1::Event::DataOffer { .. } => {}
-            _ => {}
+            _ => return,
+        };
+        let offer = offer.map(ControlOffer);
+        if events.device() == Some(device) {
+            events.offer = Some(offer.map_or(SelectionUpdate::Clear, SelectionUpdate::Set));
         }
     }
 

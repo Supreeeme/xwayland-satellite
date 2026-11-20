@@ -1470,6 +1470,16 @@ macro_rules! selection_tests {
             }
 
             #[test]
+            fn offer_before_cancel() {
+                super::offer_before_cancel::<$selection_type>();
+            }
+
+            #[test]
+            fn echo_and_cancel_before_replacement() {
+                super::echo_and_cancel_before_replacement::<$selection_type>();
+            }
+
+            #[test]
             fn own_control_selection_echo_is_ignored() {
                 super::own_control_selection_echo_is_ignored::<$selection_type>();
             }
@@ -1813,6 +1823,54 @@ fn cancelled_control_source_allows_wayland_offer<T: SelectionTest>() {
     f.run();
     f.run();
     receive_foreign_selection::<T>(&mut f, &waylanddata);
+}
+
+fn selection_text(value: &[u8]) -> Vec<testwl::PasteData> {
+    vec![testwl::PasteData {
+        mime_type: "text/plain".into(),
+        data: value.to_vec(),
+    }]
+}
+
+fn offer_before_cancel<T: SelectionTest>() {
+    let (mut f, _comp) = TestFixture::new_with_compositor();
+    let primary = matches!(
+        T::SelectionType::KIND,
+        super::selection::SourceKind::Primary
+    );
+    let source = std::rc::Rc::new(selection_text(b"X11"));
+    f.satellite
+        .set_selection_source::<T::SelectionType>(&source);
+    f.run();
+
+    let foreign = selection_text(b"Wayland");
+    f.testwl.send_control_offer(foreign.clone(), primary);
+    f.run();
+    f.testwl.cancel_previous_source(primary);
+    f.run();
+    f.run(); // Dispatch the new device's initial state.
+    receive_foreign_selection::<T>(&mut f, &foreign);
+}
+
+fn echo_and_cancel_before_replacement<T: SelectionTest>() {
+    let (mut f, _comp) = TestFixture::new_with_compositor();
+    let primary = matches!(
+        T::SelectionType::KIND,
+        super::selection::SourceKind::Primary
+    );
+    let source = std::rc::Rc::new(selection_text(b"X11"));
+    f.satellite
+        .set_selection_source::<T::SelectionType>(&source);
+    f.run();
+
+    T::echo_control_selection(&mut f.testwl);
+    f.testwl.cancel_previous_source(primary);
+    f.run();
+    assert!(f.satellite.new_selection::<T::SelectionType>().is_none());
+    let foreign = selection_text(b"Wayland");
+    T::create_control_offer(&mut f.testwl, foreign.clone());
+    f.run();
+    receive_foreign_selection::<T>(&mut f, &foreign);
 }
 
 fn own_control_selection_echo_is_ignored<T: SelectionTest>() {

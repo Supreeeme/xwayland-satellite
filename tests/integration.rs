@@ -1147,6 +1147,49 @@ fn copy_from_x11() {
 }
 
 #[test]
+fn clear_bridged_selection() {
+    let mut f = Fixture::new();
+    let mut connection = Connection::new(&f.display);
+    let window = connection.new_window(connection.root, 0, 0, 20, 20, false);
+    f.map_as_toplevel(&mut connection, window);
+
+    let contents = vec![testwl::PasteData {
+        mime_type: "text/plain".into(),
+        data: b"hello".to_vec(),
+    }];
+    let clipboard = connection.atoms.clipboard;
+    let primary = connection.atoms.primary;
+    let owner = connection.wm_window;
+    let wait_for_owner = |f: &mut Fixture, selection, expected| {
+        let start = std::time::Instant::now();
+        loop {
+            f.testwl.dispatch();
+            let actual = connection
+                .get_reply(&x::GetSelectionOwner { selection })
+                .owner();
+            if actual == expected {
+                return;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "{selection:?}: expected {expected:?}, got {actual:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    f.testwl.create_control_data_offer(contents.clone());
+    f.testwl.create_control_primary_offer(contents);
+    wait_for_owner(&mut f, clipboard, owner);
+    wait_for_owner(&mut f, primary, owner);
+    f.testwl.clear_control_offer(false);
+    wait_for_owner(&mut f, clipboard, x::WINDOW_NONE);
+    wait_for_owner(&mut f, primary, owner);
+    f.testwl.clear_control_offer(true);
+    wait_for_owner(&mut f, primary, x::WINDOW_NONE);
+}
+
+#[test]
 fn copy_from_wayland() {
     let mut f = Fixture::new();
     let mut connection = Connection::new(&f.display);
