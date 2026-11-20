@@ -1179,14 +1179,29 @@ fn clear_bridged_selection() {
     };
 
     f.testwl.create_control_data_offer(contents.clone());
-    f.testwl.create_control_primary_offer(contents);
+    f.testwl.create_control_primary_offer(contents.clone());
     wait_for_owner(&mut f, clipboard, owner);
     wait_for_owner(&mut f, primary, owner);
     f.testwl.clear_control_offer(false);
     wait_for_owner(&mut f, clipboard, x::WINDOW_NONE);
     wait_for_owner(&mut f, primary, owner);
+
+    f.testwl.create_control_data_offer(contents);
+    wait_for_owner(&mut f, clipboard, owner);
+    // Queue a clear while the bridge cannot touch X, then give CLIPBOARD to an
+    // X client. Clearing PRIMARY afterwards confirms the bridge processed the
+    // preceding clipboard notification before we check who still owns it.
+    connection
+        .send_and_check_request(&x::GrabServer {})
+        .unwrap();
+    f.testwl.clear_control_offer(false);
+    connection.set_selection_owner(window, clipboard);
+    connection
+        .send_and_check_request(&x::UngrabServer {})
+        .unwrap();
     f.testwl.clear_control_offer(true);
     wait_for_owner(&mut f, primary, x::WINDOW_NONE);
+    connection.verify_clipboard_owner(window);
 }
 
 #[test]
