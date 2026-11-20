@@ -11,6 +11,7 @@ use std::sync::{
 };
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use testwl::SelectionKind::{Clipboard, Primary};
 use wayland_protocols::xdg::{
     decoration::zv1::server::zxdg_toplevel_decoration_v1, shell::server::xdg_toplevel,
 };
@@ -1074,8 +1075,8 @@ fn copy_from_x11() {
     // When requesting both primary and clipboard simultaneously, the first to be requested erases
     // its TARGETS (which is the correct behavior of a GetProperty request), but the second still
     // tried to use this data and would come up empty.
-    let primary_mimes = f.testwl.primary_source_mimes();
-    let clipboard_mimes = f.testwl.data_source_mimes();
+    let primary_mimes = f.testwl.source_mimes(Primary);
+    let clipboard_mimes = f.testwl.source_mimes(Clipboard);
     assert_eq!(
         primary_mimes.len(),
         mimes_truth.len(),
@@ -1117,8 +1118,8 @@ fn copy_from_x11() {
         true
     };
 
-    let clipboard_data = f.testwl.clipboard_paste_data(&mut send_data_for_mime);
-    let primary_data = f.testwl.primary_paste_data(&mut send_data_for_mime);
+    let clipboard_data = f.testwl.paste_data(Clipboard, &mut send_data_for_mime);
+    let primary_data = f.testwl.paste_data(Primary, &mut send_data_for_mime);
 
     for data in [primary_data, clipboard_data] {
         let mut found_mimes = Vec::new();
@@ -1178,15 +1179,16 @@ fn clear_bridged_selection() {
         }
     };
 
-    f.testwl.create_control_data_offer(contents.clone());
-    f.testwl.create_control_primary_offer(contents.clone());
+    f.testwl
+        .set_control_offer(Clipboard, Some(contents.clone()));
+    f.testwl.set_control_offer(Primary, Some(contents.clone()));
     wait_for_owner(&mut f, clipboard, owner);
     wait_for_owner(&mut f, primary, owner);
-    f.testwl.clear_control_offer(false);
+    f.testwl.set_control_offer(Clipboard, None);
     wait_for_owner(&mut f, clipboard, x::WINDOW_NONE);
     wait_for_owner(&mut f, primary, owner);
 
-    f.testwl.create_control_data_offer(contents);
+    f.testwl.set_control_offer(Clipboard, Some(contents));
     wait_for_owner(&mut f, clipboard, owner);
     // Queue a clear while the bridge cannot touch X, then give CLIPBOARD to an
     // X client. Clearing PRIMARY afterwards confirms the bridge processed the
@@ -1194,12 +1196,12 @@ fn clear_bridged_selection() {
     connection
         .send_and_check_request(&x::GrabServer {})
         .unwrap();
-    f.testwl.clear_control_offer(false);
+    f.testwl.set_control_offer(Clipboard, None);
     connection.set_selection_owner(window, clipboard);
     connection
         .send_and_check_request(&x::UngrabServer {})
         .unwrap();
-    f.testwl.clear_control_offer(true);
+    f.testwl.set_control_offer(Primary, None);
     wait_for_owner(&mut f, primary, x::WINDOW_NONE);
     connection.verify_clipboard_owner(window);
 }
@@ -1223,7 +1225,7 @@ fn copy_from_wayland() {
         },
     ];
 
-    f.testwl.create_data_offer(offer.clone());
+    f.testwl.create_offer(Clipboard, offer.clone());
     connection.await_selection_owner_change();
     connection.verify_clipboard_owner(connection.wm_window);
     connection.get_selection_owner_change_events(false, window);
@@ -1322,7 +1324,7 @@ fn incr_copy_from_wayland() {
             .collect(),
     }];
 
-    f.testwl.create_data_offer(offer.clone());
+    f.testwl.create_offer(Clipboard, offer.clone());
     connection.await_selection_owner_change();
     connection.verify_clipboard_owner(connection.wm_window);
     connection.get_selection_owner_change_events(false, window);
@@ -1483,7 +1485,7 @@ fn bad_clipboard_data() {
     connection.send_selection_notify(&request);
 
     f.wait_and_dispatch();
-    let mut data = f.testwl.clipboard_paste_data(|_, _| {
+    let mut data = f.testwl.paste_data(Clipboard, |_, _| {
         let request = connection.await_selection_request();
         assert_eq!(request.target(), connection.atoms.mime2);
         // Don't actually set any data as requested - just report success
@@ -1679,7 +1681,7 @@ fn incr_copy_from_x11() {
         .take(3000)
         .collect();
     let mut it = data.chunks(500).enumerate();
-    let mut paste_data = f.testwl.clipboard_paste_data(|_, testwl| {
+    let mut paste_data = f.testwl.paste_data(Clipboard, |_, testwl| {
         if let Some(begin) = begin_incr.take() {
             destination_property = begin(&mut connection);
             testwl.dispatch();
@@ -1720,7 +1722,7 @@ fn incr_copy_from_x11() {
         }
     });
 
-    assert_eq!(f.testwl.data_source_mimes(), vec!["text/plain"]);
+    assert_eq!(f.testwl.source_mimes(Clipboard), vec!["text/plain"]);
     assert_eq!(paste_data.len(), 1);
     let paste_data = paste_data.swap_remove(0);
     assert_eq!(paste_data.mime_type, "text/plain");
@@ -1745,7 +1747,7 @@ fn wayland_then_x11_clipboard_owner() {
             data: vec![1, 2, 3, 2, 1],
         },
     ];
-    f.testwl.create_data_offer(offer.clone());
+    f.testwl.create_offer(Clipboard, offer.clone());
 
     connection.await_selection_owner_change();
     connection.verify_clipboard_owner(connection.wm_window);
@@ -1773,7 +1775,7 @@ fn fake_selection_targets() {
         mime_type: "text/plain;charset=utf-8".into(),
         data: data.to_vec(),
     }];
-    f.testwl.create_data_offer(offer.clone());
+    f.testwl.create_offer(Clipboard, offer.clone());
 
     connection.await_selection_owner_change();
     connection.verify_clipboard_owner(connection.wm_window);
