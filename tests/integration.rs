@@ -1216,8 +1216,12 @@ fn copy_from_wayland() {
     f.map_as_toplevel(&mut connection, window);
     let offer = vec![
         testwl::PasteData {
-            mime_type: "text/plain".into(),
+            mime_type: "text/plain;charset=utf-8".into(),
             data: b"boingloings".to_vec(),
+        },
+        testwl::PasteData {
+            mime_type: "UTF8_STRING".into(),
+            data: b"native X target".to_vec(),
         },
         testwl::PasteData {
             mime_type: "yah/hah".into(),
@@ -1262,7 +1266,7 @@ fn copy_from_wayland() {
         long_length: 10,
     });
     let targets: &[x::Atom] = reply.value();
-    assert_eq!(targets.len(), 2);
+    assert_eq!(targets.len(), offer.len());
 
     for testwl::PasteData { mime_type, data } in offer {
         let atom = connection

@@ -27,7 +27,7 @@ use wayland_protocols::ext::data_control::v1::client::{
 };
 
 #[derive(Copy, Clone, Debug)]
-pub(super) enum SourceKind {
+pub(crate) enum SourceKind {
     Clipboard,
     Primary,
 }
