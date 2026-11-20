@@ -16,6 +16,7 @@ use smithay_client_toolkit::{
         selection::PrimarySelectionSourceHandler,
     },
 };
+use std::rc::Rc;
 use std::sync::{Mutex, OnceLock, mpsc};
 use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
@@ -27,6 +28,12 @@ use wayland_client::protocol::{
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, delegate_noop, event_created_child,
     globals::{Global, GlobalList, GlobalListContents},
+};
+use wayland_protocols::ext::data_control::v1::client::{
+    ext_data_control_device_v1::{self, EVT_DATA_OFFER_OPCODE, ExtDataControlDeviceV1},
+    ext_data_control_manager_v1::ExtDataControlManagerV1,
+    ext_data_control_offer_v1::{self, ExtDataControlOfferV1},
+    ext_data_control_source_v1::{self, ExtDataControlSourceV1},
 };
 use wayland_protocols::{
     wp::{
@@ -92,22 +99,83 @@ use wayland_server::protocol as server;
 use wl_drm::client::wl_drm::WlDrm;
 use xcb::x;
 
+use super::selection::{SelectionUpdate, SourceKind};
+
 pub(super) struct SelectionEvents<T> {
     pub offer: Option<T>,
+    pub source: SourceEvents,
+    pub control: ControlSubscription,
+}
+
+#[derive(Default)]
+pub(super) struct SourceEvents {
     pub requests: Vec<(
+        wayland_client::backend::ObjectId,
         String,
         smithay_client_toolkit::data_device_manager::WritePipe,
     )>,
-    pub cancelled: bool,
+    pub cancelled: Vec<wayland_client::backend::ObjectId>,
 }
 
 impl<T> Default for SelectionEvents<T> {
     fn default() -> Self {
         Self {
             offer: None,
-            requests: Default::default(),
-            cancelled: false,
+            source: Default::default(),
+            control: Default::default(),
         }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct ControlSubscription {
+    /// Latest notification from the subscribed device, including an explicit clear.
+    pub offer: Option<SelectionUpdate<ControlOffer>>,
+    device: Option<Rc<ControlDevice>>,
+}
+
+#[derive(Default)]
+struct ControlOfferData {
+    mime_types: Mutex<Vec<String>>,
+}
+
+pub(super) struct ControlOffer(pub ExtDataControlOfferV1);
+
+impl ControlOffer {
+    pub fn mime_types(&self) -> Box<[String]> {
+        self.0
+            .data::<ControlOfferData>()
+            .unwrap()
+            .mime_types
+            .lock()
+            .unwrap()
+            .clone()
+            .into()
+    }
+}
+
+impl Drop for ControlOffer {
+    fn drop(&mut self) {
+        self.0.destroy();
+    }
+}
+
+pub(super) struct ControlDevice(pub ExtDataControlDeviceV1);
+
+impl Drop for ControlDevice {
+    fn drop(&mut self) {
+        self.0.destroy();
+    }
+}
+
+impl ControlSubscription {
+    pub fn device(&self) -> Option<&ExtDataControlDeviceV1> {
+        self.device.as_ref().map(|device| &device.0)
+    }
+
+    pub fn subscribe(&mut self, device: Rc<ControlDevice>) {
+        self.offer = None;
+        self.device = Some(device);
     }
 }
 
@@ -491,20 +559,20 @@ impl DataSourceHandler for MyWorld {
         &mut self,
         _: &wayland_client::Connection,
         _: &wayland_client::QueueHandle<Self>,
-        _: &wayland_client::protocol::wl_data_source::WlDataSource,
+        source: &wayland_client::protocol::wl_data_source::WlDataSource,
         mime: String,
         fd: smithay_client_toolkit::data_device_manager::WritePipe,
     ) {
-        self.clipboard.requests.push((mime, fd));
+        self.clipboard.source.requests.push((source.id(), mime, fd));
     }
 
     fn cancelled(
         &mut self,
         _: &wayland_client::Connection,
         _: &wayland_client::QueueHandle<Self>,
-        _: &wayland_client::protocol::wl_data_source::WlDataSource,
+        source: &wayland_client::protocol::wl_data_source::WlDataSource,
     ) {
-        self.clipboard.cancelled = true;
+        self.clipboard.source.cancelled.push(source.id());
     }
 
     fn action(
@@ -619,19 +687,106 @@ impl PrimarySelectionSourceHandler for MyWorld {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &ZwpPrimarySelectionSourceV1,
+        source: &ZwpPrimarySelectionSourceV1,
         mime: String,
         write_pipe: smithay_client_toolkit::data_device_manager::WritePipe,
     ) {
-        self.primary.requests.push((mime, write_pipe));
+        self.primary
+            .source
+            .requests
+            .push((source.id(), mime, write_pipe));
     }
 
     fn cancelled(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &ZwpPrimarySelectionSourceV1,
+        source: &ZwpPrimarySelectionSourceV1,
     ) {
-        self.primary.cancelled = true;
+        self.primary.source.cancelled.push(source.id());
     }
+}
+
+delegate_noop!(MyWorld: ExtDataControlManagerV1);
+
+impl Dispatch<ExtDataControlSourceV1, SourceKind> for MyWorld {
+    fn event(
+        state: &mut Self,
+        source: &ExtDataControlSourceV1,
+        event: <ExtDataControlSourceV1 as Proxy>::Event,
+        kind: &SourceKind,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let events = match kind {
+            SourceKind::Clipboard => &mut state.clipboard.source,
+            SourceKind::Primary => &mut state.primary.source,
+        };
+        match event {
+            ext_data_control_source_v1::Event::Send { mime_type, fd } => {
+                events.requests.push((
+                    source.id(),
+                    mime_type,
+                    smithay_client_toolkit::data_device_manager::WritePipe::from(fd),
+                ));
+            }
+            ext_data_control_source_v1::Event::Cancelled => {
+                events.cancelled.push(source.id());
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ExtDataControlOfferV1, ControlOfferData> for MyWorld {
+    fn event(
+        _: &mut Self,
+        _: &ExtDataControlOfferV1,
+        event: <ExtDataControlOfferV1 as Proxy>::Event,
+        data: &ControlOfferData,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ext_data_control_offer_v1::Event::Offer { mime_type } = event {
+            data.mime_types.lock().unwrap().push(mime_type);
+        }
+    }
+}
+
+impl Dispatch<ExtDataControlDeviceV1, ()> for MyWorld {
+    fn event(
+        state: &mut Self,
+        device: &ExtDataControlDeviceV1,
+        event: <ExtDataControlDeviceV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let (events, offer) = match event {
+            ext_data_control_device_v1::Event::Selection { id } => {
+                (&mut state.clipboard.control, id)
+            }
+            ext_data_control_device_v1::Event::PrimarySelection { id } => {
+                (&mut state.primary.control, id)
+            }
+            ext_data_control_device_v1::Event::Finished => {
+                for events in [&mut state.clipboard.control, &mut state.primary.control] {
+                    if events.device() == Some(device) {
+                        events.offer = None;
+                        events.device = None;
+                    }
+                }
+                return;
+            }
+            _ => return,
+        };
+        let offer = offer.map(ControlOffer);
+        if events.device() == Some(device) {
+            events.offer = Some(offer.map_or(SelectionUpdate::Clear, SelectionUpdate::Set));
+        }
+    }
+
+    event_created_child!(MyWorld, ExtDataControlDeviceV1, [
+        EVT_DATA_OFFER_OPCODE => (ExtDataControlOfferV1, ControlOfferData::default()),
+    ]);
 }

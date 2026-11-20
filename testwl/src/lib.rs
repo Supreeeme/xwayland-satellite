@@ -6,6 +6,12 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
+use wayland_protocols::ext::data_control::v1::server::{
+    ext_data_control_device_v1::{self, ExtDataControlDeviceV1},
+    ext_data_control_manager_v1::{self, ExtDataControlManagerV1},
+    ext_data_control_offer_v1::{self, ExtDataControlOfferV1},
+    ext_data_control_source_v1::{self, ExtDataControlSourceV1},
+};
 use wayland_protocols::wp::linux_drm_syncobj::v1::server::wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1;
 use wayland_protocols::wp::primary_selection::zv1::server::zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1;
 use wayland_protocols::wp::primary_selection::zv1::server::zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1;
@@ -277,12 +283,13 @@ struct State {
     tablet: Option<ZwpTabletV2>,
     tablet_tool: Option<ZwpTabletToolV2>,
     configure_serial: u32,
-    clipboard: Option<WlDataSource>,
-    primary: Option<ZwpPrimarySelectionSourceV1>,
+    selections: [SeatSelection; 2],
     data_device_man: Option<WlDataDeviceManager>,
     data_device: Option<WlDataDevice>,
     primary_man: Option<ZwpPrimarySelectionDeviceManagerV1>,
     primary_device: Option<ZwpPrimarySelectionDeviceV1>,
+    control_data_device_man: Option<ExtDataControlManagerV1>,
+    control_devices: Vec<ExtDataControlDeviceV1>,
     xdg_activation: Option<XdgActivationV1>,
     valid_tokens: HashSet<String>,
     token_counter: u32,
@@ -309,12 +316,13 @@ impl Default for State {
             tablet: None,
             tablet_tool: None,
             configure_serial: 0,
-            clipboard: None,
-            primary: None,
+            selections: Default::default(),
             primary_man: None,
             primary_device: None,
             data_device_man: None,
             data_device: None,
+            control_data_device_man: None,
+            control_devices: Vec::new(),
             xdg_activation: None,
             valid_tokens: HashSet::new(),
             token_counter: 0,
@@ -377,6 +385,21 @@ impl State {
         self.keyboard.as_ref()?.current_focus
     }
 
+    /// Mirrors the compositor-side focus/serial check for
+    /// `wl_data_device.set_selection` and `zwp_primary_selection_device_v1.set_selection`:
+    /// the request is only accepted while the client has a focused surface whose last
+    /// keyboard enter serial is not newer than the given serial.
+    /// Rejected requests are ignored without cancelling the unpublished source.
+    fn keyboard_serial_valid(&self, serial: u32) -> bool {
+        let Some(focused) = self.get_focused() else {
+            return false;
+        };
+        self.surfaces
+            .get(&focused)
+            .and_then(|surface| surface.last_enter_serial)
+            .is_some_and(|last_enter| serial >= last_enter)
+    }
+
     #[track_caller]
     fn configure_popup(&mut self, surface_id: SurfaceId) {
         let surface = self.surfaces.get_mut(&surface_id).unwrap();
@@ -436,10 +459,8 @@ pub struct Server {
     state: State,
     client: Option<Client>,
     decorations_global: GlobalId,
+    control_global: GlobalId,
 }
-
-pub trait SendDataForMimeFn: FnMut(&str, &mut Server) -> bool {}
-impl<T> SendDataForMimeFn for T where T: FnMut(&str, &mut Server) -> bool {}
 
 impl Server {
     pub fn new(noops: bool) -> Self {
@@ -475,6 +496,7 @@ impl Server {
         dh.create_global::<State, WlSeat, _>(5, ());
         dh.create_global::<State, WlDataDeviceManager, _>(3, ());
         dh.create_global::<State, ZwpPrimarySelectionDeviceManagerV1, _>(1, ());
+        let control_global = dh.create_global::<State, ExtDataControlManagerV1, _>(1, ());
         dh.create_global::<State, ZwpTabletManagerV2, _>(1, ());
         dh.create_global::<State, XdgActivationV1, _>(1, ());
         let decorations_global = dh.create_global::<State, ZxdgDecorationManagerV1, _>(1, ());
@@ -539,6 +561,7 @@ impl Server {
             state: State::default(),
             client: None,
             decorations_global,
+            control_global,
         }
     }
 
@@ -668,190 +691,122 @@ impl Server {
         self.state.pointer.as_ref().unwrap().locked.as_ref()
     }
 
-    #[track_caller]
-    pub fn data_source_mimes(&self) -> Vec<String> {
-        let Some(selection) = &self.state.clipboard else {
-            panic!("No selection set on data device");
-        };
-
-        let data: &Mutex<DataSourceData> = selection.data().unwrap();
-        let data = data.lock().unwrap();
-        data.mimes.to_vec()
+    pub fn source_backend(&self, kind: SelectionKind) -> Option<SelectionBackend> {
+        self.state.selections[kind as usize]
+            .source
+            .as_ref()
+            .map(|source| match source {
+                SelectionSource::Control(_) => SelectionBackend::ExtDataControl,
+                _ => SelectionBackend::Core,
+            })
     }
 
-    #[track_caller]
-    pub fn primary_source_mimes(&self) -> Vec<String> {
-        let Some(selection) = &self.state.primary else {
-            panic!("No selection set on primary device");
-        };
-
-        let data: &Mutex<DataSourceData> = selection.data().unwrap();
-        let data = data.lock().unwrap();
-        data.mimes.to_vec()
+    pub fn source_mimes(&self, kind: SelectionKind) -> Vec<String> {
+        self.state.selections[kind as usize]
+            .source
+            .as_ref()
+            .expect("no selection source")
+            .mimes()
     }
 
-    fn paste_impl(
+    pub fn paste_data(
         &mut self,
-        data: &Mutex<DataSourceData>,
-        mut send_data_for_mime: impl SendDataForMimeFn,
-        mut send_selection: impl FnMut(String, std::os::unix::io::BorrowedFd),
+        kind: SelectionKind,
+        mut send_data_for_mime: impl FnMut(&str, &mut Server) -> bool,
     ) -> Vec<PasteData> {
-        struct PendingData {
-            rx: std::fs::File,
-            data: Vec<u8>,
-        }
-        type PendingRet = Vec<(String, Option<PendingData>)>;
-        let mut pending_ret: PendingRet = {
-            data.lock()
-                .unwrap()
-                .mimes
-                .iter()
-                .rev()
-                .map(|mime| (mime.clone(), None))
-                .collect()
-        };
-
-        let mut ret = Vec::new();
-        while let Some((mime, pending)) = pending_ret.pop() {
-            let mut pending = pending.unwrap_or_else(|| {
-                let (rx, tx) = rustix::pipe::pipe().unwrap();
-                send_selection(mime.clone(), tx.as_fd());
-                drop(tx);
-
-                let rx = std::fs::File::from(rx);
-                PendingData {
-                    rx,
-                    data: Vec::new(),
-                }
-            });
-
+        let source = self.state.selections[kind as usize]
+            .source
+            .clone()
+            .expect("no selection source");
+        let mut result = Vec::new();
+        for mime_type in source.mimes() {
+            let (rx, tx) = rustix::pipe::pipe().unwrap();
+            source.send(mime_type.clone(), tx.as_fd());
+            drop(tx);
             self.display.flush_clients().unwrap();
-            let transfer_complete = send_data_for_mime(&mime, self);
-            if transfer_complete {
-                pending.rx.read_to_end(&mut pending.data).unwrap();
-                ret.push(PasteData {
-                    mime_type: mime,
-                    data: pending.data,
-                });
-            } else {
-                loop {
-                    match pending.rx.read(&mut pending.data) {
-                        Ok(0) => break,
-                        Ok(_) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                        Err(e) => panic!("Failed reading data for mime {mime}: {e:?}"),
-                    }
-                }
-                pending_ret.push((mime, Some(pending)));
+
+            // Drain the pipe while the sender runs, including between INCR chunks.
+            let reader = std::thread::spawn(move || {
+                let mut data = Vec::new();
+                std::fs::File::from(rx).read_to_end(&mut data).unwrap();
+                data
+            });
+            while !send_data_for_mime(&mime_type, self) {
                 self.dispatch();
             }
+            result.push(PasteData {
+                mime_type,
+                data: reader.join().unwrap(),
+            });
         }
-
-        ret
+        result
     }
 
-    #[track_caller]
-    pub fn clipboard_paste_data(
-        &mut self,
-        send_data_for_mime: impl SendDataForMimeFn,
-    ) -> Vec<PasteData> {
-        let Some(selection) = self.state.clipboard.take() else {
-            panic!("No selection set on data device");
-        };
-
-        let ret = self.paste_impl(
-            selection.data().unwrap(),
-            send_data_for_mime,
-            |mime_type, fd| selection.send(mime_type, fd),
-        );
-        self.state.clipboard = Some(selection);
-        ret
-    }
-
-    #[track_caller]
-    pub fn primary_paste_data(
-        &mut self,
-        send_data_for_mime: impl SendDataForMimeFn,
-    ) -> Vec<PasteData> {
-        let Some(selection) = self.state.primary.take() else {
-            panic!("No selection set on primary data device");
-        };
-
-        let ret = self.paste_impl(
-            selection.data().unwrap(),
-            send_data_for_mime,
-            |mime_type, fd| selection.send(mime_type, fd),
-        );
-        self.state.primary = Some(selection);
-        ret
-    }
-
-    pub fn data_source_exists(&self) -> bool {
-        self.state.clipboard.is_none()
-    }
-
-    #[track_caller]
-    pub fn create_data_offer(&mut self, data: Vec<PasteData>) {
-        let Some(dev) = &self.state.data_device else {
-            panic!("No data device created");
-        };
-
-        if let Some(selection) = self.state.clipboard.take() {
-            selection.cancelled();
+    pub fn create_offer(&mut self, kind: SelectionKind, data: Vec<PasteData>) {
+        let client = self.client.as_ref().unwrap();
+        match kind {
+            SelectionKind::Clipboard => {
+                let device = self.state.data_device.as_ref().unwrap();
+                let offer = client
+                    .create_resource::<WlDataOffer, _, State>(&self.dh, 3, data.clone())
+                    .unwrap();
+                device.data_offer(&offer);
+                for item in &data {
+                    offer.offer(item.mime_type.clone());
+                }
+                device.selection(Some(&offer));
+            }
+            SelectionKind::Primary => {
+                let device = self.state.primary_device.as_ref().unwrap();
+                let offer = client
+                    .create_resource::<ZwpPrimarySelectionOfferV1, _, State>(
+                        &self.dh,
+                        1,
+                        data.clone(),
+                    )
+                    .unwrap();
+                device.data_offer(&offer);
+                for item in &data {
+                    offer.offer(item.mime_type.clone());
+                }
+                device.selection(Some(&offer));
+            }
         }
+        self.set_control_offer(kind, Some(data));
+    }
 
-        let mimes: Vec<_> = data.iter().map(|m| m.mime_type.clone()).collect();
-        let offer = self
-            .client
-            .as_ref()
-            .unwrap()
-            .create_resource::<_, _, State>(&self.dh, 3, data)
-            .unwrap();
-        dev.data_offer(&offer);
-        for mime in mimes {
-            offer.offer(mime);
+    /// Replace the selection and notify just the focus-independent devices.
+    pub fn set_control_offer(&mut self, kind: SelectionKind, contents: Option<Vec<PasteData>>) {
+        self.state.selections[kind as usize].cancel_source();
+        self.send_control_offer(kind, contents);
+    }
+
+    /// Send the offer separately so tests can dispatch it before cancellation.
+    pub fn send_control_offer(&mut self, kind: SelectionKind, contents: Option<Vec<PasteData>>) {
+        self.state.selections[kind as usize].contents = contents;
+        self.announce_control_selection(kind);
+    }
+
+    pub fn announce_control_selection(&mut self, kind: SelectionKind) {
+        for device in &self.state.control_devices {
+            self.state.announce_control_selection(
+                &self.dh,
+                self.client.as_ref().unwrap(),
+                device,
+                kind,
+            );
         }
-        dev.selection(Some(&offer));
         self.display.flush_clients().unwrap();
     }
 
-    #[track_caller]
-    pub fn create_primary_offer(&mut self, data: Vec<PasteData>) {
-        let Some(dev) = &self.state.primary_device else {
-            panic!("No primary device created");
-        };
-
-        if let Some(selection) = self.state.primary.take() {
-            selection.cancelled();
-        }
-
-        let mimes: Vec<_> = data.iter().map(|m| m.mime_type.clone()).collect();
-        let offer = self
-            .client
-            .as_ref()
-            .unwrap()
-            .create_resource::<_, _, State>(&self.dh, 1, data)
-            .unwrap();
-        dev.data_offer(&offer);
-        for mime in mimes {
-            offer.offer(mime);
-        }
-        dev.selection(Some(&offer));
+    pub fn cancel_previous_source(&mut self, kind: SelectionKind) {
+        self.state.selections[kind as usize].cancel_source();
         self.display.flush_clients().unwrap();
     }
 
-    #[track_caller]
     pub fn empty_data_offer(&mut self) {
-        let Some(dev) = &self.state.data_device else {
-            panic!("No data device created");
-        };
-
-        if let Some(selection) = self.state.clipboard.take() {
-            selection.cancelled();
-        }
-
-        dev.selection(None);
-        self.display.flush_clients().unwrap();
+        self.state.data_device.as_ref().unwrap().selection(None);
+        self.set_control_offer(SelectionKind::Clipboard, None);
     }
 
     #[track_caller]
@@ -972,6 +927,12 @@ impl Server {
             .remove_global::<State>(self.decorations_global.clone());
     }
 
+    pub fn disable_ext_data_control_global(&self) {
+        self.display
+            .handle()
+            .remove_global::<State>(self.control_global.clone());
+    }
+
     #[track_caller]
     pub fn get_buffer_dimensions(&self, buffer: &WlBuffer) -> Vec2 {
         *self
@@ -982,10 +943,87 @@ impl Server {
     }
 }
 
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum SelectionBackend {
+    Core,
+    ExtDataControl,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SelectionKind {
+    Clipboard,
+    Primary,
+}
+
+#[derive(Clone, PartialEq)]
+enum SelectionSource {
+    Clipboard(WlDataSource),
+    Primary(ZwpPrimarySelectionSourceV1),
+    Control(ExtDataControlSourceV1),
+}
+
+impl SelectionSource {
+    fn mimes(&self) -> Vec<String> {
+        let data: &Mutex<DataSourceData> = match self {
+            Self::Clipboard(s) => s.data(),
+            Self::Primary(s) => s.data(),
+            Self::Control(s) => s.data(),
+        }
+        .unwrap();
+        data.lock().unwrap().mimes.clone()
+    }
+
+    fn send(&self, mime: String, fd: BorrowedFd<'_>) {
+        match self {
+            Self::Clipboard(s) => s.send(mime, fd),
+            Self::Primary(s) => s.send(mime, fd),
+            Self::Control(s) => s.send(mime, fd),
+        }
+    }
+}
+
+#[derive(Default)]
+struct SeatSelection {
+    source: Option<SelectionSource>,
+    // Kept separately so a test can delay cancellation of the previous source.
+    contents: Option<Vec<PasteData>>,
+}
+
+impl SeatSelection {
+    fn cancel_source(&mut self) {
+        match self.source.take() {
+            Some(SelectionSource::Clipboard(s)) => s.cancelled(),
+            Some(SelectionSource::Primary(s)) => s.cancelled(),
+            Some(SelectionSource::Control(s)) => s.cancelled(),
+            None => {}
+        }
+    }
+
+    fn set_source(&mut self, source: Option<SelectionSource>) {
+        self.cancel_source();
+        self.source = source;
+        self.contents = None;
+    }
+
+    fn source_destroyed(&mut self, source: &SelectionSource) {
+        if self.source.as_ref() == Some(source) {
+            self.source = None;
+        }
+    }
+}
+
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct PasteData {
     pub mime_type: String,
     pub data: Vec<u8>,
+}
+
+fn send_offer_data(items: &[PasteData], mime: &str, fd: OwnedFd) {
+    let item = items
+        .iter()
+        .find(|item| item.mime_type == mime)
+        .unwrap_or_else(|| panic!("Invalid mime type: {mime}"));
+    TransferFd::from(fd).write_all(&item.data).unwrap();
 }
 
 #[rustversion::since(1.87)]
@@ -1229,12 +1267,7 @@ impl Dispatch<ZwpPrimarySelectionOfferV1, Vec<PasteData>> for State {
         use wayland_protocols::wp::primary_selection::zv1::server::zwp_primary_selection_offer_v1::Request;
         match request {
             Request::Receive { mime_type, fd } => {
-                let pos = data
-                    .iter()
-                    .position(|data| data.mime_type == mime_type)
-                    .unwrap_or_else(|| panic!("Invalid mime type: {mime_type}"));
-
-                TransferFd::from(fd).write_all(&data[pos].data).unwrap();
+                send_offer_data(data, &mime_type, fd);
             }
             Request::Destroy => {}
             other => todo!("{other:?}"),
@@ -1246,7 +1279,7 @@ impl Dispatch<ZwpPrimarySelectionSourceV1, Mutex<DataSourceData>> for State {
     fn request(
         state: &mut Self,
         _: &Client,
-        _: &ZwpPrimarySelectionSourceV1,
+        source: &ZwpPrimarySelectionSourceV1,
         request: <ZwpPrimarySelectionSourceV1 as Resource>::Request,
         data: &Mutex<DataSourceData>,
         _: &DisplayHandle,
@@ -1258,7 +1291,8 @@ impl Dispatch<ZwpPrimarySelectionSourceV1, Mutex<DataSourceData>> for State {
                 data.lock().unwrap().mimes.push(mime_type);
             }
             Request::Destroy => {
-                state.primary = None;
+                state.selections[SelectionKind::Primary as usize]
+                    .source_destroyed(&SelectionSource::Primary(source.clone()));
             }
             _ => todo!("{request:?}"),
         }
@@ -1277,8 +1311,12 @@ impl Dispatch<ZwpPrimarySelectionDeviceV1, WlSeat> for State {
     ) {
         use wayland_protocols::wp::primary_selection::zv1::server::zwp_primary_selection_device_v1::Request;
         match request {
-            Request::SetSelection { source, .. } => {
-                state.primary = source;
+            Request::SetSelection { source, serial } => {
+                if !state.keyboard_serial_valid(serial) {
+                    return;
+                }
+                state.selections[SelectionKind::Primary as usize]
+                    .set_source(source.map(SelectionSource::Primary));
             }
             Request::Destroy => {
                 state.primary_device = None;
@@ -1313,12 +1351,7 @@ impl Dispatch<WlDataOffer, Vec<PasteData>> for State {
     ) {
         match request {
             wl_data_offer::Request::Receive { mime_type, fd } => {
-                let pos = data
-                    .iter()
-                    .position(|data| data.mime_type == mime_type)
-                    .unwrap_or_else(|| panic!("Invalid mime type: {mime_type}"));
-
-                TransferFd::from(fd).write_all(&data[pos].data).unwrap();
+                send_offer_data(data, &mime_type, fd);
             }
             wl_data_offer::Request::Destroy => {}
             other => todo!("unhandled request: {other:?}"),
@@ -1330,7 +1363,7 @@ impl Dispatch<WlDataSource, Mutex<DataSourceData>> for State {
     fn request(
         state: &mut Self,
         _: &Client,
-        _: &WlDataSource,
+        source: &WlDataSource,
         request: <WlDataSource as Resource>::Request,
         data: &Mutex<DataSourceData>,
         _: &DisplayHandle,
@@ -1342,7 +1375,8 @@ impl Dispatch<WlDataSource, Mutex<DataSourceData>> for State {
                 data.mimes.push(mime_type);
             }
             wl_data_source::Request::Destroy => {
-                state.clipboard = None;
+                state.selections[SelectionKind::Clipboard as usize]
+                    .source_destroyed(&SelectionSource::Clipboard(source.clone()));
             }
             other => todo!("unhandled request {other:?}"),
         }
@@ -1360,8 +1394,12 @@ impl Dispatch<WlDataDevice, WlSeat> for State {
         _: &mut wayland_server::DataInit<'_, Self>,
     ) {
         match request {
-            wl_data_device::Request::SetSelection { source, .. } => {
-                state.clipboard = source;
+            wl_data_device::Request::SetSelection { source, serial } => {
+                if !state.keyboard_serial_valid(serial) {
+                    return;
+                }
+                state.selections[SelectionKind::Clipboard as usize]
+                    .set_source(source.map(SelectionSource::Clipboard));
             }
             wl_data_device::Request::Release => {
                 state.data_device = None;
@@ -1389,6 +1427,160 @@ impl Dispatch<WlDataDeviceManager, ()> for State {
                 state.data_device = Some(data_init.init(id, seat));
             }
             other => todo!("unhandled request: {other:?}"),
+        }
+    }
+}
+
+impl GlobalDispatch<ExtDataControlManagerV1, ()> for State {
+    fn bind(
+        state: &mut Self,
+        _: &DisplayHandle,
+        _: &Client,
+        resource: wayland_server::New<ExtDataControlManagerV1>,
+        _: &(),
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        state.control_data_device_man = Some(data_init.init(resource, ()));
+    }
+}
+
+impl State {
+    fn announce_control_selection(
+        &self,
+        dh: &DisplayHandle,
+        client: &Client,
+        device: &ExtDataControlDeviceV1,
+        kind: SelectionKind,
+    ) {
+        let selection = &self.selections[kind as usize];
+        let data = selection.contents.clone().or_else(|| {
+            selection.source.as_ref().map(|source| {
+                source
+                    .mimes()
+                    .into_iter()
+                    .map(|mime_type| PasteData {
+                        mime_type,
+                        data: Vec::new(),
+                    })
+                    .collect()
+            })
+        });
+        let offer = data.map(|data| {
+            let offer = client
+                .create_resource::<ExtDataControlOfferV1, _, State>(dh, 1, data)
+                .unwrap();
+            device.data_offer(&offer);
+            for mime in offer.data::<Vec<PasteData>>().unwrap() {
+                offer.offer(mime.mime_type.clone());
+            }
+            offer
+        });
+        match kind {
+            SelectionKind::Clipboard => device.selection(offer.as_ref()),
+            SelectionKind::Primary => device.primary_selection(offer.as_ref()),
+        }
+    }
+}
+
+impl Dispatch<ExtDataControlManagerV1, ()> for State {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        _: &ExtDataControlManagerV1,
+        request: <ExtDataControlManagerV1 as Resource>::Request,
+        _: &(),
+        dh: &DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            ext_data_control_manager_v1::Request::CreateDataSource { id } => {
+                data_init.init(id, DataSourceData::default().into());
+            }
+            ext_data_control_manager_v1::Request::GetDataDevice { id, seat } => {
+                let device = data_init.init(id, seat);
+                state.announce_control_selection(dh, client, &device, SelectionKind::Clipboard);
+                state.announce_control_selection(dh, client, &device, SelectionKind::Primary);
+                state.control_devices.push(device);
+            }
+            ext_data_control_manager_v1::Request::Destroy => {
+                state.control_data_device_man = None;
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<ExtDataControlSourceV1, Mutex<DataSourceData>> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        source: &ExtDataControlSourceV1,
+        request: <ExtDataControlSourceV1 as Resource>::Request,
+        data: &Mutex<DataSourceData>,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            ext_data_control_source_v1::Request::Offer { mime_type } => {
+                data.lock().unwrap().mimes.push(mime_type);
+            }
+            ext_data_control_source_v1::Request::Destroy => {
+                let source = SelectionSource::Control(source.clone());
+                for selection in &mut state.selections {
+                    selection.source_destroyed(&source);
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<ExtDataControlOfferV1, Vec<PasteData>> for State {
+    fn request(
+        _: &mut Self,
+        _: &Client,
+        _: &ExtDataControlOfferV1,
+        request: <ExtDataControlOfferV1 as Resource>::Request,
+        data: &Vec<PasteData>,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            ext_data_control_offer_v1::Request::Receive { mime_type, fd } => {
+                send_offer_data(data, &mime_type, fd);
+            }
+            ext_data_control_offer_v1::Request::Destroy => {}
+            other => todo!("unhandled request: {other:?}"),
+        }
+    }
+}
+
+impl Dispatch<ExtDataControlDeviceV1, WlSeat> for State {
+    fn request(
+        state: &mut Self,
+        _: &Client,
+        device: &ExtDataControlDeviceV1,
+        request: <ExtDataControlDeviceV1 as Resource>::Request,
+        _: &WlSeat,
+        _: &DisplayHandle,
+        _: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            // Data-control is the focus-independent path. A single server-side
+            // selection per kind is shared between the core and control protocols,
+            // so installing one here replaces whatever the other protocol published.
+            ext_data_control_device_v1::Request::SetSelection { source } => {
+                state.selections[SelectionKind::Clipboard as usize]
+                    .set_source(source.map(SelectionSource::Control));
+            }
+            ext_data_control_device_v1::Request::SetPrimarySelection { source } => {
+                state.selections[SelectionKind::Primary as usize]
+                    .set_source(source.map(SelectionSource::Control));
+            }
+            ext_data_control_device_v1::Request::Destroy => {
+                state.control_devices.retain(|d| d != device);
+            }
+            _ => unreachable!(),
         }
     }
 }

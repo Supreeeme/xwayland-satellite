@@ -1446,7 +1446,9 @@ impl<S: X11Selection> GlobalDispatch<WlSeat, Global> for InnerServerState<S> {
             .registry()
             .bind::<client::wl_seat::WlSeat, _, _>(data.name, server.version(), &state.qh, entity);
 
-        state.selection_states.seat_created(&state.qh, &client);
+        state
+            .selection_states
+            .seat_created(&state.qh, &client, &mut state.world);
         state.world.spawn_at(entity, (server, client));
     }
 }

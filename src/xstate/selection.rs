@@ -1,5 +1,7 @@
 use super::{XState, get_atom_name};
-use crate::server::selection::{Clipboard, ForeignSelection, Primary, SelectionType};
+use crate::server::selection::{
+    Clipboard, ForeignSelection, Primary, SelectionType, SelectionUpdate,
+};
 use crate::{RealServerState, X11Selection};
 use log::{debug, error, warn};
 use rustix::event::{PollFd, PollFlags, poll};
@@ -15,7 +17,6 @@ struct SelectionTargetId {
     name: String,
     target: x::Atom,
     property: x::Atom,
-    source: Option<String>,
 }
 
 struct PendingSelectionData {
@@ -233,7 +234,7 @@ pub struct WaylandIncrInfo {
 }
 
 pub struct WaylandSelection<T: SelectionType> {
-    mimes: Vec<SelectionTargetId>,
+    targets: Vec<(x::Atom, String)>,
     inner: ForeignSelection<T>,
     incr_data: Option<WaylandIncrInfo>,
 }
@@ -339,6 +340,74 @@ impl<T: SelectionType> SelectionData<T> {
             current_selection: None,
         }
     }
+
+    fn update_from_wayland(
+        &mut self,
+        connection: &xcb::Connection,
+        wm_window: x::Window,
+        update: SelectionUpdate<ForeignSelection<T>>,
+    ) {
+        let SelectionUpdate::Set(selection) = update else {
+            self.clear_wayland_owner(connection, wm_window);
+            return;
+        };
+
+        let intern = |name: &str| {
+            connection
+                .wait_for_reply(connection.send_request(&x::InternAtom {
+                    only_if_exists: false,
+                    name: name.as_bytes(),
+                }))
+                .unwrap()
+                .atom()
+        };
+        let offered = &selection.mime_types;
+        let mut targets: Vec<_> = offered
+            .iter()
+            .map(|mime| (intern(mime), mime.clone()))
+            .collect();
+        const UTF8_MIME: &str = "text/plain;charset=utf-8";
+        if offered.iter().any(|mime| mime == UTF8_MIME)
+            && !offered.iter().any(|mime| mime == "UTF8_STRING")
+        {
+            targets.push((intern("UTF8_STRING"), UTF8_MIME.to_owned()));
+        }
+
+        if self.set_owner(connection, wm_window) {
+            self.current_selection = Some(CurrentSelection::Wayland(WaylandSelection {
+                targets,
+                inner: selection,
+                incr_data: None,
+            }));
+            debug!("{:?} set from Wayland", T::KIND);
+        }
+    }
+
+    fn clear_wayland_owner(&mut self, connection: &xcb::Connection, wm_window: x::Window) {
+        if !matches!(self.current_selection, Some(CurrentSelection::Wayland(_))) {
+            return;
+        }
+        self.current_selection = None;
+        // An X client may have claimed ownership since we last dispatched XFixes.
+        // Make the ownership check and release atomic with respect to other clients.
+        connection.send_request(&x::GrabServer {});
+        match connection.wait_for_reply(connection.send_request(&x::GetSelectionOwner {
+            selection: self.atom,
+        })) {
+            Ok(reply) if reply.owner() == wm_window => {
+                connection.send_request(&x::SetSelectionOwner {
+                    owner: x::WINDOW_NONE,
+                    selection: self.atom,
+                    time: x::CURRENT_TIME,
+                });
+            }
+            Err(error) => warn!("Could not query selection owner: {error:?}"),
+            _ => {}
+        }
+        connection.send_request(&x::UngrabServer {});
+        let _ = connection.flush();
+    }
+
     fn wayland_selection_mut(&mut self) -> Option<&mut WaylandSelection<T>> {
         match &mut self.current_selection {
             Some(CurrentSelection::Wayland(sel)) => Some(sel),
@@ -494,7 +563,6 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
                     name,
                     target,
                     property,
-                    source: None,
                 }
             })
             .collect();
@@ -530,7 +598,7 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
         server_state: &mut RealServerState,
     ) -> bool {
         let Some(CurrentSelection::Wayland(WaylandSelection {
-            mimes,
+            targets,
             inner,
             incr_data,
         })) = &mut self.current_selection
@@ -541,7 +609,7 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
 
         let req_target = request.target();
         if req_target == atoms.targets {
-            let atoms: Box<[x::Atom]> = mimes.iter().map(|t| t.target).collect();
+            let atoms: Box<[x::Atom]> = targets.iter().map(|(atom, _)| *atom).collect();
 
             match connection.send_and_check_request(&x::ChangeProperty {
                 mode: x::PropMode::Replace,
@@ -557,7 +625,7 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
                 }
             }
         } else {
-            let Some(target) = mimes.iter().find(|t| t.target == req_target) else {
+            let Some((_, mime)) = targets.iter().find(|(atom, _)| *atom == req_target) else {
                 if log::log_enabled!(log::Level::Debug) {
                     let name = get_atom_name(connection, req_target);
                     debug!(
@@ -567,12 +635,7 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
                 return false;
             };
 
-            let mime_name = target
-                .source
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| target.name.clone());
-            let data = inner.receive(mime_name, server_state);
+            let data = inner.receive(mime.clone(), server_state);
             if data.len() > max_req_bytes {
                 if let Err(e) = connection.send_and_check_request(&x::ChangeWindowAttributes {
                     window: request.requestor(),
@@ -593,14 +656,14 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
                 }
                 debug!(
                     "beginning incr for {}",
-                    get_atom_name(connection, target.target)
+                    get_atom_name(connection, req_target)
                 );
                 *incr_data = Some(WaylandIncrInfo {
                     data,
                     start: 0,
                     target_window: request.requestor(),
                     property: request.property(),
-                    target_type: target.target,
+                    target_type: req_target,
                     max_req_bytes,
                 });
                 true
@@ -609,7 +672,7 @@ impl<T: SelectionType> SelectionDataImpl for SelectionData<T> {
                     mode: x::PropMode::Replace,
                     window: request.requestor(),
                     property: request.property(),
-                    r#type: target.target,
+                    r#type: req_target,
                     data: &data,
                 }) {
                     Ok(_) => true,
@@ -657,129 +720,21 @@ impl SelectionState {
 }
 
 impl XState {
-    fn intern_target_property_atoms(&self, mime: &[u8], suffix: &[u8]) -> (x::Atom, x::Atom) {
-        // A concatenation of the target and the selection type are used to create a distinct
-        // property to write to
-        let target = self
-            .connection
-            .wait_for_reply(self.connection.send_request(&x::InternAtom {
-                only_if_exists: false,
-                name: mime,
-            }))
-            .unwrap()
-            .atom();
-        let property = self
-            .connection
-            .wait_for_reply(self.connection.send_request(&x::InternAtom {
-                only_if_exists: false,
-                name: &[mime, suffix].concat(),
-            }))
-            .unwrap()
-            .atom();
-        (target, property)
+    pub(crate) fn set_clipboard(&mut self, update: SelectionUpdate<ForeignSelection<Clipboard>>) {
+        self.selection_state.clipboard.update_from_wayland(
+            &self.connection,
+            self.wm_window,
+            update,
+        );
     }
 
-    pub(crate) fn set_clipboard(&mut self, selection: ForeignSelection<Clipboard>) {
-        let mut utf8_xwl = false;
-        let mut utf8_wl = false;
-        let mut mimes: Vec<SelectionTargetId> = selection
-            .mime_types
-            .iter()
-            .map(|mime| {
-                match mime.as_str() {
-                    "UTF8_STRING" => utf8_xwl = true,
-                    "text/plain;charset=utf-8" => utf8_wl = true,
-                    _ => {}
-                }
-
-                let (target, property) =
-                    self.intern_target_property_atoms(mime.as_bytes(), b"_CLIPBOARD");
-                SelectionTargetId {
-                    name: mime.clone(),
-                    target,
-                    property,
-                    source: None,
-                }
-            })
-            .collect();
-
-        if utf8_wl && !utf8_xwl {
-            let name = "UTF8_STRING".to_string();
-            let (target, property) =
-                self.intern_target_property_atoms(name.as_bytes(), b"_CLIPBOARD");
-            mimes.push(SelectionTargetId {
-                name,
-                target,
-                property,
-                source: Some("text/plain;charset=utf-8".to_string()),
-            });
-        }
-
-        if self
-            .selection_state
-            .clipboard
-            .set_owner(&self.connection, self.wm_window)
-        {
-            self.selection_state.clipboard.current_selection =
-                Some(CurrentSelection::Wayland(WaylandSelection {
-                    mimes,
-                    inner: selection,
-                    incr_data: None,
-                }));
-
-            debug!("Clipboard set from Wayland");
-        }
-    }
-
-    pub(crate) fn set_primary_selection(&mut self, selection: ForeignSelection<Primary>) {
-        let mut utf8_xwl = false;
-        let mut utf8_wl = false;
-        let mut mimes: Vec<SelectionTargetId> = selection
-            .mime_types
-            .iter()
-            .map(|mime| {
-                match mime.as_str() {
-                    "UTF8_STRING" => utf8_xwl = true,
-                    "text/plain;charset=utf-8" => utf8_wl = true,
-                    _ => {}
-                }
-
-                let (target, property) =
-                    self.intern_target_property_atoms(mime.as_bytes(), b"_PRIMARY");
-                SelectionTargetId {
-                    name: mime.clone(),
-                    target,
-                    property,
-                    source: None,
-                }
-            })
-            .collect();
-
-        if utf8_wl && !utf8_xwl {
-            let name = "UTF8_STRING".to_string();
-            let (target, property) =
-                self.intern_target_property_atoms(name.as_bytes(), b"_PRIMARY");
-            mimes.push(SelectionTargetId {
-                name,
-                target,
-                property,
-                source: Some("text/plain;charset=utf-8".to_string()),
-            });
-        }
-
-        if self
-            .selection_state
+    pub(crate) fn set_primary_selection(
+        &mut self,
+        update: SelectionUpdate<ForeignSelection<Primary>>,
+    ) {
+        self.selection_state
             .primary
-            .set_owner(&self.connection, self.wm_window)
-        {
-            self.selection_state.primary.current_selection =
-                Some(CurrentSelection::Wayland(WaylandSelection {
-                    mimes,
-                    inner: selection,
-                    incr_data: None,
-                }));
-            debug!("Primary set from Wayland");
-        }
+            .update_from_wayland(&self.connection, self.wm_window, update);
     }
 
     pub(super) fn handle_selection_event(
@@ -909,6 +864,10 @@ impl XState {
 
                         let data = get_selection_data!(x);
 
+                        if e.owner() == x::WINDOW_NONE {
+                            data.selection_clear();
+                            return true;
+                        }
                         data.handle_new_owner(
                             &self.connection,
                             self.wm_window,
@@ -920,7 +879,7 @@ impl XState {
                     xcb::xfixes::SelectionEvent::SelectionClientClose
                     | xcb::xfixes::SelectionEvent::SelectionWindowDestroy => {
                         debug!("Selection owner destroyed, selection will be unset");
-                        self.selection_state.clipboard.current_selection = None;
+                        get_selection_data!(x).selection_clear();
                     }
                 },
                 x if x == self.atoms.xsettings => match e.subtype() {
