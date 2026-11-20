@@ -65,6 +65,9 @@ Additionally, satellite can *optionally* take advantage of the following protoco
 - Pointer constraints
 - Tablet input
 - Fractional scale
+- Ext data control
+
+Clipboard synchronization prefers `ext-data-control-v1` when available, so background X11 clients can read and write the current Wayland selection without keyboard focus. Compositors without it continue using the core data-device and primary-selection protocols, with their usual focus and input-serial restrictions.
 
 ## Compositor integration
 Satellite supports passing through the `-listenfd` Xwayland argument. What this means is you can integrate satellite

@@ -228,10 +228,10 @@ impl super::XConnection for FakeXConnection {
     #[track_caller]
     fn focus_window(&mut self, window: Window, _output_name: Option<String>) {
         assert!(
-            self.windows.contains_key(&window),
+            window == x::WINDOW_NONE || self.windows.contains_key(&window),
             "Unknown window: {window:?}"
         );
-        self.focused_window = window.into();
+        self.focused_window = (window != x::WINDOW_NONE).then_some(window);
     }
 
     fn raise_to_top(&mut self, window: Window) {
@@ -1366,6 +1366,9 @@ trait SelectionTest {
     ) -> Vec<testwl::PasteData>;
     fn backend(testwl: &testwl::Server) -> Option<testwl::SelectionBackend>;
     fn create_offer(testwl: &mut testwl::Server, data: Vec<testwl::PasteData>);
+    fn create_control_offer(testwl: &mut testwl::Server, data: Vec<testwl::PasteData>);
+    fn echo_control_selection(testwl: &mut testwl::Server);
+    fn cancel_control_selection(testwl: &mut testwl::Server);
 }
 
 macro_rules! selection_tests {
@@ -1377,7 +1380,10 @@ macro_rules! selection_tests {
         $get_control_mime_fn:ident,
         $get_control_paste_data_fn:ident,
         $get_backend_fn:ident,
-        $create_offer_fn:ident
+        $create_offer_fn:ident,
+        $create_control_offer_fn:ident,
+        $echo_control_selection_fn:ident,
+        $cancel_control_selection_fn:ident
     ) => {
         impl SelectionTest for $selection_type {
             type SelectionType = $selection_type;
@@ -1405,6 +1411,15 @@ macro_rules! selection_tests {
             fn create_offer(testwl: &mut testwl::Server, data: Vec<testwl::PasteData>) {
                 testwl.$create_offer_fn(data);
             }
+            fn create_control_offer(testwl: &mut testwl::Server, data: Vec<testwl::PasteData>) {
+                testwl.$create_control_offer_fn(data);
+            }
+            fn echo_control_selection(testwl: &mut testwl::Server) {
+                testwl.$echo_control_selection_fn();
+            }
+            fn cancel_control_selection(testwl: &mut testwl::Server) {
+                testwl.$cancel_control_selection_fn();
+            }
         }
 
         mod $name {
@@ -1420,13 +1435,18 @@ macro_rules! selection_tests {
             }
 
             #[test]
+            fn copy_from_x11_after_focus_lost() {
+                super::copy_from_x11_after_focus_lost::<$selection_type>();
+            }
+
+            #[test]
             fn copy_from_x11_without_ext_data_control() {
                 super::copy_from_x11_without_ext_data_control::<$selection_type>();
             }
 
             #[test]
-            fn selection_ext_then_core() {
-                super::selection_ext_then_core::<$selection_type>();
+            fn selection_replacement_keeps_ext() {
+                super::selection_replacement_keeps_ext::<$selection_type>();
             }
 
             #[test]
@@ -1437,6 +1457,21 @@ macro_rules! selection_tests {
             #[test]
             fn x11_then_wayland() {
                 super::selection_x11_then_wayland::<$selection_type>();
+            }
+
+            #[test]
+            fn wayland_offer_after_x11_write_without_refocus() {
+                super::wayland_offer_after_x11_write_without_refocus::<$selection_type>();
+            }
+
+            #[test]
+            fn cancelled_control_source_allows_wayland_offer() {
+                super::cancelled_control_source_allows_wayland_offer::<$selection_type>();
+            }
+
+            #[test]
+            fn own_control_selection_echo_is_ignored() {
+                super::own_control_selection_echo_is_ignored::<$selection_type>();
             }
         }
     };
@@ -1450,7 +1485,10 @@ selection_tests!(
     control_data_source_mimes,
     control_clipboard_paste_data,
     clipboard_source_backend,
-    create_data_offer
+    create_data_offer,
+    create_control_data_offer,
+    echo_control_selection,
+    cancel_control_selection
 );
 selection_tests!(
     primary,
@@ -1460,7 +1498,10 @@ selection_tests!(
     control_primary_source_mimes,
     control_primary_paste_data,
     primary_source_backend,
-    create_primary_offer
+    create_primary_offer,
+    create_control_primary_offer,
+    echo_control_primary_selection,
+    cancel_control_primary_selection
 );
 
 fn copy_from_x11<T: SelectionTest>() {
@@ -1482,8 +1523,15 @@ fn copy_from_x11<T: SelectionTest>() {
     f.satellite.set_selection_source::<T::SelectionType>(&mimes);
     f.run();
 
-    assert_eq!(T::backend(&f.testwl), Some(testwl::SelectionBackend::Core));
+    // Ext-data-control is preferred whenever the compositor advertises it, even
+    // though this client has received keyboard focus and has an input serial.
+    assert_eq!(
+        T::backend(&f.testwl),
+        Some(testwl::SelectionBackend::ExtDataControl)
+    );
 
+    // A regular Wayland clipboard reader must see the ext-data-control source
+    // through the compositor's shared selection.
     let server_mimes = T::mimes(&mut f.testwl);
     for mime in mimes.iter() {
         assert!(server_mimes.contains(&mime.mime_type));
@@ -1524,6 +1572,49 @@ fn copy_from_x11_without_x11_focus<T: SelectionTest>() {
     assert_eq!(*mimes, data);
 }
 
+fn copy_from_x11_after_focus_lost<T: SelectionTest>() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let win = Window::new(1);
+    let (_surface, _id) = f.create_toplevel(&comp, win);
+    assert!(
+        f.satellite.last_kb_serial.is_some(),
+        "focus should have recorded a keyboard serial"
+    );
+
+    f.testwl.unfocus_toplevel();
+    f.run();
+    assert_eq!(f.testwl.get_focused(), None);
+    assert!(
+        f.satellite.last_kb_serial.is_some(),
+        "the remembered keyboard serial should survive losing focus"
+    );
+
+    let mimes = std::rc::Rc::new(vec![
+        testwl::PasteData {
+            mime_type: "text".to_string(),
+            data: b"written-while-unfocused".to_vec(),
+        },
+        testwl::PasteData {
+            mime_type: "data".to_string(),
+            data: vec![1, 2, 3, 4, 6, 10],
+        },
+    ]);
+
+    f.satellite.set_selection_source::<T::SelectionType>(&mimes);
+    f.run();
+
+    let server_mimes = T::mimes(&mut f.testwl);
+    for mime in mimes.iter() {
+        assert!(server_mimes.contains(&mime.mime_type));
+    }
+
+    let data = T::paste_data(&mut f.testwl, |_, _| {
+        f.satellite.run();
+        true
+    });
+    assert_eq!(*mimes, data);
+}
+
 fn copy_from_x11_without_ext_data_control<T: SelectionTest>() {
     let mut f = TestFixture::new_pre_connect(|testwl| {
         testwl.disable_ext_data_control_global();
@@ -1541,9 +1632,15 @@ fn copy_from_x11_without_ext_data_control<T: SelectionTest>() {
 
     assert_eq!(T::backend(&f.testwl), Some(testwl::SelectionBackend::Core));
     assert_eq!(T::mimes(&mut f.testwl), vec!["text"]);
+
+    let data = T::paste_data(&mut f.testwl, |_, _| {
+        f.satellite.run();
+        true
+    });
+    assert_eq!(*mimes, data);
 }
 
-fn selection_ext_then_core<T: SelectionTest>() {
+fn selection_replacement_keeps_ext<T: SelectionTest>() {
     let (mut f, comp) = TestFixture::new_with_compositor();
     let initial = std::rc::Rc::new(vec![testwl::PasteData {
         mime_type: "initial".to_string(),
@@ -1556,23 +1653,213 @@ fn selection_ext_then_core<T: SelectionTest>() {
         T::backend(&f.testwl),
         Some(testwl::SelectionBackend::ExtDataControl)
     );
+    assert_eq!(T::mimes(&mut f.testwl), vec!["initial"]);
+    let data = T::paste_data(&mut f.testwl, |_, _| {
+        f.satellite.run();
+        true
+    });
+    assert_eq!(*initial, data);
 
+    // Focus and a remembered serial arrive after the first control publication.
     let win = Window::new(1);
     let (_surface, _id) = f.create_toplevel(&comp, win);
     let replacement = std::rc::Rc::new(vec![testwl::PasteData {
         mime_type: "replacement".to_string(),
-        data: b"core".to_vec(),
+        data: b"still-ext".to_vec(),
     }]);
     f.satellite
         .set_selection_source::<T::SelectionType>(&replacement);
     f.run();
 
-    assert_eq!(T::backend(&f.testwl), Some(testwl::SelectionBackend::Core));
+    assert_eq!(
+        T::backend(&f.testwl),
+        Some(testwl::SelectionBackend::ExtDataControl)
+    );
     assert_eq!(T::mimes(&mut f.testwl), vec!["replacement"]);
+
+    let data = T::paste_data(&mut f.testwl, |_, _| {
+        f.satellite.run();
+        true
+    });
+    assert_eq!(*replacement, data);
+}
+
+fn receive_foreign_selection<T: SelectionTest>(
+    f: &mut TestFixture<FakeXConnection>,
+    mimes: &[testwl::PasteData],
+) {
+    let selection = f
+        .satellite
+        .new_selection::<T::SelectionType>()
+        .expect("No new selection");
+
+    for mime in mimes {
+        let data = {
+            let satellite = &f.satellite;
+            let testwl = &mut f.testwl;
+            std::thread::scope(|s| {
+                // receive requires a queue flush - dispatch testwl from another thread
+                s.spawn(|| {
+                    let pollfd = unsafe { BorrowedFd::borrow_raw(testwl.poll_fd().as_raw_fd()) };
+                    let mut pollfd = [PollFd::from_borrowed_fd(pollfd, PollFlags::IN)];
+                    let timeout = timespec_from_millis(100);
+                    if poll(&mut pollfd, Some(&timeout)).unwrap() == 0 {
+                        panic!("Did not get events for testwl!");
+                    }
+                    testwl.dispatch();
+                    while poll(&mut pollfd, Some(&timeout)).unwrap() > 0 {
+                        testwl.dispatch();
+                    }
+                });
+                selection.receive(mime.mime_type.clone(), satellite)
+            })
+        };
+        f.run();
+        assert_eq!(data, mime.data);
+    }
+}
+
+fn wayland_offer_after_x11_write_without_refocus<T: SelectionTest>() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let win = Window::new(1);
+    let (_surface, _id) = f.create_toplevel(&comp, win);
+    assert!(
+        f.satellite.last_kb_serial.is_some(),
+        "focus should have recorded a keyboard serial"
+    );
+
+    // Model focus moving from the X11 window to a native Wayland window: no
+    // surface has keyboard focus, but the remembered serial is still around.
+    f.testwl.unfocus_toplevel();
+    f.run();
+    assert_eq!(f.testwl.get_focused(), None);
+    assert!(
+        f.satellite.last_kb_serial.is_some(),
+        "the remembered keyboard serial should survive losing focus"
+    );
+
+    // An X11 client that has been focused earlier writes the X11 selection while
+    // X11 no longer has focus. This publishes the X11 source via data-control.
+    let x11data = std::rc::Rc::new(vec![testwl::PasteData {
+        mime_type: "text".to_string(),
+        data: b"stale".to_vec(),
+    }]);
+    f.satellite
+        .set_selection_source::<T::SelectionType>(&x11data);
+    f.run();
+
+    // A background Wayland client then takes the selection. The data-control
+    // device must deliver the offer even though this client is unfocused.
+    let waylanddata = vec![
+        testwl::PasteData {
+            mime_type: "text/plain".to_string(),
+            data: b"fresh".to_vec(),
+        },
+        testwl::PasteData {
+            mime_type: "application/x-test".to_string(),
+            data: vec![9, 8, 7],
+        },
+    ];
+    T::create_control_offer(&mut f.testwl, waylanddata.clone());
+    f.run();
+    f.run();
+
+    assert_eq!(f.testwl.get_focused(), None);
+    receive_foreign_selection::<T>(&mut f, &waylanddata);
+
+    // A later background copy must be delivered too, not just the first offer
+    // after the X11 source was replaced.
+    let replacement = vec![testwl::PasteData {
+        mime_type: "text/plain".to_string(),
+        data: b"fresh-again".to_vec(),
+    }];
+    T::create_control_offer(&mut f.testwl, replacement.clone());
+    f.run();
+    f.run();
+    assert_eq!(f.testwl.get_focused(), None);
+    receive_foreign_selection::<T>(&mut f, &replacement);
+}
+
+fn cancelled_control_source_allows_wayland_offer<T: SelectionTest>() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let win = Window::new(1);
+    let (_surface, _id) = f.create_toplevel(&comp, win);
+    f.testwl.unfocus_toplevel();
+    f.run();
+
+    let x11data = std::rc::Rc::new(vec![testwl::PasteData {
+        mime_type: "text".to_string(),
+        data: b"x11".to_vec(),
+    }]);
+    f.satellite
+        .set_selection_source::<T::SelectionType>(&x11data);
+    f.run();
+    assert_eq!(
+        T::backend(&f.testwl),
+        Some(testwl::SelectionBackend::ExtDataControl)
+    );
+
+    // Losing the source without a replacement must clear the slot rather than
+    // parking it forever.
+    T::cancel_control_selection(&mut f.testwl);
+    f.run();
+    f.run();
+
+    let waylanddata = vec![testwl::PasteData {
+        mime_type: "text/plain".to_string(),
+        data: b"after-cancel".to_vec(),
+    }];
+    T::create_control_offer(&mut f.testwl, waylanddata.clone());
+    f.run();
+    f.run();
+    receive_foreign_selection::<T>(&mut f, &waylanddata);
+}
+
+fn own_control_selection_echo_is_ignored<T: SelectionTest>() {
+    let (mut f, comp) = TestFixture::new_with_compositor();
+    let win = Window::new(1);
+    let (_surface, _id) = f.create_toplevel(&comp, win);
+    f.testwl.unfocus_toplevel();
+    f.run();
+
+    let mimes = std::rc::Rc::new(vec![testwl::PasteData {
+        mime_type: "text".to_string(),
+        data: b"own".to_vec(),
+    }]);
+    f.satellite.set_selection_source::<T::SelectionType>(&mimes);
+    f.run();
+    assert_eq!(
+        T::backend(&f.testwl),
+        Some(testwl::SelectionBackend::ExtDataControl)
+    );
+
+    // Some compositors re-announce the client's own selection back to it. That
+    // must not be mistaken for a new Wayland selection.
+    T::echo_control_selection(&mut f.testwl);
+    f.run();
+    f.run();
+
+    assert!(
+        f.satellite.new_selection::<T::SelectionType>().is_none(),
+        "own selection was accepted as a foreign offer"
+    );
+    assert_eq!(T::control_mimes(&mut f.testwl), vec!["text"]);
+
+    let data = T::control_paste_data(&mut f.testwl, |_, _| {
+        f.satellite.run();
+        true
+    });
+    assert_eq!(*mimes, data);
 }
 
 fn copy_from_wayland<T: SelectionTest>() {
-    let (mut f, comp) = TestFixture::new_with_compositor();
+    // With ext-data-control available the bridge reads foreign selections through
+    // the control device. This exercises the core data-device fallback that must
+    // remain for compositors without the protocol.
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.disable_ext_data_control_global();
+    });
+    let comp = f.compositor();
     TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
     let win = Window::new(1);
     let (_surface, _id) = f.create_toplevel(&comp, win);
@@ -1617,7 +1904,12 @@ fn copy_from_wayland<T: SelectionTest>() {
 }
 
 fn selection_x11_then_wayland<T: SelectionTest>() {
-    let (mut f, comp) = TestFixture::new_with_compositor();
+    // Keep both directions of the core-only fallback covered: the X11 source is
+    // published with the keyboard serial, then replaced by a core offer.
+    let mut f = TestFixture::new_pre_connect(|testwl| {
+        testwl.disable_ext_data_control_global();
+    });
+    let comp = f.compositor();
     TestObject::<WlKeyboard>::from_request(&comp.seat.obj, wl_seat::Request::GetKeyboard {});
     let win = Window::new(1);
     let (_surface, _id) = f.create_toplevel(&comp, win);
